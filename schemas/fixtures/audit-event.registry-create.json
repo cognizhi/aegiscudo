@@ -1,0 +1,10 @@
+{
+  "id": "00000000-0000-0000-0000-000000000401",
+  "tenant_id": "00000000-0000-0000-0000-000000000001",
+  "actor": "platform-admin@example.com",
+  "action": "registry_config.created",
+  "resource": "registry_config/npm-public",
+  "trace_id": "trace-audit",
+  "occurred_at": "2026-05-06T00:00:00Z",
+  "metadata": { "credential_ref": "00000000-0000-0000-0000-000000000501" }
+}

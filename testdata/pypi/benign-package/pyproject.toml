@@ -1,0 +1,5 @@
+[project]
+name = "aegiscudo-benign-pypi-fixture"
+version = "1.0.0"
+description = "Safe PyPI fixture for proxy and scanner tests"
+requires-python = ">=3.12"

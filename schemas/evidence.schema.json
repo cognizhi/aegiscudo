@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.aegiscudo.local/evidence.schema.json",
+  "title": "AegiscudoStaticEvidence",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["artifact_digest", "analyzer_version", "rule_set_version", "indicators"],
+  "properties": {
+    "artifact_digest": { "$ref": "#/$defs/digest" },
+    "analyzer_version": { "type": "string", "minLength": 1 },
+    "rule_set_version": { "type": "string", "minLength": 1 },
+    "indicators": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["indicator_type", "severity", "file_path", "start_line", "end_line", "redacted", "summary"],
+        "properties": {
+          "indicator_type": { "type": "string", "minLength": 1 },
+          "severity": { "enum": ["info", "low", "medium", "high", "critical"] },
+          "file_path": { "type": "string", "minLength": 1 },
+          "start_line": { "type": "integer", "minimum": 1 },
+          "end_line": { "type": "integer", "minimum": 1 },
+          "redacted": { "type": "boolean" },
+          "summary": { "type": "string", "minLength": 1 }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "digest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["algorithm", "hex"],
+      "properties": {
+        "algorithm": { "const": "sha256" },
+        "hex": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+      }
+    }
+  }
+}

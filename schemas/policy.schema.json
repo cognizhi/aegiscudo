@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.aegiscudo.local/policy.schema.json",
+  "title": "AegiscudoPolicyProfile",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "tenant_id", "version", "mode", "minimum_release_age_hours", "fail_closed", "rules"],
+  "properties": {
+    "id": { "type": "string", "format": "uuid" },
+    "tenant_id": { "type": "string", "format": "uuid" },
+    "version": { "type": "string", "minLength": 1 },
+    "mode": { "enum": ["shadow", "warn", "enforce"] },
+    "minimum_release_age_hours": { "type": "integer", "minimum": 0 },
+    "fail_closed": { "type": "boolean" },
+    "rules": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "signal", "action", "enabled"],
+        "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "signal": { "type": "string", "minLength": 1 },
+          "action": { "enum": ["allow", "warn", "quarantine", "block", "hitl", "fallback"] },
+          "enabled": { "type": "boolean" }
+        }
+      }
+    }
+  }
+}

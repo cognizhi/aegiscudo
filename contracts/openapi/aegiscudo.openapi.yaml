@@ -1,0 +1,41 @@
+openapi: 3.1.0
+info:
+  title: Aegiscudo API
+  version: 0.1.0
+  summary: Initial public and internal API contract skeleton for Command Center and aedo-cli.
+paths:
+  /healthz:
+    get:
+      operationId: getHealth
+      responses:
+        "200":
+          description: Service health response
+  /v1/decisions/evaluate:
+    post:
+      operationId: evaluateDecision
+      responses:
+        "200":
+          description: Deterministic policy decision
+  /v1/registry-configs:
+    get:
+      operationId: listRegistryConfigs
+      responses:
+        "200":
+          description: Registry configuration list
+    post:
+      operationId: createRegistryConfig
+      responses:
+        "201":
+          description: Registry configuration created
+  /v1/audit-events:
+    get:
+      operationId: listAuditEvents
+      responses:
+        "200":
+          description: Append-only audit event page
+  /v1/cli/scans:
+    post:
+      operationId: submitCliScan
+      responses:
+        "202":
+          description: Scan accepted

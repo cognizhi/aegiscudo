@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.aegiscudo.local/decision.schema.json",
+  "title": "AegiscudoDecisionResponse",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["decision", "tenant_id", "policy_profile_id", "policy_snapshot_id", "feed_state", "feed_snapshot_age_seconds", "trace_id", "rationale", "create_analysis_job"],
+  "properties": {
+    "decision": { "$ref": "#/$defs/policyDecision" },
+    "tenant_id": { "type": "string", "format": "uuid" },
+    "policy_profile_id": { "type": "string", "format": "uuid" },
+    "policy_snapshot_id": { "type": "string", "format": "uuid" },
+    "feed_state": { "enum": ["fresh", "stale", "degraded", "unavailable"] },
+    "feed_snapshot_age_seconds": { "type": "integer", "minimum": 0 },
+    "trace_id": { "type": "string", "minLength": 1 },
+    "rationale": { "type": "array", "items": { "type": "string" } },
+    "fallback_coordinate": { "$ref": "#/$defs/packageCoordinate" },
+    "create_analysis_job": { "type": "boolean" }
+  },
+  "$defs": {
+    "policyDecision": {
+      "enum": [
+        "ALLOW",
+        "ALLOW_WITH_WARNING",
+        "QUARANTINE_PENDING_ANALYSIS",
+        "BLOCK_KNOWN_MALICIOUS",
+        "BLOCK_POLICY_VIOLATION",
+        "REQUIRE_HITL_APPROVAL",
+        "FALLBACK_TO_APPROVED_CANDIDATE"
+      ]
+    },
+    "packageCoordinate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ecosystem", "name"],
+      "properties": {
+        "ecosystem": { "enum": ["npm", "pypi", "cargo", "maven", "docker-oci", "generic-http"] },
+        "name": { "type": "string", "minLength": 1 },
+        "version": { "type": "string", "minLength": 1 },
+        "namespace": { "type": "string", "minLength": 1 }
+      }
+    }
+  }
+}

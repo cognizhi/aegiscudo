@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.aegiscudo.local/feed-snapshot.schema.json",
+  "title": "AegiscudoFeedSnapshot",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "feed_name", "state", "normalized_record_count", "snapshot_digest"],
+  "properties": {
+    "id": { "type": "string", "format": "uuid" },
+    "feed_name": { "type": "string", "minLength": 1 },
+    "state": { "enum": ["fresh", "stale", "degraded", "unavailable"] },
+    "normalized_record_count": { "type": "integer", "minimum": 0 },
+    "last_success_at": { "type": "string", "format": "date-time" },
+    "snapshot_digest": { "$ref": "#/$defs/digest" }
+  },
+  "$defs": {
+    "digest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["algorithm", "hex"],
+      "properties": { "algorithm": { "const": "sha256" }, "hex": { "type": "string", "pattern": "^[a-f0-9]{64}$" } }
+    }
+  }
+}

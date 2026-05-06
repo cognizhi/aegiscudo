@@ -1,0 +1,40 @@
+.env
+.env.*
+!.env.example
+
+# Rust
+target/
+Cargo.lock.tmp
+
+# Node
+node_modules/
+.next/
+out/
+dist/
+coverage/
+playwright-report/
+test-results/
+*.tsbuildinfo
+
+# Python
+.venv/
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+*.py[cod]
+
+# Local infrastructure and sandboxes
+.data/
+.tmp/
+tmp/
+local-object-store/
+sandbox-workdir/
+infra/buckets/*
+!infra/buckets/.gitkeep
+
+# Editors and OS
+.DS_Store
+.idea/
+.vscode/
+!.vscode/extensions.json

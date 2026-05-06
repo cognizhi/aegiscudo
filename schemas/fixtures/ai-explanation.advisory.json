@@ -1,0 +1,12 @@
+{
+  "provider": "local-mock",
+  "model": "mock-security-analyst",
+  "prompt_template_version": "langfuse:mvp-advisory@1",
+  "observed_behavior": ["Lifecycle script invokes child_process"],
+  "inference": ["Execution behavior is consistent with installer-time payload delivery"],
+  "limitations": ["No sandbox telemetry is attached to this example"],
+  "advisory_only": true,
+  "evidence_hash": { "algorithm": "sha256", "hex": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" },
+  "output_hash": { "algorithm": "sha256", "hex": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc" },
+  "langfuse_trace_id": "trace-langfuse-001"
+}

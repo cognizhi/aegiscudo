@@ -1,0 +1,11 @@
+{
+  "decision": "ALLOW",
+  "tenant_id": "00000000-0000-0000-0000-000000000001",
+  "policy_profile_id": "00000000-0000-0000-0000-000000000101",
+  "policy_snapshot_id": "00000000-0000-0000-0000-000000000201",
+  "feed_state": "fresh",
+  "feed_snapshot_age_seconds": 60,
+  "trace_id": "trace-allow",
+  "rationale": ["previously approved artifact"],
+  "create_analysis_job": false
+}

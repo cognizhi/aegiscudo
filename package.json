@@ -1,0 +1,27 @@
+{
+  "name": "aegiscudo",
+  "version": "0.1.0",
+  "description": "Foundation workspace for the Aegiscudo software supply chain security platform.",
+  "license": "MIT",
+  "private": true,
+  "packageManager": "pnpm@10.33.3",
+  "engines": {
+    "node": ">=20.9.0"
+  },
+  "scripts": {
+    "build": "pnpm --recursive --if-present build",
+    "dev": "pnpm --filter @aegiscudo/command-center dev",
+    "lint": "pnpm --recursive --if-present lint",
+    "openapi:generate": "openapi-typescript contracts/openapi/aegiscudo.openapi.yaml -o packages/shared-types/src/generated/aegiscudo-api.ts",
+    "openapi:check": "pnpm openapi:generate && git diff --exit-code -- packages/shared-types/src/generated/aegiscudo-api.ts",
+    "typecheck": "pnpm --recursive --if-present typecheck",
+    "test": "pnpm --recursive --if-present test",
+    "playwright": "pnpm --filter @aegiscudo/command-center playwright",
+    "schema:validate": "node scripts/validate-schemas.mjs"
+  },
+  "devDependencies": {
+    "ajv": "8.20.0",
+    "ajv-formats": "3.0.1",
+    "openapi-typescript": "7.13.0"
+  }
+}

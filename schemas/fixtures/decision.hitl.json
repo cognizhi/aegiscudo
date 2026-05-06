@@ -1,0 +1,11 @@
+{
+  "decision": "REQUIRE_HITL_APPROVAL",
+  "tenant_id": "00000000-0000-0000-0000-000000000001",
+  "policy_profile_id": "00000000-0000-0000-0000-000000000101",
+  "policy_snapshot_id": "00000000-0000-0000-0000-000000000201",
+  "feed_state": "fresh",
+  "feed_snapshot_age_seconds": 40,
+  "trace_id": "trace-hitl",
+  "rationale": ["human approval required"],
+  "create_analysis_job": false
+}

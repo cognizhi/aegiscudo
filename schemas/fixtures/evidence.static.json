@@ -1,0 +1,16 @@
+{
+  "artifact_digest": { "algorithm": "sha256", "hex": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" },
+  "analyzer_version": "0.1.0",
+  "rule_set_version": "mvp-static-rules-2026-05",
+  "indicators": [
+    {
+      "indicator_type": "javascript-eval",
+      "severity": "high",
+      "file_path": "index.js",
+      "start_line": 3,
+      "end_line": 3,
+      "redacted": true,
+      "summary": "JavaScript eval usage"
+    }
+  ]
+}

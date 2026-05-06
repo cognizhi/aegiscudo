@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.aegiscudo.local/ai-explanation.schema.json",
+  "title": "AegiscudoAiExplanation",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["provider", "model", "prompt_template_version", "observed_behavior", "inference", "limitations", "advisory_only", "evidence_hash", "output_hash"],
+  "properties": {
+    "provider": { "type": "string", "minLength": 1 },
+    "model": { "type": "string", "minLength": 1 },
+    "prompt_template_version": { "type": "string", "minLength": 1 },
+    "observed_behavior": { "type": "array", "items": { "type": "string" } },
+    "inference": { "type": "array", "items": { "type": "string" } },
+    "limitations": { "type": "array", "items": { "type": "string" } },
+    "advisory_only": { "const": true },
+    "evidence_hash": { "$ref": "#/$defs/digest" },
+    "output_hash": { "$ref": "#/$defs/digest" },
+    "langfuse_trace_id": { "type": "string", "minLength": 1 }
+  },
+  "$defs": {
+    "digest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["algorithm", "hex"],
+      "properties": { "algorithm": { "const": "sha256" }, "hex": { "type": "string", "pattern": "^[a-f0-9]{64}$" } }
+    }
+  }
+}

@@ -1,0 +1,27 @@
+name: Security
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "17 3 * * *"
+
+jobs:
+  dependency-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+      - uses: pnpm/action-setup@v5
+        with:
+          version: 10.33.3
+      - uses: astral-sh/setup-uv@v7
+      - run: cargo install cargo-audit --locked
+      - run: cargo audit
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm audit --audit-level high
+      - run: uv sync --dev
+      - run: uv run pip-audit

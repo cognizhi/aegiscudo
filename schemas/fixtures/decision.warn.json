@@ -1,0 +1,11 @@
+{
+  "decision": "ALLOW_WITH_WARNING",
+  "tenant_id": "00000000-0000-0000-0000-000000000001",
+  "policy_profile_id": "00000000-0000-0000-0000-000000000101",
+  "policy_snapshot_id": "00000000-0000-0000-0000-000000000201",
+  "feed_state": "stale",
+  "feed_snapshot_age_seconds": 90000,
+  "trace_id": "trace-warn",
+  "rationale": ["attestation missing"],
+  "create_analysis_job": false
+}

@@ -1,0 +1,7 @@
+{
+  "name": "aegiscudo-benign-npm-fixture",
+  "version": "1.0.0",
+  "description": "Safe npm fixture for proxy and scanner tests",
+  "scripts": {},
+  "main": "index.js"
+}

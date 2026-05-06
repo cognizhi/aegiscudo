@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.aegiscudo.local/audit-event.schema.json",
+  "title": "AegiscudoAuditEvent",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "tenant_id", "actor", "action", "resource", "trace_id", "occurred_at", "metadata"],
+  "properties": {
+    "id": { "type": "string", "format": "uuid" },
+    "tenant_id": { "type": "string", "format": "uuid" },
+    "actor": { "type": "string", "minLength": 1 },
+    "action": { "type": "string", "minLength": 1 },
+    "resource": { "type": "string", "minLength": 1 },
+    "trace_id": { "type": "string", "minLength": 1 },
+    "occurred_at": { "type": "string", "format": "date-time" },
+    "metadata": { "type": "object" }
+  }
+}

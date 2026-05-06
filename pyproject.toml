@@ -1,0 +1,47 @@
+[project]
+name = "aegiscudo-python-services"
+version = "0.1.0"
+description = "Python service foundations for Aegiscudo AI and sandbox orchestration."
+requires-python = ">=3.12"
+dependencies = [
+  "fastapi>=0.115",
+  "google-genai>=1.0",
+  "httpx>=0.28",
+  "langfuse>=3.0",
+  "orjson>=3.10",
+  "pydantic>=2.10",
+  "pydantic-settings>=2.7",
+  "structlog>=25.0",
+  "tenacity>=9.0",
+  "uvicorn[standard]>=0.34",
+]
+
+[dependency-groups]
+dev = [
+  "mypy>=1.18",
+  "pip-audit>=2.9",
+  "pytest>=8.4",
+  "pytest-asyncio>=1.0",
+  "ruff>=0.14",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "S", "UP", "B"]
+ignore = ["S101"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+pretty = true
+explicit_package_bases = true
+mypy_path = ["services/python-common/src", "services/emergency-room/src", "services/ai-analyst/src"]
+exclude = ["^services/.*/tests/.*$"]
+
+[tool.pytest.ini_options]
+testpaths = ["services/python-common/tests", "services/emergency-room/tests", "services/ai-analyst/tests"]
+pythonpath = ["services/python-common/src", "services/emergency-room/src", "services/ai-analyst/src"]
+asyncio_mode = "auto"

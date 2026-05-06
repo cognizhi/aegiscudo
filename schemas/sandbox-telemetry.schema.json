@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.aegiscudo.local/sandbox-telemetry.schema.json",
+  "title": "AegiscudoSandboxTelemetry",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["run_id", "profile", "phase", "egress_mode", "events"],
+  "properties": {
+    "run_id": { "type": "string", "format": "uuid" },
+    "profile": { "enum": ["npm-install-profile", "python-install-profile"] },
+    "phase": { "enum": ["A", "B", "C", "D", "E", "F", "G", "H"] },
+    "egress_mode": { "enum": ["deny-all", "registry-only", "monitored-proxy"] },
+    "events": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["type", "severity", "message"],
+        "properties": {
+          "type": { "type": "string", "minLength": 1 },
+          "severity": { "enum": ["info", "low", "medium", "high", "critical"] },
+          "message": { "type": "string", "minLength": 1 }
+        }
+      }
+    }
+  }
+}

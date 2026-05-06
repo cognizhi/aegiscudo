@@ -1,0 +1,9 @@
+{
+  "run_id": "00000000-0000-0000-0000-000000000301",
+  "profile": "npm-install-profile",
+  "phase": "E",
+  "egress_mode": "deny-all",
+  "events": [
+    { "type": "canary-access", "severity": "critical", "message": "package read fake .npmrc canary" }
+  ]
+}

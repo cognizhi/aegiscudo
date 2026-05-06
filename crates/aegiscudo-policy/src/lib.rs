@@ -1,0 +1,237 @@
+use aegiscudo_core::{FeedState, PackageCoordinate, PolicyDecision};
+use aegiscudo_protocol::DecisionResponse;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct PolicyInput {
+    pub tenant_id: Uuid,
+    pub policy_profile_id: Uuid,
+    pub policy_snapshot_id: Uuid,
+    pub coordinate: PackageCoordinate,
+    pub trace_id: String,
+    #[serde(default)]
+    pub known_safe_verdict: bool,
+    #[serde(default)]
+    pub known_malicious: bool,
+    #[serde(default)]
+    pub vulnerable_above_threshold: bool,
+    #[serde(default)]
+    pub minimum_release_age_violation: bool,
+    #[serde(default)]
+    pub install_script_detected: bool,
+    #[serde(default)]
+    pub dependency_confusion_risk: bool,
+    #[serde(default)]
+    pub typosquat_risk: bool,
+    #[serde(default)]
+    pub missing_or_failed_attestation: bool,
+    #[serde(default)]
+    pub ai_agent_injection_indicator: bool,
+    #[serde(default)]
+    pub unknown_artifact: bool,
+    #[serde(default)]
+    pub hitl_required: bool,
+    #[serde(default)]
+    pub active_override: bool,
+    #[serde(default)]
+    pub emergency_bypass: bool,
+    #[serde(default)]
+    pub fallback_eligible: bool,
+    #[serde(default)]
+    pub fallback_candidate: Option<PackageCoordinate>,
+    #[serde(default = "default_feed_state")]
+    pub feed_state: FeedState,
+    #[serde(default)]
+    pub feed_snapshot_age_seconds: u64,
+}
+
+fn default_feed_state() -> FeedState {
+    FeedState::Fresh
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct DecisionEngine;
+
+impl DecisionEngine {
+    pub fn evaluate(&self, input: PolicyInput) -> DecisionResponse {
+        let mut rationale = Vec::new();
+
+        let (decision, fallback_coordinate, create_analysis_job) = if input.active_override
+            || input.emergency_bypass
+        {
+            rationale.push("time-bound override or emergency bypass is active".to_owned());
+            (PolicyDecision::AllowWithWarning, None, false)
+        } else if input.known_malicious {
+            rationale.push("known malicious package or artifact match".to_owned());
+            (PolicyDecision::BlockKnownMalicious, None, false)
+        } else if input.dependency_confusion_risk
+            || input.typosquat_risk
+            || input.ai_agent_injection_indicator
+            || input.minimum_release_age_violation
+        {
+            if input.dependency_confusion_risk {
+                rationale.push("dependency confusion namespace risk".to_owned());
+            }
+            if input.typosquat_risk {
+                rationale.push("typosquatting similarity risk".to_owned());
+            }
+            if input.ai_agent_injection_indicator {
+                rationale.push("AI agent instruction injection indicator".to_owned());
+            }
+            if input.minimum_release_age_violation {
+                rationale.push("minimum release age policy violation".to_owned());
+            }
+            (PolicyDecision::BlockPolicyViolation, None, false)
+        } else if input.hitl_required {
+            rationale.push("human approval is required by policy".to_owned());
+            (PolicyDecision::RequireHitlApproval, None, false)
+        } else if input.fallback_eligible && input.fallback_candidate.is_some() {
+            rationale.push(
+                "eligible resolver metadata flow can use approved fallback candidate".to_owned(),
+            );
+            (
+                PolicyDecision::FallbackToApprovedCandidate,
+                input.fallback_candidate.clone(),
+                false,
+            )
+        } else if input.unknown_artifact {
+            rationale.push("unknown artifact requires asynchronous analysis".to_owned());
+            (PolicyDecision::QuarantinePendingAnalysis, None, true)
+        } else if input.vulnerable_above_threshold
+            || input.install_script_detected
+            || input.missing_or_failed_attestation
+        {
+            if input.vulnerable_above_threshold {
+                rationale.push("known vulnerability exceeds warning threshold".to_owned());
+            }
+            if input.install_script_detected {
+                rationale.push("install or lifecycle script requires review".to_owned());
+            }
+            if input.missing_or_failed_attestation {
+                rationale.push("attestation is missing, failed, or unverifiable".to_owned());
+            }
+            (PolicyDecision::AllowWithWarning, None, false)
+        } else {
+            rationale.push("no blocking policy signal matched".to_owned());
+            (PolicyDecision::Allow, None, false)
+        };
+
+        DecisionResponse {
+            decision,
+            tenant_id: input.tenant_id,
+            policy_profile_id: input.policy_profile_id,
+            policy_snapshot_id: input.policy_snapshot_id,
+            feed_state: input.feed_state,
+            feed_snapshot_age_seconds: input.feed_snapshot_age_seconds,
+            trace_id: input.trace_id,
+            rationale,
+            fallback_coordinate,
+            create_analysis_job,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use aegiscudo_core::PackageEcosystem;
+
+    fn base_input() -> PolicyInput {
+        PolicyInput {
+            tenant_id: Uuid::now_v7(),
+            policy_profile_id: Uuid::now_v7(),
+            policy_snapshot_id: Uuid::now_v7(),
+            coordinate: PackageCoordinate::new(
+                PackageEcosystem::Npm,
+                "left-pad",
+                Some("1.3.0"),
+                None::<String>,
+            ),
+            trace_id: "trace-1".to_owned(),
+            known_safe_verdict: false,
+            known_malicious: false,
+            vulnerable_above_threshold: false,
+            minimum_release_age_violation: false,
+            install_script_detected: false,
+            dependency_confusion_risk: false,
+            typosquat_risk: false,
+            missing_or_failed_attestation: false,
+            ai_agent_injection_indicator: false,
+            unknown_artifact: false,
+            hitl_required: false,
+            active_override: false,
+            emergency_bypass: false,
+            fallback_eligible: false,
+            fallback_candidate: None,
+            feed_state: FeedState::Fresh,
+            feed_snapshot_age_seconds: 0,
+        }
+    }
+
+    fn evaluate(mut input: PolicyInput) -> PolicyDecision {
+        let engine = DecisionEngine;
+        input.trace_id = "test-trace".to_owned();
+        engine.evaluate(input).decision
+    }
+
+    #[test]
+    fn returns_all_decision_states() {
+        assert_eq!(evaluate(base_input()), PolicyDecision::Allow);
+
+        let mut warn = base_input();
+        warn.install_script_detected = true;
+        assert_eq!(evaluate(warn), PolicyDecision::AllowWithWarning);
+
+        let mut quarantine = base_input();
+        quarantine.unknown_artifact = true;
+        assert_eq!(
+            evaluate(quarantine),
+            PolicyDecision::QuarantinePendingAnalysis
+        );
+
+        let mut malicious = base_input();
+        malicious.known_malicious = true;
+        assert_eq!(evaluate(malicious), PolicyDecision::BlockKnownMalicious);
+
+        let mut policy = base_input();
+        policy.minimum_release_age_violation = true;
+        assert_eq!(evaluate(policy), PolicyDecision::BlockPolicyViolation);
+
+        let mut hitl = base_input();
+        hitl.hitl_required = true;
+        assert_eq!(evaluate(hitl), PolicyDecision::RequireHitlApproval);
+
+        let mut fallback = base_input();
+        fallback.fallback_eligible = true;
+        fallback.fallback_candidate = Some(PackageCoordinate::new(
+            PackageEcosystem::Npm,
+            "left-pad",
+            Some("1.2.0"),
+            None::<String>,
+        ));
+        assert_eq!(
+            evaluate(fallback),
+            PolicyDecision::FallbackToApprovedCandidate
+        );
+    }
+
+    #[test]
+    fn override_precedes_known_malicious_but_warns() {
+        let mut input = base_input();
+        input.active_override = true;
+        input.known_malicious = true;
+        assert_eq!(evaluate(input), PolicyDecision::AllowWithWarning);
+    }
+
+    #[test]
+    fn stale_feed_state_is_preserved() {
+        let mut input = base_input();
+        input.feed_state = FeedState::Stale;
+        input.feed_snapshot_age_seconds = 86_500;
+        let response = DecisionEngine.evaluate(input);
+        assert_eq!(response.feed_state, FeedState::Stale);
+        assert_eq!(response.feed_snapshot_age_seconds, 86_500);
+    }
+}

@@ -1,0 +1,12 @@
+{
+  "id": "00000000-0000-0000-0000-000000000101",
+  "tenant_id": "00000000-0000-0000-0000-000000000001",
+  "version": "2026.05.0",
+  "mode": "enforce",
+  "minimum_release_age_hours": 24,
+  "fail_closed": true,
+  "rules": [
+    { "id": "known-malicious", "signal": "known_malicious", "action": "block", "enabled": true },
+    { "id": "missing-attestation", "signal": "missing_or_failed_attestation", "action": "warn", "enabled": true }
+  ]
+}

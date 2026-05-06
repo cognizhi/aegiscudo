@@ -1,0 +1,11 @@
+FROM rust:1-slim AS builder
+WORKDIR /workspace
+COPY . .
+RUN cargo build --release -p surgeon
+
+FROM gcr.io/distroless/cc-debian12
+ARG APP_VERSION=0.1.0
+ENV APP_VERSION=${APP_VERSION}
+COPY --from=builder /workspace/target/release/surgeon /usr/local/bin/surgeon
+USER nonroot:nonroot
+ENTRYPOINT ["/usr/local/bin/surgeon"]

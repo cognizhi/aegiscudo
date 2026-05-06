@@ -1,0 +1,5 @@
+{
+  "packages": [
+    { "ecosystem": "npm", "name": "aegiscudo-postinstall-fixture", "reason": "synthetic fixture" }
+  ]
+}

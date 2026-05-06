@@ -1,0 +1,12 @@
+{
+  "decision": "FALLBACK_TO_APPROVED_CANDIDATE",
+  "tenant_id": "00000000-0000-0000-0000-000000000001",
+  "policy_profile_id": "00000000-0000-0000-0000-000000000101",
+  "policy_snapshot_id": "00000000-0000-0000-0000-000000000201",
+  "feed_state": "fresh",
+  "feed_snapshot_age_seconds": 10,
+  "trace_id": "trace-fallback",
+  "rationale": ["eligible resolver metadata fallback"],
+  "fallback_coordinate": { "ecosystem": "npm", "name": "left-pad", "version": "1.2.0" },
+  "create_analysis_job": false
+}

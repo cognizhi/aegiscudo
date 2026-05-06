@@ -1,0 +1,12 @@
+{
+  "coordinate": { "ecosystem": "npm", "name": "left-pad", "version": "1.3.0" },
+  "artifact_digest": { "algorithm": "sha256", "hex": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" },
+  "attestation_type": "npm-publish-attestation",
+  "predicate_type": "https://slsa.dev/provenance/v1",
+  "issuer": "",
+  "subject_digest": { "algorithm": "sha256", "hex": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" },
+  "result": "missing",
+  "verified_at": "2026-05-06T00:00:00Z",
+  "verifier_version": "0.1.0",
+  "raw_document_digest": { "algorithm": "sha256", "hex": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" }
+}
