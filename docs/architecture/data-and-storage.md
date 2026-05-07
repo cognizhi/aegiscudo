@@ -2,7 +2,7 @@
 
 Source PRD sections: 3.5, 3.7, 4.3, 4.5, 4.8.
 
-Aegiscudo stores durable state in PostgreSQL, low-latency state in Redis or an equivalent queue/cache system, and large artifacts or reports in object storage.
+Aegiscudo stores durable state in PostgreSQL, low-latency state in Redis, and large artifacts or reports in object storage. The accepted MVP substrate choices are recorded in [ADR 0004](../adr/0004-mvp-cache-queue-and-object-storage-substrates.md).
 
 ## PostgreSQL
 
@@ -12,11 +12,11 @@ The initial schema includes `pgvector` so evidence embeddings can be added later
 
 ## Redis / Queue
 
-Redis is the MVP cache and queue choice for decision cache, metadata cache, rate-limit counters, analysis queue, and feed-ingestion coordination. A later NATS JetStream transition can be evaluated if queue durability requirements grow.
+Redis is the MVP cache and queue choice for decision cache, metadata cache, rate-limit counters, analysis queue, and feed-ingestion coordination. A later NATS JetStream transition requires a superseding ADR if queue durability or replay requirements grow beyond the MVP cut.
 
 ## Object Storage
 
-S3/GCS-compatible object storage holds original package archives, large evidence payloads, raw attestation snapshots, sandbox logs, SBOM exports, and reports. Local development uses MinIO-compatible storage.
+S3/GCS-compatible object storage holds original package archives, large evidence payloads, raw attestation snapshots, sandbox logs, SBOM exports, and reports. Local development uses MinIO-compatible storage as defined by [ADR 0004](../adr/0004-mvp-cache-queue-and-object-storage-substrates.md).
 
 ## Data Boundaries
 

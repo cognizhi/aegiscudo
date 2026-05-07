@@ -62,6 +62,7 @@ struct AuthLoginArgs {
 #[derive(Debug, Subcommand)]
 enum ScanCommand {
     Npm(NpmScanArgs),
+    Pnpm(PnpmScanArgs),
     Pypi(PypiScanArgs),
     Cargo(NotYetSupportedArgs),
     Maven(NotYetSupportedArgs),
@@ -70,6 +71,18 @@ enum ScanCommand {
 
 #[derive(Debug, Args)]
 struct NpmScanArgs {
+    #[arg(long)]
+    lockfile: PathBuf,
+    #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+    output_format: OutputFormat,
+    #[arg(long, value_enum, default_value_t = FailOn::Block)]
+    fail_on: FailOn,
+    #[arg(long, default_value_t = false)]
+    upload_manifest: bool,
+}
+
+#[derive(Debug, Args)]
+struct PnpmScanArgs {
     #[arg(long)]
     lockfile: PathBuf,
     #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
@@ -225,6 +238,16 @@ fn run_scan(command: ScanCommand) -> anyhow::Result<i32> {
             print_report(&report, args.output_format)?;
             Ok(exit_code(&report.findings, args.fail_on))
         }
+        ScanCommand::Pnpm(args) => {
+            let findings = parse_pnpm_lock(&args.lockfile)?;
+            let report = ScanReport {
+                source: args.lockfile.display().to_string(),
+                upload_manifest: args.upload_manifest,
+                findings,
+            };
+            print_report(&report, args.output_format)?;
+            Ok(exit_code(&report.findings, args.fail_on))
+        }
         ScanCommand::Pypi(args) => {
             let findings = parse_requirements(&args.requirements)?;
             let report = ScanReport {
@@ -240,6 +263,79 @@ fn run_scan(command: ScanCommand) -> anyhow::Result<i32> {
             Ok(3)
         }
     }
+}
+
+fn parse_pnpm_lock(path: &PathBuf) -> anyhow::Result<Vec<ScanFinding>> {
+    let contents =
+        fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+
+    let mut findings = Vec::new();
+    let mut in_packages = false;
+    let mut current_key: Option<String> = None;
+
+    for line in contents.lines() {
+        // Top-level YAML section header (no leading whitespace)
+        if !line.starts_with(' ') {
+            if !line.is_empty() {
+                in_packages = line == "packages:";
+                current_key = None;
+            }
+            continue;
+        }
+
+        if !in_packages {
+            continue;
+        }
+
+        // 2-space-indented package key: "  'name@version':" or "  name@version:"
+        if let Some(rest) = line.strip_prefix("  ") {
+            if !rest.starts_with(' ') && rest.ends_with(':') {
+                let key = rest.trim_end_matches(':').trim_matches('\'');
+                current_key = Some(key.to_owned());
+                continue;
+            }
+        }
+
+        // 4-space-indented resolution line: "    resolution: {integrity: sha512-...}"
+        if current_key.is_some() {
+            if let Some(rest) = line.strip_prefix("    resolution: {integrity: ") {
+                let integrity = rest
+                    .split_once([',', '}'])
+                    .map(|(v, _)| v)
+                    .unwrap_or_else(|| rest.trim_end_matches('}'));
+                let key = current_key.take().unwrap();
+                let (name, version) = split_pnpm_key(&key);
+                if !name.is_empty() && !version.is_empty() {
+                    findings.push(finding(
+                        PackageEcosystem::Npm,
+                        name,
+                        Some(version),
+                        Some(integrity.to_owned()),
+                    ));
+                }
+            }
+        }
+    }
+
+    Ok(findings)
+}
+
+/// Split a pnpm lockfile package key into (name, version).
+/// Keys follow the format `name@version` for unscoped packages and
+/// `@scope/name@version` for scoped packages.
+fn split_pnpm_key(key: &str) -> (String, String) {
+    if key.starts_with('@') {
+        // Scoped: find the '@' that comes after the first '/'
+        if let Some(slash) = key.find('/') {
+            if let Some(at) = key[slash + 1..].find('@') {
+                let sep = slash + 1 + at;
+                return (key[..sep].to_owned(), key[sep + 1..].to_owned());
+            }
+        }
+    } else if let Some(at) = key.find('@') {
+        return (key[..at].to_owned(), key[at + 1..].to_owned());
+    }
+    (key.to_owned(), String::new())
 }
 
 fn parse_package_lock(path: &PathBuf) -> anyhow::Result<Vec<ScanFinding>> {
@@ -396,6 +492,39 @@ mod tests {
         let findings = parse_package_lock(&path).unwrap();
         assert_eq!(findings[0].coordinate.purl(), "pkg:npm/scope/pkg@1.0.0");
         assert_eq!(findings[0].integrity.as_deref(), Some("sha512-x"));
+    }
+
+    #[test]
+    fn parses_pnpm_lock() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("pnpm-lock.yaml");
+        fs::write(
+            &path,
+            "lockfileVersion: '9.0'\n\npackages:\n\n  ajv@8.20.0:\n    resolution: {integrity: sha512-abc==}\n    engines: {node: '>=12.0.0'}\n\n  '@babel/core@7.29.0':\n    resolution: {integrity: sha512-xyz==}\n    engines: {node: '>=6.9.0'}\n\nsnapshots:\n",
+        )
+        .unwrap();
+        let findings = parse_pnpm_lock(&path).unwrap();
+        assert_eq!(findings.len(), 2);
+        assert_eq!(findings[0].coordinate.purl(), "pkg:npm/ajv@8.20.0");
+        assert_eq!(findings[0].integrity.as_deref(), Some("sha512-abc=="));
+        assert_eq!(findings[1].coordinate.purl(), "pkg:npm/babel/core@7.29.0");
+        assert_eq!(findings[1].integrity.as_deref(), Some("sha512-xyz=="));
+    }
+
+    #[test]
+    fn split_pnpm_key_unscoped() {
+        assert_eq!(
+            split_pnpm_key("ajv@8.20.0"),
+            ("ajv".to_owned(), "8.20.0".to_owned())
+        );
+    }
+
+    #[test]
+    fn split_pnpm_key_scoped() {
+        assert_eq!(
+            split_pnpm_key("@babel/core@7.29.0"),
+            ("@babel/core".to_owned(), "7.29.0".to_owned())
+        );
     }
 
     #[test]

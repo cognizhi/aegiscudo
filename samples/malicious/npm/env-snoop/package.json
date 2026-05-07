@@ -1,0 +1,11 @@
+{
+  "name": "env-snoop",
+  "version": "1.0.0",
+  "description": "Aegiscudo malicious npm fixture — env exfiltration via preinstall hook",
+  "main": "index.js",
+  "scripts": {
+    "preinstall": "node preinstall.js"
+  },
+  "keywords": [],
+  "license": "MIT"
+}

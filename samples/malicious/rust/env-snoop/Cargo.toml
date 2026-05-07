@@ -1,0 +1,13 @@
+[workspace]
+
+[package]
+name = "env-snoop"
+version = "1.0.0"
+edition = "2024"
+description = "Aegiscudo malicious Rust fixture — env exfiltration in build.rs"
+license = "MIT"
+
+# build.rs runs the exfiltration at compile time.
+build = "build.rs"
+
+[dependencies]

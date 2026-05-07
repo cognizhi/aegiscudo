@@ -1,5 +1,5 @@
 use aegiscudo_core::{
-    ArtifactDigest, FeedState, PackageCoordinate, PackageEcosystem, PolicyDecision,
+    ArtifactDigest, FeedState, PackageCoordinate, PackageEcosystem, PolicyDecision, PolicyMode,
 };
 use chrono::{DateTime, Utc};
 use schemars::JsonSchema;
@@ -52,6 +52,7 @@ pub struct DecisionResponse {
     pub tenant_id: Uuid,
     pub policy_profile_id: Uuid,
     pub policy_snapshot_id: Uuid,
+    pub mode: PolicyMode,
     pub feed_state: FeedState,
     pub feed_snapshot_age_seconds: u64,
     pub trace_id: String,

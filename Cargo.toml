@@ -5,6 +5,7 @@ members = [
   "crates/aegiscudo-protocol",
   "crates/aegiscudo-telemetry",
   "services/aegiscudo-api",
+  "services/feed-harvester",
   "services/mosquito-net",
   "services/surgeon",
   "services/triage-counter",
@@ -25,6 +26,7 @@ aegiscudo-policy = { path = "crates/aegiscudo-policy" }
 aegiscudo-protocol = { path = "crates/aegiscudo-protocol" }
 aegiscudo-telemetry = { path = "crates/aegiscudo-telemetry" }
 anyhow = "1.0.100"
+base64 = "0.22"
 axum = { version = "0.8.9", features = ["macros"] }
 chrono = { version = "0.4.44", features = ["serde", "clock"] }
 clap = { version = "4.6.1", features = ["derive", "env"] }
@@ -34,11 +36,12 @@ insta = { version = "1.43.2", features = ["json"] }
 mime = "0.3.17"
 prometheus = "0.14.0"
 regex = "1.12.2"
-reqwest = { version = "0.13.3", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.13.3", default-features = false, features = ["json", "rustls"] }
 schemars = { version = "1.2.1", features = ["chrono04", "uuid1"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
 sha2 = "0.10.9"
+sqlx = { version = "0.8.6", default-features = false, features = ["runtime-tokio-rustls", "postgres", "chrono", "uuid", "json"] }
 thiserror = "2.0.17"
 tokio = { version = "1.52.2", features = ["macros", "rt-multi-thread", "signal"] }
 tower = "0.5.2"
@@ -47,3 +50,4 @@ tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
 url = { version = "2.5.7", features = ["serde"] }
 uuid = { version = "1.23.1", features = ["serde", "v4", "v7"] }
+zip = { version = "2", default-features = false, features = ["deflate"] }

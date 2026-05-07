@@ -1,0 +1,6 @@
+Metadata-Version: 2.4
+Name: env-snoop
+Version: 1.0.0
+Summary: Aegiscudo malicious PyPI fixture — env exfiltration at install and import time
+License: MIT
+Requires-Python: >=3.8

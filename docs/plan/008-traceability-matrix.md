@@ -5,6 +5,7 @@ Source PRD: [docs/prd/aegiescudo-prd.md](../prd/aegiescudo-prd.md)
 Use this matrix to keep the implementation plans tied to the PRD. Mark a row complete only when the linked implementation, tests, docs, and acceptance evidence are complete.
 
 Progress note: 2026-05-05 Phase 0 foundation and a first Phase 1 scaffold are implemented and locally validated. Rows below remain open unless their full PRD acceptance evidence is complete; partial scaffold progress is noted in the linked phase trackers.
+Progress note: 2026-05-06 initial baseline was pushed to GitHub `main`; a reviewed foundation slice added Python contract models, deterministic fixture coverage, default metric catalogs, config/fail-closed helpers, and the request-time decision `mode` field. Phase rows remain open unless their full acceptance evidence exists.
 
 Legend: a checked row in this matrix means the linked requirement has acceptance evidence, not just a review policy or scaffold. Open rows may still include partial-progress notes.
 
@@ -51,7 +52,7 @@ Legend: a checked row in this matrix means the linked requirement has acceptance
 | PyPI candidate filtering and distribution cache | [002-mvp-control-plane.md](002-mvp-control-plane.md) | [ ] |
 | PyPI install/import sandbox profile | [003-mvp-analysis-ai-sandbox.md](003-mvp-analysis-ai-sandbox.md) | [ ] |
 | PyPI digital attestation verification | [002-mvp-control-plane.md](002-mvp-control-plane.md) | [ ] |
-| Triage Counter deterministic policy engine | [002-mvp-control-plane.md](002-mvp-control-plane.md) | [ ] In-memory decision-state engine and tests implemented; persistence/signals pending. |
+| Triage Counter deterministic policy engine | [002-mvp-control-plane.md](002-mvp-control-plane.md) | [ ] In-memory decision-state engine, full MVP decision states, response `mode`, DecisionRequest HTTP binding, PostgreSQL policy loading, and repository-backed immutable snapshot creation implemented; persisted decisions, cache, analysis jobs, metrics, and real signal derivation pending. |
 | npm/PyPI candidate metadata maintainer signals (account age, recent changes, count, new-maintainer ratio) | [002-mvp-control-plane.md](002-mvp-control-plane.md) | [ ] |
 | Surgeon npm/PyPI static analyzer | [003-mvp-analysis-ai-sandbox.md](003-mvp-analysis-ai-sandbox.md) | [ ] Directory scanner and MVP regex indicators implemented; archive unpacking/AST parsing pending. |
 | Sleeper pattern detection | [003-mvp-analysis-ai-sandbox.md](003-mvp-analysis-ai-sandbox.md) | [ ] |
@@ -81,13 +82,13 @@ Legend: a checked row in this matrix means the linked requirement has acceptance
 | NFR | Plan Location | Status |
 |---|---|---|
 | Prompt injection defenses | [003-mvp-analysis-ai-sandbox.md](003-mvp-analysis-ai-sandbox.md), [005-mvp-validation-release.md](005-mvp-validation-release.md) | [ ] |
-| Data privacy and PII handling | [001-foundation.md](001-foundation.md), [003-mvp-analysis-ai-sandbox.md](003-mvp-analysis-ai-sandbox.md) | [ ] |
+| Data privacy and PII handling | [001-foundation.md](001-foundation.md), [003-mvp-analysis-ai-sandbox.md](003-mvp-analysis-ai-sandbox.md) | [ ] Redaction utilities, strict Python DTOs, audit metadata sensitive-key rejection, and local LLM URL boundary helpers exist; prompt construction/redaction and service wiring remain pending. |
 | Sandbox security boundaries | [003-mvp-analysis-ai-sandbox.md](003-mvp-analysis-ai-sandbox.md), [005-mvp-validation-release.md](005-mvp-validation-release.md) | [ ] |
 | Policy guardrails | [002-mvp-control-plane.md](002-mvp-control-plane.md) | [ ] |
 | Rate limiting — per-tenant API and per-client package request limits | [002-mvp-control-plane.md](002-mvp-control-plane.md), [007-phase-3-enterprise.md](007-phase-3-enterprise.md) | [ ] |
 | External dependency failure policy | [002-mvp-control-plane.md](002-mvp-control-plane.md), [005-mvp-validation-release.md](005-mvp-validation-release.md) | [ ] |
 | Reliability and latency budgets | [002-mvp-control-plane.md](002-mvp-control-plane.md), [005-mvp-validation-release.md](005-mvp-validation-release.md) | [ ] |
-| Observability | [001-foundation.md](001-foundation.md), [002-mvp-control-plane.md](002-mvp-control-plane.md), [003-mvp-analysis-ai-sandbox.md](003-mvp-analysis-ai-sandbox.md), [005-mvp-validation-release.md](005-mvp-validation-release.md) | [ ] Trace/log/health foundations implemented; metrics and service traces pending. |
+| Observability | [001-foundation.md](001-foundation.md), [002-mvp-control-plane.md](002-mvp-control-plane.md), [003-mvp-analysis-ai-sandbox.md](003-mvp-analysis-ai-sandbox.md), [005-mvp-validation-release.md](005-mvp-validation-release.md) | [ ] Trace/log/health foundations and default Prometheus metric catalogs implemented; service-specific metric emission and traces pending. |
 | LLM observability | [003-mvp-analysis-ai-sandbox.md](003-mvp-analysis-ai-sandbox.md), [004-mvp-command-center-cli.md](004-mvp-command-center-cli.md) | [ ] |
 | TypeScript typecheck (`tsc --noEmit`) in CI and local validation | [004-mvp-command-center-cli.md](004-mvp-command-center-cli.md), [005-mvp-validation-release.md](005-mvp-validation-release.md) | [x] |
 | Dockerfile naming convention and base images (distroless/slim/alpine) | [005-mvp-validation-release.md](005-mvp-validation-release.md) | [ ] Dockerfiles exist; Python multi-stage hardening and build verification pending. |
@@ -122,11 +123,11 @@ Legend: a checked row in this matrix means the linked requirement has acceptance
 | G18 multi-provider LLM | [003-mvp-analysis-ai-sandbox.md](003-mvp-analysis-ai-sandbox.md), [004-mvp-command-center-cli.md](004-mvp-command-center-cli.md) | [ ] |
 | G19 no AI CLI and Langfuse | [003-mvp-analysis-ai-sandbox.md](003-mvp-analysis-ai-sandbox.md) | [ ] Surgeon has no AI CLI usage and Langfuse infra exists; LLM trace wiring pending. |
 | G20 frontend design system | [004-mvp-command-center-cli.md](004-mvp-command-center-cli.md) | [ ] Theme/sidebar/tooltip scaffold implemented; personalization and visual regression pending. |
-| G21 multi-registry proxy | [002-mvp-control-plane.md](002-mvp-control-plane.md), [004-mvp-command-center-cli.md](004-mvp-command-center-cli.md) | [ ] |
+| G21 multi-registry proxy | [002-mvp-control-plane.md](002-mvp-control-plane.md), [004-mvp-command-center-cli.md](004-mvp-command-center-cli.md), [ADR 0001](../adr/0001-control-plane-routing-scope-and-mount-path-uniqueness.md) | [ ] Mosquito Net startup loading, configured `/proxy/...` mount-path resolution, loaded enabled mount de-duplication, non-deleted mount-path uniqueness, tenant-scoped FK constraints, and upstream URL userinfo rejection exist. [ADR 0001](../adr/0001-control-plane-routing-scope-and-mount-path-uniqueness.md) closes the Phase 1A routing scope; Admin CRUD, dynamic reload, real adapters, and UI workflows remain pending. |
 | G22 CI/CD pipeline | [005-mvp-validation-release.md](005-mvp-validation-release.md) | [ ] Workflow scaffolds implemented; branch protection and dry-run evidence pending. |
 | G23 provenance semantics and attestation records | [002-mvp-control-plane.md](002-mvp-control-plane.md) | [ ] |
 | G24 KEV, EPSS, quota-aware feeds | [002-mvp-control-plane.md](002-mvp-control-plane.md), [006-phase-2-expansion.md](006-phase-2-expansion.md) | [ ] |
 | G25 SBOM standards compatibility | [006-phase-2-expansion.md](006-phase-2-expansion.md) | [ ] |
-| G26 degraded-operation policy | [002-mvp-control-plane.md](002-mvp-control-plane.md), [005-mvp-validation-release.md](005-mvp-validation-release.md) | [ ] |
+| G26 degraded-operation policy | [002-mvp-control-plane.md](002-mvp-control-plane.md), [005-mvp-validation-release.md](005-mvp-validation-release.md), [ADR 0002](../adr/0002-degraded-operation-and-fail-mode-precedence.md) | [ ] [ADR 0002](../adr/0002-degraded-operation-and-fail-mode-precedence.md) fixes fail-mode precedence; request-time implementation and validation evidence remain pending. |
 | G27 heading consistency | [README.md](README.md) | [ ] |
 | G28 Next.js/Tailwind scaffold corrections | [001-foundation.md](001-foundation.md), [004-mvp-command-center-cli.md](004-mvp-command-center-cli.md) | [x] |

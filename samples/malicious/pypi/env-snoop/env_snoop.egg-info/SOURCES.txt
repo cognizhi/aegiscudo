@@ -1,0 +1,7 @@
+pyproject.toml
+setup.py
+env_snoop/__init__.py
+env_snoop.egg-info/PKG-INFO
+env_snoop.egg-info/SOURCES.txt
+env_snoop.egg-info/dependency_links.txt
+env_snoop.egg-info/top_level.txt

@@ -1,0 +1,22 @@
+{
+  "data": {
+    "securityAdvisories": {
+      "nodes": [
+        {
+          "ghsaId": "GHSA-0000-0000-fixt",
+          "severity": "HIGH",
+          "summary": "Synthetic GHSA fixture for Aegiscudo tests",
+          "vulnerabilities": {
+            "nodes": [
+              {
+                "package": { "ecosystem": "PIP", "name": "aegiscudo-benign-pypi-fixture" },
+                "vulnerableVersionRange": "< 1.0.1",
+                "firstPatchedVersion": { "identifier": "1.0.1" }
+              }
+            ]
+          }
+        }
+      ]
+    }
+  }
+}

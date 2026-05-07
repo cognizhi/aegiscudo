@@ -1,0 +1,18 @@
+{
+  "run_id": "00000000-0000-0000-0000-00000000ca01",
+  "profile": "npm-install-profile",
+  "phase": "E",
+  "egress_mode": "deny-all",
+  "events": [
+    {
+      "type": "canary-read",
+      "severity": "critical",
+      "message": "Synthetic fixture read FAKE_NPM_TOKEN from the sandbox canary file. No real credential is present."
+    },
+    {
+      "type": "ai-agent-canary-write",
+      "severity": "critical",
+      "message": "Synthetic fixture attempted to append to .github/copilot-instructions.md canary."
+    }
+  ]
+}

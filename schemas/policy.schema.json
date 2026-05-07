@@ -4,13 +4,23 @@
   "title": "AegiscudoPolicyProfile",
   "type": "object",
   "additionalProperties": false,
-  "required": ["id", "tenant_id", "version", "mode", "minimum_release_age_hours", "fail_closed", "rules"],
+  "required": ["id", "tenant_id", "version", "mode", "minimum_release_age_hours", "known_vulnerability_threshold", "fail_closed", "rules"],
   "properties": {
     "id": { "type": "string", "format": "uuid" },
     "tenant_id": { "type": "string", "format": "uuid" },
     "version": { "type": "string", "minLength": 1 },
     "mode": { "enum": ["shadow", "warn", "enforce"] },
     "minimum_release_age_hours": { "type": "integer", "minimum": 0 },
+    "known_vulnerability_threshold": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["severity_floor", "kev_override"],
+      "properties": {
+        "severity_floor": { "enum": ["low", "medium", "high", "critical"] },
+        "kev_override": { "type": "boolean" },
+        "epss_probability_floor": { "type": "number", "minimum": 0, "maximum": 1 }
+      }
+    },
     "fail_closed": { "type": "boolean" },
     "rules": {
       "type": "array",

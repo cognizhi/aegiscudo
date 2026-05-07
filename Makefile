@@ -34,7 +34,7 @@ migrate-check:
 	set -a; [ ! -f .env ] || . ./.env; set +a; sh ./scripts/migrate-dry-run.sh
 
 seed:
-	@echo "Seed data is tracked in testdata and schema fixtures."
+	set -a; [ ! -f .env ] || . ./.env; set +a; sh ./scripts/seed-local-control-plane.sh
 
 build:
 	cargo build --workspace
@@ -43,6 +43,7 @@ build:
 docker-build:
 	docker build -f infra/Dockerfile.mosquito-net -t aegiscudo/mosquito-net:local .
 	docker build -f infra/Dockerfile.triage-counter -t aegiscudo/triage-counter:local .
+	docker build -f infra/Dockerfile.feed-harvester -t aegiscudo/feed-harvester:local .
 	docker build -f infra/Dockerfile.surgeon -t aegiscudo/surgeon:local .
 	docker build -f infra/Dockerfile.aegiscudo-api -t aegiscudo/aegiscudo-api:local .
 	docker build -f infra/Dockerfile.ai-analyst -t aegiscudo/ai-analyst:local .

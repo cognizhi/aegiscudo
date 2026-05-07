@@ -72,7 +72,7 @@ Progress note: 2026-05-05 implemented the Command Center shell/dashboard scaffol
 
 ## Auth And RBAC
 
-Decision: local alpha uses mock OIDC only with seeded personas. A dedicated dev IdP container is deferred; production still targets enterprise OIDC or SAML integration.
+Auth boundary is defined by [ADR 0005](../adr/0005-interface-auth-boundary-for-local-alpha-and-production.md).
 
 - [ ] Implement local dev mock auth.
 - [ ] Define OIDC/SAML integration boundary for production.

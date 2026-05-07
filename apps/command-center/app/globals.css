@@ -72,6 +72,14 @@ textarea {
 .status-pending { color: var(--color-pending); }
 .status-info { color: var(--color-info); }
 
+.command-group [cmdk-group-heading] {
+  padding: 0.55rem 0.75rem 0.25rem;
+  color: var(--color-muted);
+  font-size: 0.75rem;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {
     animation-duration: 0.01ms !important;

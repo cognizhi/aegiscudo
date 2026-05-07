@@ -1,0 +1,21 @@
+{
+  "meta": { "api-version": "1.3" },
+  "name": "aegiscudo-benign-pypi-fixture",
+  "versions": ["1.0.0", "1.1.0"],
+  "files": [
+    {
+      "filename": "aegiscudo_benign_pypi_fixture-1.0.0-py3-none-any.whl",
+      "url": "../../packages/aegiscudo_benign_pypi_fixture-1.0.0-py3-none-any.whl",
+      "size": 1410,
+      "hashes": { "sha256": "83db9ca83068ea2f884b7c9743b9237af43d626d40ce681585764251914d112c" },
+      "provenance": "https://fixtures.aegiscudo.local/pypi/provenance/aegiscudo_benign_pypi_fixture-1.0.0.intoto.jsonl"
+    },
+    {
+      "filename": "aegiscudo_benign_pypi_fixture-1.1.0-py3-none-any.whl",
+      "url": "../../packages/aegiscudo_benign_pypi_fixture-1.1.0-py3-none-any.whl",
+      "size": 1400,
+      "hashes": { "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" },
+      "provenance": "http://insecure.example.invalid/provenance.jsonl"
+    }
+  ]
+}

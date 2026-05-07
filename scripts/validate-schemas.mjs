@@ -24,6 +24,7 @@ let failures = 0;
 for (const file of fixtureFiles) {
   const schemaName = file.split(".")[0];
   const schema = schemas.get(schemaName);
+  const shouldBeInvalid = file.includes(".invalid.");
   if (!schema) {
     console.error(`No schema found for fixture ${file}`);
     failures += 1;
@@ -31,7 +32,8 @@ for (const file of fixtureFiles) {
   }
   const validate = ajv.getSchema(schema.$id);
   const fixture = JSON.parse(await readFile(path.join(fixturesDir, file), "utf8"));
-  if (!validate?.(fixture)) {
+  const isValid = Boolean(validate?.(fixture));
+  if (shouldBeInvalid ? isValid : !isValid) {
     console.error(`Schema validation failed for ${file}`);
     console.error(validate?.errors);
     failures += 1;

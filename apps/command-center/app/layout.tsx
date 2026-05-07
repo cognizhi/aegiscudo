@@ -4,6 +4,8 @@ import "react-grid-layout/css/styles.css";
 
 import "./globals.css";
 
+import { CommandPaletteProvider } from "@/components/command-palette";
+
 export const metadata: Metadata = {
   title: "Aegiscudo Command Center",
   description: "Supply chain security operations console",
@@ -20,7 +22,9 @@ export default function RootLayout({ children }: Readonly<{ children: ReactNode 
           }}
         />
       </head>
-      <body>{children}</body>
+      <body>
+        <CommandPaletteProvider>{children}</CommandPaletteProvider>
+      </body>
     </html>
   );
 }

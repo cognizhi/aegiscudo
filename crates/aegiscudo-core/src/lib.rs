@@ -4,11 +4,29 @@ use std::str::FromStr;
 
 use chrono::{DateTime, Utc};
 use schemars::JsonSchema;
+use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 use uuid::Uuid;
 
 pub type Metadata = BTreeMap<String, serde_json::Value>;
+
+const SENSITIVE_METADATA_KEY_FRAGMENTS: &[&str] = &[
+    "api_key",
+    "apikey",
+    "auth_header",
+    "authorization",
+    "client_secret",
+    "cookie",
+    "credential",
+    "password",
+    "private_key",
+    "secret",
+    "session",
+    "token",
+];
+const SENSITIVE_METADATA_EXACT_KEYS: &[&str] = &["env", "environ", "environment"];
+const SAFE_REFERENCE_KEYS: &[&str] = &["credential_ref", "credential_id"];
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "kebab-case")]
@@ -189,6 +207,19 @@ pub enum PolicyDecision {
     FallbackToApprovedCandidate,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum PolicyMode {
+    Shadow,
+    Warn,
+    #[default]
+    Enforce,
+}
+
+pub fn default_fail_closed() -> bool {
+    true
+}
+
 impl PolicyDecision {
     pub fn is_blocking(&self) -> bool {
         matches!(
@@ -219,7 +250,7 @@ pub struct AuditEvent {
     pub resource: String,
     pub trace_id: String,
     pub occurred_at: DateTime<Utc>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_audit_metadata")]
     pub metadata: Metadata,
 }
 
@@ -262,6 +293,24 @@ pub enum Severity {
     Critical,
 }
 
+/// Contextual details extracted near a network-related indicator match.
+/// All fields are optional — absent means the information could not be determined.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize, JsonSchema)]
+pub struct IndicatorDetails {
+    /// Destination URL or host:port found in the surrounding code context.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub destination: Option<String>,
+    /// How the destination was recovered: `"plaintext"`, `"base64-decoded"`, or `"url-decoded"`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub destination_encoding: Option<String>,
+    /// The raw (pre-decode) form of the destination when decoding was applied.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub destination_raw: Option<String>,
+    /// Hint about the data being transmitted, inferred from surrounding context.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub payload_hint: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct StaticIndicator {
     pub indicator_type: String,
@@ -271,6 +320,10 @@ pub struct StaticIndicator {
     pub end_line: u32,
     pub redacted: bool,
     pub summary: String,
+    /// Contextual details extracted near the match — destination, payload hint, encoding.
+    /// Present only for network-related indicators where context could be extracted.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub details: Option<IndicatorDetails>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -298,11 +351,95 @@ pub struct AiExplanation {
     pub observed_behavior: Vec<String>,
     pub inference: Vec<String>,
     pub limitations: Vec<String>,
+    #[serde(
+        serialize_with = "serialize_advisory_only",
+        deserialize_with = "deserialize_advisory_only"
+    )]
     pub advisory_only: bool,
     pub evidence_hash: ArtifactDigest,
     pub output_hash: ArtifactDigest,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub langfuse_trace_id: Option<String>,
+}
+
+fn deserialize_audit_metadata<'de, D>(deserializer: D) -> Result<Metadata, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let metadata = Metadata::deserialize(deserializer)?;
+    validate_audit_metadata(&metadata).map_err(D::Error::custom)?;
+    Ok(metadata)
+}
+
+pub fn validate_audit_metadata(metadata: &Metadata) -> Result<(), String> {
+    if let Some(path) = find_sensitive_metadata_path(metadata, "metadata") {
+        return Err(format!("audit metadata contains sensitive key: {path}"));
+    }
+    Ok(())
+}
+
+fn find_sensitive_metadata_path(value: &Metadata, prefix: &str) -> Option<String> {
+    for (key, nested) in value {
+        let path = format!("{prefix}.{key}");
+        if is_sensitive_metadata_key(key) {
+            return Some(path);
+        }
+        if let Some(nested_path) = find_sensitive_metadata_value_path(nested, &path) {
+            return Some(nested_path);
+        }
+    }
+    None
+}
+
+fn find_sensitive_metadata_value_path(value: &serde_json::Value, prefix: &str) -> Option<String> {
+    match value {
+        serde_json::Value::Object(map) => {
+            for (key, nested) in map {
+                let path = format!("{prefix}.{key}");
+                if is_sensitive_metadata_key(key) {
+                    return Some(path);
+                }
+                if let Some(nested_path) = find_sensitive_metadata_value_path(nested, &path) {
+                    return Some(nested_path);
+                }
+            }
+            None
+        }
+        serde_json::Value::Array(items) => items.iter().enumerate().find_map(|(index, nested)| {
+            find_sensitive_metadata_value_path(nested, &format!("{prefix}[{index}]"))
+        }),
+        _ => None,
+    }
+}
+
+fn is_sensitive_metadata_key(key: &str) -> bool {
+    let normalized = key.to_lowercase().replace('-', "_");
+    if SAFE_REFERENCE_KEYS.contains(&normalized.as_str()) {
+        return false;
+    }
+    SENSITIVE_METADATA_EXACT_KEYS.contains(&normalized.as_str())
+        || SENSITIVE_METADATA_KEY_FRAGMENTS
+            .iter()
+            .any(|fragment| normalized.contains(fragment))
+}
+
+fn serialize_advisory_only<S>(_value: &bool, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    serializer.serialize_bool(true)
+}
+
+fn deserialize_advisory_only<'de, D>(deserializer: D) -> Result<bool, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = bool::deserialize(deserializer)?;
+    if value {
+        Ok(true)
+    } else {
+        Err(D::Error::custom("advisory_only must be true"))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -423,8 +560,9 @@ mod tests {
             "created_at": Utc::now(),
             "updated_at": Utc::now(),
         });
-        let analysis_err = serde_json::from_value::<AnalysisJob>(missing_analysis_policy_snapshot_id)
-            .expect_err("analysis job should require policy_snapshot_id");
+        let analysis_err =
+            serde_json::from_value::<AnalysisJob>(missing_analysis_policy_snapshot_id)
+                .expect_err("analysis job should require policy_snapshot_id");
         assert!(analysis_err.to_string().contains("policy_snapshot_id"));
 
         let missing_feed_snapshot_id = serde_json::json!({
@@ -454,5 +592,77 @@ mod tests {
 
         let decision = serde_json::to_string(&PolicyDecision::RequireHitlApproval).unwrap();
         assert_eq!(decision, "\"REQUIRE_HITL_APPROVAL\"");
+
+        let mode = serde_json::to_string(&PolicyMode::Enforce).unwrap();
+        assert_eq!(mode, "\"enforce\"");
+        assert!(default_fail_closed());
+    }
+
+    #[test]
+    fn audit_metadata_rejects_sensitive_keys_recursively() {
+        let event = serde_json::json!({
+            "id": Uuid::now_v7(),
+            "tenant_id": Uuid::now_v7(),
+            "actor": "platform-admin@example.com",
+            "action": "registry_config.created",
+            "resource": "registry_config/npm-public",
+            "trace_id": "trace-audit",
+            "occurred_at": Utc::now(),
+            "metadata": { "nested": [{ "Authorization": "Bearer value" }] },
+        });
+
+        let error = serde_json::from_value::<AuditEvent>(event)
+            .expect_err("audit event should reject sensitive metadata keys");
+        assert!(
+            error
+                .to_string()
+                .contains("metadata.nested[0].Authorization")
+        );
+
+        let allowed = serde_json::json!({
+            "id": Uuid::now_v7(),
+            "tenant_id": Uuid::now_v7(),
+            "actor": "platform-admin@example.com",
+            "action": "registry_config.created",
+            "resource": "registry_config/npm-public",
+            "trace_id": "trace-audit",
+            "occurred_at": Utc::now(),
+            "metadata": { "credential_ref": "00000000-0000-0000-0000-000000000501" },
+        });
+
+        assert!(serde_json::from_value::<AuditEvent>(allowed).is_ok());
+    }
+
+    #[test]
+    fn ai_explanation_is_always_advisory_only() {
+        let false_advisory = serde_json::json!({
+            "provider": "fixture",
+            "model": "fixture-model",
+            "prompt_template_version": "v1",
+            "observed_behavior": [],
+            "inference": [],
+            "limitations": [],
+            "advisory_only": false,
+            "evidence_hash": sample_digest(),
+            "output_hash": sample_digest(),
+        });
+        let error = serde_json::from_value::<AiExplanation>(false_advisory)
+            .expect_err("AI explanations should require advisory_only true");
+        assert!(error.to_string().contains("advisory_only must be true"));
+
+        let explanation = AiExplanation {
+            provider: "fixture".to_owned(),
+            model: "fixture-model".to_owned(),
+            prompt_template_version: "v1".to_owned(),
+            observed_behavior: vec![],
+            inference: vec![],
+            limitations: vec![],
+            advisory_only: false,
+            evidence_hash: sample_digest(),
+            output_hash: sample_digest(),
+            langfuse_trace_id: None,
+        };
+        let serialized = serde_json::to_value(explanation).expect("serialize explanation");
+        assert_eq!(serialized["advisory_only"], true);
     }
 }

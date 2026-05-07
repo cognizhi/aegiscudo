@@ -14,6 +14,7 @@ Goal: create the repository, contracts, local infrastructure, and safety rails t
 Progress note: 2026-05-05 implementation completed the foundation scaffold and local validation suite. Formal owner assignment, issue/PR tracking, approval, and exit review remain maintainer actions.
 Progress note: 2026-05-06 validated local Docker Compose boot with current Langfuse v3 dependencies, added a containerized migration dry-run check, closed missing-ID DTO validation coverage, and recorded Feed Harvester plus SBOM Service language decisions.
 Progress note: 2026-05-06 added shared Python logging configuration with default sensitive-key redaction, wired it into Emergency Room and AI Analyst, covered adversarial redaction cases with tests, and added Python service trace ID plus metrics shell routes.
+Progress note: 2026-05-06 initial baseline was pushed to GitHub `main`. Added schema-aligned Python contract models, fake feed/LLM/sandbox helpers, deterministic npm/PyPI/feed/canary fixtures, a generated benign wheel, shared Prometheus metric names, config validation helpers, fail-closed defaults, and reviewed the slice with Tech Lead, Tech Writer, and Security Expert.
 
 ## Exit Criteria
 
@@ -81,13 +82,13 @@ Progress note: 2026-05-06 added shared Python logging configuration with default
 - [x] Create root or per-service `pyproject.toml` with Python 3.12 requirement.
 - [x] Add `fastapi`, `pydantic`, `httpx`, `tenacity`, `structlog`, `orjson`, cloud SDKs, provider SDKs, and `langfuse` as needed.
 - [x] Add `ruff`, `mypy`, `pytest`, and `pytest-asyncio` dev dependencies.
-- [ ] Add base Pydantic models aligned with JSON schemas.
+- [x] Add base Pydantic models aligned with JSON schemas.
 - [x] Add logging configuration that redacts sensitive keys by default.
-- [ ] Add test helpers for fake HTTP feeds, fake LLM providers, and fake sandbox jobs.
+- [x] Add test helpers for fake HTTP feeds, fake LLM providers, and fake sandbox jobs.
 - [x] Add mypy and ruff configuration.
 - [x] Add minimal health endpoint tests for Python services.
 - [x] Create root `pyproject.toml` with pinned dependency versions from PRD §6.4 (`fastapi>=0.115`, `pydantic>=2.10`, `langfuse>=3.0`, `google-genai>=1.0`, etc.) and `requires-python = ">=3.12"`.
-	- Blocker: shared log and structured-event redaction is wired and tested; schema-aligned Pydantic contract models and fake feed/LLM/sandbox helpers are still needed. AI prompt redaction and prompt secret validation remain Phase 1B work.
+	- Note: shared log and structured-event redaction, schema-aligned Pydantic contract models, startup config helpers, and fake feed/LLM/sandbox helpers are wired and tested. AI prompt construction, prompt secret validation, provider wiring, and persistence remain Phase 1B work.
 
 ## Command Center Foundation
 
@@ -100,11 +101,12 @@ Progress note: 2026-05-06 added shared Python logging configuration with default
 - [x] Add TanStack Table dependency and sample typed table test.
 - [x] Add Framer Motion dependency and reduced-motion utility.
 - [x] Add theme CSS custom properties for dark, light, and dim themes.
-- [ ] Add command palette dependency and placeholder root provider.
+- [x] Add command palette dependency and placeholder root provider.
+	- Note: `cmdk` is installed, the provider is mounted from the App Router layout, the dashboard header renders a trigger, and shortcut handling ignores editable fields.
 - [x] Add Vitest and Testing Library setup.
 - [x] Add Playwright configuration placeholder for Phase 1C/1D.
-- [ ] Commit lockfile after dependency installation.
-	- Blocker: `cmdk` is installed and lockfiles are generated; command palette root provider/UI wiring and actual VCS commit are still pending.
+- [x] Commit lockfile after dependency installation.
+	- Note: `cmdk` is installed, `pnpm-lock.yaml` includes the dependency set, and the initial baseline was pushed to GitHub. Current uncommitted implementation work still requires its own PR/CI evidence.
 
 ## Schema And Contract Foundation
 
@@ -160,37 +162,38 @@ Progress note: 2026-05-06 added shared Python logging configuration with default
  - [x] Add Makefile targets for `up`, `down`, `test`, `lint`, `fmt`, `typecheck`, `migrate`, `seed`, `build`, `docker-build`, `integration-test`, and `e2e-test`.
  - [x] Implement `make typecheck` to run `tsc --noEmit` for `apps/command-center` and any TypeScript workspace packages.
 - [x] Implement `make integration-test` as a Docker-Compose-based target that starts backing services and runs service integration tests.
-- [x] Implement `make e2e-test` as a target that starts all services with seeded fixture registries and runs Playwright + aedo-cli E2E scenarios.
+- [ ] Implement `make e2e-test` as a target that starts all services with seeded fixture registries and runs Playwright + aedo-cli E2E scenarios.
+	- Blocker: the current target starts Docker Compose and runs Command Center Playwright only. Seeded fixture registries and `aedo-cli` E2E scenarios remain Phase 1A/1D work.
 - [x] Add health check commands for each local dependency.
 	- Blocker: Make targets and Compose health checks exist; `integration-test` and `e2e-test` still need full service implementation before they can be treated as passing release gates.
 
 ## Testdata And Fixture Strategy
 
 - [x] Create benign npm package fixture.
-- [ ] Create benign PyPI wheel fixture.
+- [x] Create benign PyPI wheel fixture.
 - [x] Create npm postinstall malicious fixture.
 - [x] Create Python `exec` or import-time behavior fixture.
 - [x] Create archive traversal fixture.
 - [x] Create decompression bomb or oversized package fixture with safe test generation.
-- [ ] Create npm packument fixture with signed, unsigned, and bad-signature versions.
-- [ ] Create PyPI Simple API fixture with `data-provenance` and bad provenance references.
+- [x] Create npm packument fixture with signed, unsigned, and bad-signature versions.
+- [x] Create PyPI Simple API fixture with `data-provenance` and bad provenance references.
 - [x] Create known-malicious feed fixture.
-- [ ] Create OSV/GHSA vulnerability fixture.
-- [ ] Create canary-access sandbox fixture.
+- [x] Create OSV/GHSA vulnerability fixture.
+- [x] Create canary-access sandbox fixture.
 - [x] Document fixture generation and update process.
-	- Blocker: benign PyPI source fixture plus OSV and OpenSSF fixture examples exist; built wheel, GHSA, canary sandbox, signed npm packument, and PyPI provenance fixtures remain before adapter/E2E tasks can start.
+	- Note: deterministic fixture data exists for benign npm, benign PyPI source and wheel, npm signature-state packuments, PyPI Simple API provenance discovery, OSV, GHSA, OpenSSF malicious packages, and synthetic sandbox canary access. Served npm/PyPI fixture registries remain Phase 1A work.
 
 ## Security And Observability Baseline
 
 - [x] Add redaction utility for logs and structured events.
 - [x] Add trace ID propagation conventions and shared Python service middleware.
 - [x] Add `/healthz`, `/readyz`, and `/metrics` route conventions plus Python shell routes.
-- [ ] Add default Prometheus metric names for request, decision, analysis, sandbox, feed, and LLM operations.
+- [x] Add default Prometheus metric names for request, decision, analysis, sandbox, feed, and LLM operations.
 - [ ] Add startup validation for required environment variables.
 - [ ] Add rule that missing required bootstrap credentials fail fast where required by PRD.
 - [x] Add local secrets guidance and production secrets-manager guidance.
 - [ ] Add secure defaults for fail-closed enforcement mode.
-	- Blocker: route conventions, Python shell routes, trace IDs, and log/structured-event redaction utilities exist; operation-specific metric names, startup env validation, and enforcement-mode wiring remain Phase 1 work.
+	- Blocker: route conventions, Python shell routes, trace IDs, log/structured-event redaction utilities, default metric names, config validation helpers, local LLM URL boundary checks, and fail-closed defaults exist. Service-entrypoint startup enforcement and request-time fail-closed wiring still need to be applied before these rows can close.
 
 ## Phase 0 Validation
 

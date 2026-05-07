@@ -104,7 +104,7 @@ For this repository, phase-gate review is considered satisfied by the PR templat
 - [x] Initial repository is initialized.
 - [x] Plan tracker files exist under `docs/plan`.
 - [x] Maintainers agree on MVP scope and implementation stack.
-	- Decision: current MVP scope and stable implementation stack are the PRD-aligned Rust 2024, Python 3.12, and Next.js 16 foundations already recorded across this tracker, [001-foundation.md](001-foundation.md), and the repository instructions.
+	- Note: current MVP scope and stable implementation stack are the PRD-aligned Rust 2024, Python 3.12, and Next.js 16 foundations already recorded across this tracker, [001-foundation.md](001-foundation.md), and the repository instructions.
 
 ### Phase 0 Exit
 
@@ -144,22 +144,12 @@ For this repository, phase-gate review is considered satisfied by the PR templat
 - [ ] Release, Docker publish, security scan, and quality-gate workflows are operational.
 - [ ] Alpha runbook and operations docs are complete.
 
-## Decision Log Placeholders
+## Architecture Decisions
 
-- [x] Choose final language for `feed-harvester`: Python, Go, or Rust.
-	- Decision: Python for adapter velocity and reuse of the existing FastAPI/httpx/tenacity stack.
-- [x] Choose final language for `sbom-service`: Rust or Go.
-	- Decision: Rust for alignment with typed DTOs, evidence contracts, and backend export paths.
-- [x] Choose Redis vs NATS JetStream for MVP queues and caches, or define a transition plan.
-	- Decision: Redis is the MVP cache and lightweight queue substrate. Revisit NATS JetStream only if later phases need higher-volume fan-out, replay, or stronger queue durability guarantees.
-- [x] Choose object storage local emulator and production storage abstraction.
-	- Decision: use MinIO for local development and an S3-compatible object-storage abstraction for production deployments.
-- [x] Choose charting library for Command Center: Recharts or ECharts.
-	- Decision: Recharts for MVP delivery speed and direct alignment with the current Next.js dashboard scaffold.
-- [x] Choose exact OpenAPI generation and frontend client validation workflow.
-	- Decision: maintain OpenAPI source files under `contracts/openapi`, generate committed TypeScript contract aliases into `packages/shared-types/src/generated` with `openapi-typescript`, enforce drift with `pnpm openapi:check` in CI, and keep richer UI/CLI request-client wiring in Phase 1C.
-- [x] Choose coverage thresholds per service and package.
-	- Decision: use 95% for shared schema and DTO packages (`crates/aegiscudo-core`, `crates/aegiscudo-protocol`, `packages/shared-types`), 90% for request-time and decisioning services plus evidence exporters (`services/mosquito-net`, `services/triage-counter`, `services/surgeon`, `services/sbom-service`, `crates/aegiscudo-policy`), 85% for control-plane, orchestration, CLI, and support slices (`services/aegiscudo-api`, `services/emergency-room`, `services/ai-analyst`, `services/feed-harvester`, `cli/aedo-cli`, `crates/aegiscudo-telemetry`), and 80% for `apps/command-center`.
-	- Measurement method: enforce per-package or per-app line coverage using `cargo-llvm-cov` for Rust crates, `pytest-cov` for Python services, and Vitest V8 coverage for TypeScript packages or apps once the coverage jobs land in Phase 1D and [005-mvp-validation-release.md](005-mvp-validation-release.md).
-- [x] Decide whether local alpha uses mock OIDC only or includes a dev IdP container.
-	- Decision: local alpha uses mock OIDC only with seeded personas and no dev IdP container; the production boundary remains enterprise OIDC/SAML, and any dedicated dev IdP container is deferred until later integration hardening warrants it.
+- [x] Architecture decisions are recorded under [docs/adr](../adr/README.md).
+- [x] Service runtime allocation is recorded in [ADR 0003](../adr/0003-service-runtime-allocation-by-responsibility.md).
+- [x] MVP cache, queue, and object-storage substrates are recorded in [ADR 0004](../adr/0004-mvp-cache-queue-and-object-storage-substrates.md).
+- [x] Local alpha and production auth boundary is recorded in [ADR 0005](../adr/0005-interface-auth-boundary-for-local-alpha-and-production.md).
+- [x] OpenAPI contract source-of-truth and generated type workflow is recorded in [ADR 0006](../adr/0006-openapi-contract-source-of-truth-and-generated-type-workflow.md).
+
+Coverage thresholds remain a governance and release-gate policy, not an ADR. Enforce per-package or per-app line coverage using `cargo-llvm-cov` for Rust crates, `pytest-cov` for Python services, and Vitest V8 coverage for TypeScript packages or apps once the coverage jobs land in Phase 1D and [005-mvp-validation-release.md](005-mvp-validation-release.md).

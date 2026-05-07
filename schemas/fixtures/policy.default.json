@@ -4,8 +4,14 @@
   "version": "2026.05.0",
   "mode": "enforce",
   "minimum_release_age_hours": 24,
+  "known_vulnerability_threshold": {
+    "severity_floor": "high",
+    "kev_override": true,
+    "epss_probability_floor": 0.7
+  },
   "fail_closed": true,
   "rules": [
+    { "id": "known-vulnerable", "signal": "vulnerable_above_threshold", "action": "warn", "enabled": true },
     { "id": "known-malicious", "signal": "known_malicious", "action": "block", "enabled": true },
     { "id": "missing-attestation", "signal": "missing_or_failed_attestation", "action": "warn", "enabled": true }
   ]

@@ -1,0 +1,20 @@
+{
+  "title": "CISA Known Exploited Vulnerabilities Catalog fixture",
+  "catalogVersion": "2026.05.0-fixture",
+  "dateReleased": "2026-05-07",
+  "count": 1,
+  "vulnerabilities": [
+    {
+      "cveID": "CVE-2026-0001",
+      "vendorProject": "fixture-vendor",
+      "product": "fixture-product",
+      "vulnerabilityName": "Fixture exploited vulnerability",
+      "dateAdded": "2026-05-07",
+      "shortDescription": "Fixture KEV record for local ingestion tests.",
+      "requiredAction": "Apply mitigations per vendor instructions.",
+      "dueDate": "2026-06-07",
+      "knownRansomwareCampaignUse": "Unknown",
+      "notes": "fixture"
+    }
+  ]
+}

@@ -22,4 +22,4 @@ Phase-gated feed scope is summarized centrally in the [Capability By Phase](../R
 
 ## Current Implementation State
 
-A Python service placeholder and feed fixtures exist. Language choice is finalized in favor of Python for faster adapter development on top of the existing FastAPI/httpx/tenacity stack. Ingestion scheduler, feed clients, persistence, and tests remain open.
+A Python service placeholder and feed fixtures exist. [ADR 0003](../../adr/0003-service-runtime-allocation-by-responsibility.md) fixes Feed Harvester as a Python service for adapter velocity on top of the existing FastAPI, httpx, and tenacity stack. Ingestion scheduler, feed clients, persistence, and tests remain open.

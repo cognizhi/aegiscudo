@@ -1,0 +1,1 @@
+{"_type":"https://in-toto.io/Statement/v1","subject":[{"name":"aegiscudo_benign_pypi_fixture-1.0.0-py3-none-any.whl","digest":{"sha256":"83db9ca83068ea2f884b7c9743b9237af43d626d40ce681585764251914d112c"}}],"predicateType":"https://docs.pypi.org/attestations/publish/v1","predicate":{"fixture":true}}

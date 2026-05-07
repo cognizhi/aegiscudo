@@ -13,6 +13,40 @@
     "resource": { "type": "string", "minLength": 1 },
     "trace_id": { "type": "string", "minLength": 1 },
     "occurred_at": { "type": "string", "format": "date-time" },
-    "metadata": { "type": "object" }
+    "metadata": { "$ref": "#/$defs/safeMetadataObject" }
+  },
+  "$defs": {
+    "safeMetadataObject": {
+      "type": "object",
+      "propertyNames": {
+        "not": {
+          "anyOf": [
+            { "pattern": "[Aa][Pp][Ii][_-]?[Kk][Ee][Yy]" },
+            { "pattern": "[Aa][Uu][Tt][Hh]([_-]?[Hh][Ee][Aa][Dd][Ee][Rr]|[Oo][Rr][Ii][Zz][Aa][Tt][Ii][Oo][Nn])?" },
+            { "pattern": "[Cc][Ll][Ii][Ee][Nn][Tt][_-]?[Ss][Ee][Cc][Rr][Ee][Tt]" },
+            { "pattern": "[Cc][Oo][Oo][Kk][Ii][Ee]" },
+            { "pattern": "[Cc][Rr][Ee][Dd][Ee][Nn][Tt][Ii][Aa][Ll](?![_-]?([Rr][Ee][Ff]|[Ii][Dd])$)" },
+            { "pattern": "[Pp][Aa][Ss][Ss][Ww][Oo][Rr][Dd]" },
+            { "pattern": "[Pp][Rr][Ii][Vv][Aa][Tt][Ee][_-]?[Kk][Ee][Yy]" },
+            { "pattern": "[Ss][Ee][Cc][Rr][Ee][Tt]" },
+            { "pattern": "[Ss][Ee][Ss][Ss][Ii][Oo][Nn]" },
+            { "pattern": "[Tt][Oo][Kk][Ee][Nn]" },
+            { "pattern": "^([Ee][Nn][Vv]|[Ee][Nn][Vv][Ii][Rr][Oo][Nn]|[Ee][Nn][Vv][Ii][Rr][Oo][Nn][Mm][Ee][Nn][Tt])$" }
+          ]
+        }
+      },
+      "additionalProperties": { "$ref": "#/$defs/safeMetadataValue" }
+    },
+    "safeMetadataValue": {
+      "anyOf": [
+        { "type": "string" },
+        { "type": "number" },
+        { "type": "integer" },
+        { "type": "boolean" },
+        { "type": "null" },
+        { "type": "array", "items": { "$ref": "#/$defs/safeMetadataValue" } },
+        { "$ref": "#/$defs/safeMetadataObject" }
+      ]
+    }
   }
 }

@@ -116,6 +116,12 @@ Use this matrix as the canonical summary for phase-gated platform support. Compo
 - [Security boundaries](security-boundaries.md)
 - [Deployment and operations](deployment-and-operations.md)
 
+## Architecture Decisions
+
+- [ADR index](../adr/README.md)
+- [ADR 0001: Control-Plane Routing Scope and Mount-Path Uniqueness](../adr/0001-control-plane-routing-scope-and-mount-path-uniqueness.md)
+- [ADR 0002: Degraded Operation and Fail-Mode Precedence](../adr/0002-degraded-operation-and-fail-mode-precedence.md)
+
 ## Maintenance Rule
 
-Update the affected architecture document whenever service boundaries, data flow, integration behavior, deployment topology, security boundaries, or operational assumptions change.
+Update the affected architecture document whenever service boundaries, data flow, integration behavior, deployment topology, security boundaries, or operational assumptions change. Record the architectural choice itself in [docs/adr](../adr/README.md) whenever the change alters system shape or cross-cutting behavior.

@@ -9,6 +9,7 @@ import { ResponsiveGridLayout } from "react-grid-layout";
 
 import { decisions, metrics } from "@/lib/mock-data";
 
+import { CommandPaletteTrigger } from "./command-palette";
 import { DecisionTable } from "./decision-table";
 import { HelpTooltip, TooltipProvider } from "./ui/tooltip";
 
@@ -86,6 +87,7 @@ export function CommandCenterShell() {
                 <h1 className="text-2xl font-semibold">Executive Risk Dashboard</h1>
               </div>
               <div className="flex items-center gap-2">
+                <CommandPaletteTrigger />
                 <select
                   aria-label="Theme"
                   className="rounded-md border border-(--color-border) bg-(--color-surface) px-3 py-2 text-sm"

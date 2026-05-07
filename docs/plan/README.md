@@ -10,6 +10,8 @@ This folder breaks the PRD into smaller implementation trackers so future work c
 
 Legend: checked rows in the operating sections below mean the planning rule is adopted. Checked roadmap or tracker status rows mean the linked phase or tracker is complete by its own exit criteria.
 
+Progress note: 2026-05-06 the initial baseline was pushed to the GitHub `main` branch. Phase 0 remains open pending the remaining service-wiring items and formal maintainer exit process.
+
 ## How To Use These Plans
 
 - [x] Start each work session from this index and the single phase file being implemented.
@@ -33,7 +35,7 @@ Legend: checked rows in the operating sections below mean the planning rule is a
 
 | Tracker | Scope | Status |
 |---|---|---|
-| [000-delivery-governance.md](000-delivery-governance.md) | Tracker rules, Definition of Done, release discipline, scope hygiene | [ ] |
+| [000-delivery-governance.md](000-delivery-governance.md) | Tracker rules, Definition of Done, release discipline, scope hygiene | [x] |
 | [001-foundation.md](001-foundation.md) | Monorepo scaffolding, shared types, schemas, migrations, local infra, fixture harnesses | [ ] |
 | [002-mvp-control-plane.md](002-mvp-control-plane.md) | Request-time services, policy, proxy adapters, feed snapshots, audit, overrides | [ ] |
 | [003-mvp-analysis-ai-sandbox.md](003-mvp-analysis-ai-sandbox.md) | Static analysis, sandbox orchestration, AI explanation, Langfuse, evidence lifecycle | [ ] |

@@ -20,4 +20,4 @@ SBOM Service aggregates package-level evidence into tenant-level software bills 
 
 ## Current Implementation State
 
-A placeholder service directory exists. Language choice is finalized in favor of Rust so aggregation can stay aligned with the typed evidence pipeline and backend contracts. Aggregation model, exports, VEX import, and API endpoints remain Phase 2 work.
+A placeholder service directory exists. [ADR 0003](../../adr/0003-service-runtime-allocation-by-responsibility.md) fixes SBOM Service as a Rust service so aggregation stays aligned with the typed evidence pipeline and backend contracts. Aggregation model, exports, VEX import, and API endpoints remain Phase 2 work.

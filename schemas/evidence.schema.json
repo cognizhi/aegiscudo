@@ -22,7 +22,17 @@
           "start_line": { "type": "integer", "minimum": 1 },
           "end_line": { "type": "integer", "minimum": 1 },
           "redacted": { "type": "boolean" },
-          "summary": { "type": "string", "minLength": 1 }
+          "summary": { "type": "string", "minLength": 1 },
+          "details": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "destination": { "type": "string", "minLength": 1 },
+              "destination_encoding": { "type": "string", "enum": ["plaintext", "base64-decoded", "url-decoded"] },
+              "destination_raw": { "type": "string", "minLength": 1 },
+              "payload_hint": { "type": "string", "minLength": 1 }
+            }
+          }
         }
       }
     }

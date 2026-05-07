@@ -4,7 +4,14 @@ Source PRD sections: Feature 2, 3.7.1, 3.7.3, 4.5, 4.6.
 
 Policy profiles are versioned and hashed into immutable snapshots. Every package decision must reference the exact policy snapshot used at evaluation time.
 
-## Decision Model
+This document describes runtime policy verdicts and enforcement semantics. Architecture decisions and accepted operating defaults live under [docs/adr](../adr/README.md).
+
+## Related ADRs
+
+- [ADR 0001: Control-Plane Routing Scope and Mount-Path Uniqueness](../adr/0001-control-plane-routing-scope-and-mount-path-uniqueness.md)
+- [ADR 0002: Degraded Operation and Fail-Mode Precedence](../adr/0002-degraded-operation-and-fail-mode-precedence.md)
+
+## Policy Verdict Model
 
 Allowed decision states are:
 
@@ -18,7 +25,7 @@ Allowed decision states are:
 
 ## Enforcement Rules
 
-- Unknown artifact behavior is controlled by tenant and registry enforcement mode.
+- Unknown artifact behavior is controlled by tenant and registry enforcement mode, with degraded-operation precedence defined in [ADR 0002](../adr/0002-degraded-operation-and-fail-mode-precedence.md).
 - Shadow and warn modes may fail open only with audit evidence and developer-visible warnings.
 - Enforcement mode defaults to fail closed for unknown artifacts when Triage Counter is unavailable.
 - npm fallback is allowed only for eligible metadata resolution flows.

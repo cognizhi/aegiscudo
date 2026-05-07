@@ -74,6 +74,91 @@ services:
         mc mb -p local/aegiscudo-reports-local || true
         mc mb -p local/langfuse || true
 
+  npm-fixture-registry:
+    image: python:3.12-alpine
+    working_dir: /workspace
+    command: ["python", "/workspace/scripts/fixture_registry.py", "--ecosystem", "npm", "--root", "/workspace/testdata/npm", "--port", "8080"]
+    volumes:
+      - ../scripts:/workspace/scripts:ro
+      - ../testdata/npm:/workspace/testdata/npm:ro
+    ports:
+      - "${AEGISCUDO_NPM_FIXTURE_PORT:-18080}:8080"
+
+  pypi-fixture-registry:
+    image: python:3.12-alpine
+    working_dir: /workspace
+    command: ["python", "/workspace/scripts/fixture_registry.py", "--ecosystem", "pypi", "--root", "/workspace/testdata/pypi", "--port", "8080"]
+    volumes:
+      - ../scripts:/workspace/scripts:ro
+      - ../testdata/pypi:/workspace/testdata/pypi:ro
+    ports:
+      - "${AEGISCUDO_PYPI_FIXTURE_PORT:-18081}:8080"
+
+  triage-counter:
+    build:
+      context: ..
+      dockerfile: infra/Dockerfile.triage-counter
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://aegiscudo:aegiscudo@postgres:5432/aegiscudo
+      TRIAGE_COUNTER_BIND_ADDR: 0.0.0.0:8081
+    ports:
+      - "${TRIAGE_COUNTER_PORT:-18001}:8081"
+
+  mosquito-net:
+    build:
+      context: ..
+      dockerfile: infra/Dockerfile.mosquito-net
+    depends_on:
+      postgres:
+        condition: service_healthy
+      triage-counter:
+        condition: service_started
+      npm-fixture-registry:
+        condition: service_started
+      pypi-fixture-registry:
+        condition: service_started
+    environment:
+      DATABASE_URL: postgres://aegiscudo:aegiscudo@postgres:5432/aegiscudo
+      MOSQUITO_NET_BIND_ADDR: 0.0.0.0:8080
+      TRIAGE_COUNTER_URL: http://triage-counter:8081
+    ports:
+      - "${MOSQUITO_NET_PORT:-18000}:8080"
+
+  aegiscudo-api:
+    build:
+      context: ..
+      dockerfile: infra/Dockerfile.aegiscudo-api
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mosquito-net:
+        condition: service_started
+    environment:
+      DATABASE_URL: postgres://aegiscudo:aegiscudo@postgres:5432/aegiscudo
+      AEGISCUDO_API_BIND_ADDR: 0.0.0.0:8082
+      MOSQUITO_NET_RELOAD_URL: http://mosquito-net:8080/admin/registry-configs/reload
+    ports:
+      - "${AEGISCUDO_API_PORT:-18002}:8082"
+
+  feed-harvester:
+    build:
+      context: ..
+      dockerfile: infra/Dockerfile.feed-harvester
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://aegiscudo:aegiscudo@postgres:5432/aegiscudo
+      FEED_HARVESTER_BIND_ADDR: 0.0.0.0:8085
+      FEED_FIXTURE_DIR: /workspace/testdata/feeds
+    volumes:
+      - ../testdata/feeds:/workspace/testdata/feeds:ro
+    ports:
+      - "${FEED_HARVESTER_PORT:-18005}:8085"
+
   otel-collector:
     image: otel/opentelemetry-collector-contrib:0.141.0
     command: ["--config=/etc/otelcol/config.yaml"]
