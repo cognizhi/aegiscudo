@@ -2,6 +2,9 @@
 from __future__ import annotations
 
 import argparse
+import base64
+import gzip
+import hashlib
 import io
 import json
 import mimetypes
@@ -34,23 +37,22 @@ class FixtureRegistryHandler(BaseHTTPRequestHandler):
         package_name = path.split("/-/", 1)[0]
         if "/-/" not in path:
             packument = self.root / "packuments" / f"{package_name}.json"
-            self._send_file(packument, "application/json")
+            base_url = fixture_registry_base_url(self.headers.get("host"))
+            payload = render_npm_packument(self.root, packument, base_url)
+            self._send_bytes(payload, "application/json")
             return
         if path.endswith(".tgz"):
-            self._send_npm_tarball()
+            self._send_npm_tarball(path)
             return
         self.send_error(404)
 
-    def _send_npm_tarball(self) -> None:
-        source_dir = self.root / "benign-package"
-        if not source_dir.is_dir():
+    def _send_npm_tarball(self, path: str) -> None:
+        package_name, version = parse_npm_tarball_request(path)
+        try:
+            payload = build_npm_tarball(self.root, package_name, version)
+        except FileNotFoundError:
             self.send_error(404)
             return
-        buffer = io.BytesIO()
-        with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
-            for item in source_dir.rglob("*"):
-                archive.add(item, arcname=Path("package") / item.relative_to(source_dir))
-        payload = buffer.getvalue()
         self._send_bytes(payload, "application/octet-stream")
 
     def _handle_pypi(self, path: str) -> None:
@@ -104,6 +106,81 @@ def main() -> None:
     server = ThreadingHTTPServer((args.host, args.port), handler)
     print(json.dumps({"service": "fixture-registry", "ecosystem": args.ecosystem, "port": args.port}), flush=True)
     server.serve_forever()
+def fixture_registry_base_url(host: str | None) -> str:
+    return f"http://{host}" if host else "http://127.0.0.1"
+
+
+def parse_npm_tarball_request(path: str) -> tuple[str, str]:
+    package_name, tarball_name = path.split("/-/", 1)
+    filename = Path(tarball_name).name
+    package_leaf = package_name.rsplit("/", 1)[-1]
+    prefix = f"{package_leaf}-"
+    if not filename.startswith(prefix) or not filename.endswith(".tgz"):
+        raise FileNotFoundError(path)
+    version = filename.removeprefix(prefix).removesuffix(".tgz")
+    if not version:
+        raise FileNotFoundError(path)
+    return package_name, version
+
+
+def render_npm_packument(root: Path, packument_path: Path, base_url: str) -> bytes:
+    packument = json.loads(packument_path.read_text())
+    package_name = packument["name"]
+    for version, payload in packument.get("versions", {}).items():
+        tarball = build_npm_tarball(root, package_name, version)
+        dist = payload.setdefault("dist", {})
+        dist["tarball"] = f"{base_url}/{package_name}/-/{package_name.split('/')[-1]}-{version}.tgz"
+        dist["shasum"] = hashlib.sha1(tarball).hexdigest()
+        dist["integrity"] = f"sha512-{base64.b64encode(hashlib.sha512(tarball).digest()).decode()}"
+    return json.dumps(packument).encode()
+
+
+def build_npm_tarball(root: Path, package_name: str, version: str) -> bytes:
+    source_dir = resolve_npm_package_source_dir(root, package_name)
+
+    package_json_path = source_dir / "package.json"
+    package_json = json.loads(package_json_path.read_text())
+    package_json["name"] = package_name
+    package_json["version"] = version
+    package_json_bytes = (json.dumps(package_json, indent=2) + "\n").encode()
+
+    buffer = io.BytesIO()
+    with gzip.GzipFile(fileobj=buffer, mode="wb", mtime=0) as compressed:
+        with tarfile.open(fileobj=compressed, mode="w") as archive:
+            package_info = tarfile.TarInfo("package/package.json")
+            package_info.size = len(package_json_bytes)
+            package_info.mtime = 0
+            package_info.mode = 0o644
+            archive.addfile(package_info, io.BytesIO(package_json_bytes))
+
+            for item in sorted(source_dir.rglob("*")):
+                if item == package_json_path:
+                    continue
+                arcname = Path("package") / item.relative_to(source_dir)
+                archive.add(item, arcname=arcname, filter=_normalize_tarinfo)
+
+    return buffer.getvalue()
+
+
+def resolve_npm_package_source_dir(root: Path, package_name: str) -> Path:
+    explicit_source = root / "package-sources" / package_name.replace("/", "__")
+    if explicit_source.is_dir():
+        return explicit_source
+
+    fallback_source = root / "benign-package"
+    if fallback_source.is_dir():
+        return fallback_source
+
+    raise FileNotFoundError(fallback_source)
+
+
+def _normalize_tarinfo(info: tarfile.TarInfo) -> tarfile.TarInfo:
+    info.uid = 0
+    info.gid = 0
+    info.uname = ""
+    info.gname = ""
+    info.mtime = 0
+    return info
 
 
 if __name__ == "__main__":

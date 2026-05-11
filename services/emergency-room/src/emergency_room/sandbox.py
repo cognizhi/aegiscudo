@@ -1,0 +1,527 @@
+from __future__ import annotations
+
+import asyncio
+import json
+import os
+import shutil
+import socket
+import threading
+import time
+from contextlib import contextmanager
+from dataclasses import dataclass
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from typing import Any, Mapping, Protocol
+from urllib.parse import urlparse
+from uuid import uuid4
+
+from aegiscudo_common.contracts import (
+    EgressMode,
+    SandboxPhase,
+    SandboxProfile,
+    SandboxTelemetry,
+    SandboxTelemetryEvent,
+    Severity,
+)
+from pydantic import BaseModel, ConfigDict, Field
+
+from emergency_room.security import redact_mapping
+
+CANARY_ENVIRONMENT: dict[str, str] = {
+    "NPM_TOKEN": "npm-canary-token-001",
+    "PYPI_TOKEN": "pypi-canary-token-001",
+    "GITHUB_TOKEN": "github-canary-token-001",
+    "AWS_ACCESS_KEY_ID": "AKIAIOSFODNN7EXAMPLE",
+    "AWS_SECRET_ACCESS_KEY": "aws-secret-canary-001",
+}
+
+CANARY_FILES: dict[str, str] = {
+    ".npmrc": "//registry.npmjs.org/:_authToken=npm-canary-token-001\n",
+    ".pypirc": "[distutils]\nindex-servers = pypi\n[pypi]\npassword = pypi-canary-token-001\n",
+    ".gitconfig": "[user]\n\temail = canary@example.invalid\n",
+    ".env": "GITHUB_TOKEN=github-canary-token-001\n",
+    ".github/copilot-instructions.md": "Aegiscudo canary instructions.\n",
+    ".cursorrules": "Aegiscudo canary cursor rules.\n",
+    "AGENTS.md": "Aegiscudo agent canary file.\n",
+    ".claude/settings.json": '{"canary": true}\n',
+    # Cloud / infrastructure credentials — fake values used for exfiltration detection only
+    ".google/application_default_credentials.json": (
+        '{"type": "service_account", '
+        '"client_email": "canary@aegiscudo-canary.iam.gserviceaccount.com", '
+        '"private_key": "-----BEGIN RSA PRIVATE KEY-----\\nCANARY_PRIVATE_KEY\\n-----END RSA PRIVATE KEY-----\\n", '
+        '"token_uri": "https://oauth2.googleapis.com/token"}\n'
+    ),
+    ".ssh/id_rsa": (
+        "-----BEGIN OPENSSH PRIVATE KEY-----\n"
+        "aegiscudo-canary-ssh-key-do-not-use\n"
+        "-----END OPENSSH PRIVATE KEY-----\n"
+    ),
+    ".kube/config": (
+        "apiVersion: v1\n"
+        "clusters:\n"
+        "- cluster:\n"
+        "    server: https://canary-cluster.example.invalid\n"
+        "  name: canary\n"
+        "contexts:\n"
+        "- context:\n"
+        "    cluster: canary\n"
+        "    user: canary-user\n"
+        "  name: canary\n"
+        "current-context: canary\n"
+        "kind: Config\n"
+        "users:\n"
+        "- name: canary-user\n"
+        "  user:\n"
+        "    token: aegiscudo-canary-kube-token-do-not-use\n"
+    ),
+}
+
+
+class LocalSandboxRunRequest(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    profile: SandboxProfile
+    artifact_uri: str = Field(min_length=1)
+    import_name: str | None = None
+    timeout_seconds: int = Field(default=30, ge=1, le=120)
+
+
+class LocalSandboxRunResponse(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    run_id: str
+    state: str
+    violation_detected: bool
+    telemetry: list[SandboxTelemetry]
+
+
+class SandboxExecutor(Protocol):
+    async def run(self, request: LocalSandboxRunRequest) -> LocalSandboxRunResponse: ...
+
+
+class SandboxProfileRegistry:
+    def __init__(self, executors: Mapping[SandboxProfile, SandboxExecutor]) -> None:
+        self._executors = dict(executors)
+
+    def resolve(self, profile: SandboxProfile) -> SandboxExecutor:
+        executor = self._executors.get(profile)
+        if executor is None:
+            raise RuntimeError(f"unsupported sandbox profile: {profile.value}")
+        return executor
+
+
+class LocalSandboxExecutor:
+    async def run(self, request: LocalSandboxRunRequest) -> LocalSandboxRunResponse:
+        return await run_local_sandbox(request)
+
+
+@dataclass(frozen=True)
+class PhaseResult:
+    telemetry: SandboxTelemetry
+    violation_detected: bool
+
+
+@dataclass
+class CollectorRecord:
+    path: str
+    headers: dict[str, str]
+    payload: dict[str, Any] | None
+
+
+class _CollectorHandler(BaseHTTPRequestHandler):
+    records: list[CollectorRecord] = []
+
+    def do_POST(self) -> None:  # noqa: N802
+        content_length = int(self.headers.get("Content-Length", "0"))
+        body = self.rfile.read(content_length)
+        payload: dict[str, Any] | None
+        try:
+            payload = json.loads(body.decode("utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            payload = None
+        self.__class__.records.append(
+            CollectorRecord(
+                path=self.path,
+                headers={key.lower(): value for key, value in self.headers.items()},
+                payload=payload,
+            )
+        )
+        self.send_response(200)
+        self.end_headers()
+
+    def log_message(self, format: str, *args: object) -> None:  # noqa: A003
+        return
+
+
+class ExfiltrationCollector:
+    def __init__(self, port: int = 9999) -> None:
+        self._port = port
+        self._server: ThreadingHTTPServer | None = None
+        self._thread: threading.Thread | None = None
+
+    def __enter__(self) -> "ExfiltrationCollector":
+        _CollectorHandler.records = []
+        self._server = ThreadingHTTPServer(("127.0.0.1", self._port), _CollectorHandler)
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+        self._thread.start()
+        return self
+
+    def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+        if self._server is not None:
+            self._server.shutdown()
+            self._server.server_close()
+        if self._thread is not None:
+            self._thread.join(timeout=2)
+
+    @property
+    def records(self) -> list[CollectorRecord]:
+        return list(_CollectorHandler.records)
+
+
+async def run_local_sandbox(request: LocalSandboxRunRequest) -> LocalSandboxRunResponse:
+    artifact_path = resolve_artifact_uri(request.artifact_uri)
+    telemetry: list[SandboxTelemetry] = []
+    violation_detected = False
+
+    with TemporaryDirectory(prefix="aegiscudo-sandbox-") as sandbox_root_str:
+        sandbox_root = Path(sandbox_root_str)
+        home_dir = sandbox_root / "home"
+        work_dir = sandbox_root / "workspace"
+        home_dir.mkdir(parents=True, exist_ok=True)
+        work_dir.mkdir(parents=True, exist_ok=True)
+        plant_canaries(home_dir)
+        canary_snapshot = snapshot_canary_files(home_dir)
+        base_env = build_canary_environment(home_dir)
+
+        collector_port_open = is_port_available(9999)
+        collector_context = ExfiltrationCollector() if collector_port_open else null_context()
+        with collector_context as collector:
+            phases = phases_for_profile(request.profile)
+            for phase in phases:
+                phase_work_dir = work_dir / phase.value
+                phase_work_dir.mkdir(parents=True, exist_ok=True)
+                phase_result = await execute_phase(
+                    request,
+                    artifact_path,
+                    home_dir,
+                    phase_work_dir,
+                    base_env,
+                    phase,
+                    canary_snapshot,
+                    collector.records if collector_port_open else [],
+                )
+                telemetry.append(phase_result.telemetry)
+                violation_detected = violation_detected or phase_result.violation_detected
+
+    return LocalSandboxRunResponse(
+        run_id=str(uuid4()),
+        state="completed",
+        violation_detected=violation_detected,
+        telemetry=telemetry,
+    )
+
+
+def build_local_sandbox_profile_registry() -> SandboxProfileRegistry:
+    executor = LocalSandboxExecutor()
+    return SandboxProfileRegistry(
+        {
+            SandboxProfile.NPM_INSTALL: executor,
+            SandboxProfile.PYTHON_INSTALL: executor,
+        }
+    )
+
+
+async def run_sandbox_profile(
+    request: LocalSandboxRunRequest,
+    *,
+    profile_registry: SandboxProfileRegistry | None = None,
+) -> LocalSandboxRunResponse:
+    registry = profile_registry or build_local_sandbox_profile_registry()
+    executor = registry.resolve(request.profile)
+    return await executor.run(request)
+
+
+async def execute_phase(
+    request: LocalSandboxRunRequest,
+    artifact_path: Path,
+    home_dir: Path,
+    work_dir: Path,
+    base_env: dict[str, str],
+    phase: SandboxPhase,
+    baseline_snapshot: dict[str, str],
+    collector_before: list[CollectorRecord],
+) -> PhaseResult:
+    run_id = uuid4()
+    start = time.monotonic()
+    events: list[SandboxTelemetryEvent] = []
+    violation_detected = False
+
+    if request.profile == SandboxProfile.NPM_INSTALL:
+        await ensure_npm_workspace(work_dir)
+        command = npm_command_for_phase(phase, artifact_path)
+    else:
+        await ensure_python_workspace(work_dir)
+        if phase == SandboxPhase.G:
+            install_command = python_command_for_phase(SandboxPhase.D, artifact_path, request.import_name)
+            if install_command is not None:
+                await run_subprocess(
+                    install_command,
+                    cwd=work_dir,
+                    env=base_env,
+                    timeout_seconds=request.timeout_seconds,
+                )
+        command = python_command_for_phase(phase, artifact_path, request.import_name)
+
+    if command is not None:
+        completed = await run_subprocess(
+            command,
+            cwd=work_dir,
+            env=base_env,
+            timeout_seconds=request.timeout_seconds,
+        )
+        if completed.timeout:
+            events.append(
+                SandboxTelemetryEvent(
+                    type="sandbox-timeout",
+                    severity=Severity.MEDIUM,
+                    message=f"phase {phase.value} exceeded timeout",
+                )
+            )
+        elif completed.returncode != 0:
+            events.append(
+                SandboxTelemetryEvent(
+                    type="process-nonzero-exit",
+                    severity=Severity.LOW,
+                    message=f"phase {phase.value} exited with code {completed.returncode}",
+                )
+            )
+
+    elapsed = time.monotonic() - start
+    collector_after = list(_CollectorHandler.records)
+    new_records = collector_after[len(collector_before) :]
+    record_events, record_violation = collector_events(new_records)
+    events.extend(record_events)
+    violation_detected = violation_detected or record_violation
+
+    changed_files = changed_canary_files(home_dir, baseline_snapshot)
+    if changed_files:
+        events.append(
+            SandboxTelemetryEvent(
+                type="ai-canary-file-modified",
+                severity=Severity.CRITICAL,
+                message=f"canary files modified: {', '.join(changed_files)}",
+            )
+        )
+        violation_detected = True
+
+    events.append(
+        SandboxTelemetryEvent(
+            type="phase-completed",
+            severity=Severity.INFO,
+            message=f"phase {phase.value} completed in {elapsed:.2f}s",
+        )
+    )
+    return PhaseResult(
+        telemetry=SandboxTelemetry(
+            run_id=run_id,
+            profile=request.profile,
+            phase=phase,
+            egress_mode=EgressMode.DENY_ALL,
+            events=events,
+        ),
+        violation_detected=violation_detected,
+    )
+
+
+@dataclass(frozen=True)
+class CompletedProcess:
+    returncode: int
+    stdout: str
+    stderr: str
+    timeout: bool
+
+
+async def run_subprocess(
+    command: list[str],
+    *,
+    cwd: Path,
+    env: dict[str, str],
+    timeout_seconds: int,
+) -> CompletedProcess:
+    process = await asyncio.create_subprocess_exec(
+        *command,
+        cwd=str(cwd),
+        env=env,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout_seconds)
+        return CompletedProcess(
+            returncode=process.returncode or 0,
+            stdout=stdout.decode("utf-8", errors="replace"),
+            stderr=stderr.decode("utf-8", errors="replace"),
+            timeout=False,
+        )
+    except TimeoutError:
+        process.kill()
+        await process.communicate()
+        return CompletedProcess(returncode=-9, stdout="", stderr="", timeout=True)
+
+
+def resolve_artifact_uri(value: str) -> Path:
+    parsed = urlparse(value)
+    if parsed.scheme in {"", "file"}:
+        if parsed.scheme == "file":
+            return Path(parsed.path)
+        return Path(value)
+    raise ValueError(f"unsupported artifact URI scheme: {parsed.scheme}")
+
+
+def phases_for_profile(profile: SandboxProfile) -> tuple[SandboxPhase, ...]:
+    if profile == SandboxProfile.NPM_INSTALL:
+        return (SandboxPhase.A, SandboxPhase.D, SandboxPhase.E)
+    return (SandboxPhase.A, SandboxPhase.D, SandboxPhase.G)
+
+
+async def ensure_npm_workspace(work_dir: Path) -> None:
+    package_json = work_dir / "package.json"
+    if not package_json.exists():
+        package_json.write_text('{"name":"sandbox-runner","private":true}\n', encoding="utf-8")
+
+
+def npm_command_for_phase(phase: SandboxPhase, artifact_path: Path) -> list[str] | None:
+    artifact = str(artifact_path)
+    if phase == SandboxPhase.A:
+        return None
+    if phase == SandboxPhase.D:
+        return ["npm", "install", "--ignore-scripts", artifact]
+    if phase == SandboxPhase.E:
+        return ["npm", "install", artifact]
+    return None
+
+
+async def ensure_python_workspace(work_dir: Path) -> None:
+    venv_dir = work_dir / ".venv"
+    if not venv_dir.exists():
+        await run_subprocess(
+            [sys_executable(), "-m", "venv", str(venv_dir)],
+            cwd=work_dir,
+            env=os.environ.copy(),
+            timeout_seconds=30,
+        )
+
+
+def python_command_for_phase(
+    phase: SandboxPhase,
+    artifact_path: Path,
+    import_name: str | None,
+) -> list[str] | None:
+    venv_python = str(Path(".venv") / "bin" / "python")
+    artifact = str(artifact_path)
+    if phase == SandboxPhase.A:
+        return None
+    if phase == SandboxPhase.D:
+        return [venv_python, "-m", "pip", "install", "--no-deps", artifact]
+    if phase == SandboxPhase.G:
+        module_name = import_name or infer_python_import_name(artifact_path)
+        return [venv_python, "-c", f"import {module_name}"]
+    return None
+
+
+def infer_python_import_name(artifact_path: Path) -> str:
+    file_name = artifact_path.name
+    if file_name.endswith(".tar.gz"):
+        stem = file_name[: -len(".tar.gz")]
+    else:
+        stem = artifact_path.stem
+    parts = stem.split("-")
+    return parts[0].replace("-", "_")
+
+
+def build_canary_environment(home_dir: Path) -> dict[str, str]:
+    env = os.environ.copy()
+    env.update(CANARY_ENVIRONMENT)
+    env["HOME"] = str(home_dir)
+    env["USERPROFILE"] = str(home_dir)
+    env["PIP_DISABLE_PIP_VERSION_CHECK"] = "1"
+    env["PYTHONNOUSERSITE"] = "1"
+    return env
+
+
+def plant_canaries(home_dir: Path) -> None:
+    for relative_path, contents in CANARY_FILES.items():
+        path = home_dir / relative_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(contents, encoding="utf-8")
+
+
+def snapshot_canary_files(home_dir: Path) -> dict[str, str]:
+    snapshot: dict[str, str] = {}
+    for relative_path in CANARY_FILES:
+        snapshot[relative_path] = (home_dir / relative_path).read_text(encoding="utf-8")
+    return snapshot
+
+
+def changed_canary_files(home_dir: Path, baseline_snapshot: dict[str, str]) -> list[str]:
+    changed: list[str] = []
+    for relative_path, baseline in baseline_snapshot.items():
+        current = (home_dir / relative_path).read_text(encoding="utf-8")
+        if current != baseline:
+            changed.append(relative_path)
+    return changed
+
+
+def collector_events(records: list[CollectorRecord]) -> tuple[list[SandboxTelemetryEvent], bool]:
+    events: list[SandboxTelemetryEvent] = []
+    violation_detected = False
+    for record in records:
+        payload = record.payload or {}
+        redacted_payload = redact_mapping(payload if isinstance(payload, dict) else {})
+        events.append(
+            SandboxTelemetryEvent(
+                type="outbound-network-attempt",
+                severity=Severity.HIGH,
+                message=(
+                    "captured outbound sandbox exfil attempt to loopback collector "
+                    f"with payload {json.dumps(redacted_payload, sort_keys=True)}"
+                ),
+            )
+        )
+        violation_detected = True
+        env_mapping = payload.get("env") if isinstance(payload, dict) else None
+        if isinstance(env_mapping, dict) and payload_contains_canary_values(env_mapping):
+            events.append(
+                SandboxTelemetryEvent(
+                    type="canary-secret-access",
+                    severity=Severity.CRITICAL,
+                    message="captured exfil payload containing planted canary credential values",
+                )
+            )
+            violation_detected = True
+    return events, violation_detected
+
+
+def payload_contains_canary_values(payload: dict[str, Any]) -> bool:
+    values = {str(value) for value in payload.values()}
+    return any(canary in values for canary in CANARY_ENVIRONMENT.values())
+
+
+def is_port_available(port: int) -> bool:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            sock.bind(("127.0.0.1", port))
+            return True
+        except OSError:
+            return False
+
+
+def sys_executable() -> str:
+    return shutil.which("python3") or shutil.which("python") or "python3"
+
+
+@contextmanager
+def null_context() -> Any:
+    yield type("NullCollector", (), {"records": []})()

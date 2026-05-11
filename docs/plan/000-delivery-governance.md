@@ -27,7 +27,7 @@ Update the record below when governance roles or operating conventions change:
 | Tracker owner | `Aegiscudo Tech Lead` | This file under Governance Record and Plan Status |
 | Maintainer team | `Aegiscudo Tech Lead`, `Aegiscudo Tech Writer` | This file under Governance Record and Plan Status |
 | Governance rules accepted by maintainers | `Yes` | This file under Governance Record and Plan Status |
-| Phase gate review model | PR template, maintainer review, and required `CI` plus `Security` checks. Hard branch protection, coverage enforcement, and full release gates remain Phase 1D plus [005-mvp-validation-release.md](005-mvp-validation-release.md) work. | This file under Governance Record and Plan Status |
+| Phase gate review model | PR template, maintainer review, and required `CI` plus `Security` checks. Hard branch protection and the remaining release gates stay tracked in Phase 1D plus [005-mvp-validation-release.md](005-mvp-validation-release.md). | This file under Governance Record and Plan Status |
 
 - Tracker owner: `Aegiscudo Tech Lead`
 - Maintainer team: `Aegiscudo Tech Lead`, `Aegiscudo Tech Writer`
@@ -94,7 +94,7 @@ Repo-side enforcement should use the following path:
 4. The active phase file and [008-traceability-matrix.md](008-traceability-matrix.md) must be updated whenever requirement coverage or gate state changes.
 5. Project-management enforcement may mirror the tracker by using a GitHub Project field, milestone rule, or equivalent workflow when maintainers want stronger process automation.
 
-For this repository, phase-gate review is considered satisfied by the PR template, maintainer review, and required `CI` plus `Security` checks. Hard merge protection, full coverage enforcement, and Phase 1D release gating remain tracked in [005-mvp-validation-release.md](005-mvp-validation-release.md).
+For this repository, phase-gate review is considered satisfied by the PR template, maintainer review, and required `CI` plus `Security` checks. Hard merge protection and the remaining Phase 1D release gating stay tracked in [005-mvp-validation-release.md](005-mvp-validation-release.md).
 
 ## Phase Gate Checklist
 
@@ -133,8 +133,16 @@ For this repository, phase-gate review is considered satisfied by the PR templat
 
 ### Phase 1C Exit
 
-- [ ] Command Center supports quarantine/evidence review, registry proxies, policy simulator, audit, AI providers, integrations, and core dashboards.
-- [ ] `aedo-cli` supports auth, npm/PyPI scans, explain, policy test, CI preflight, JSON/text/SARIF output, and correct exit codes.
+- [x] Command Center supports quarantine/evidence review, registry proxies, policy simulator, audit, AI providers, integrations, and core dashboards.
+  - [x] Registry Proxies admin panel with adapter badge, mode badge, enabled state, delete with confirm
+  - [x] AI Providers admin panel with provider type, model, local/cloud badge, active state
+  - [x] Integrations & Credentials panel with configured state, test-connection action, delete
+  - [x] Audit Log panel with action/actor filters, expandable metadata, refresh
+  - [x] Policy Simulator panel with profile selection, 7/14/30-day replay, ecosystem filter, and before/after decision diff table
+  - [x] Shell nav wired with typed `NavKey` state machine routing to each admin panel
+  - [x] Playwright E2E spec for all four admin panels with route mocking
+  - [x] Focused Playwright E2E spec for the policy simulator workflow with route-mocked replay/profile responses
+- [x] `aedo-cli` supports auth, npm/PyPI scans, explain, policy test, CI preflight, JSON/text/SARIF output, and correct exit codes.
 - [ ] RBAC-protected admin workflows and mock identity are covered by tests.
 
 ### Phase 1D Exit
@@ -152,4 +160,25 @@ For this repository, phase-gate review is considered satisfied by the PR templat
 - [x] Local alpha and production auth boundary is recorded in [ADR 0005](../adr/0005-interface-auth-boundary-for-local-alpha-and-production.md).
 - [x] OpenAPI contract source-of-truth and generated type workflow is recorded in [ADR 0006](../adr/0006-openapi-contract-source-of-truth-and-generated-type-workflow.md).
 
-Coverage thresholds remain a governance and release-gate policy, not an ADR. Enforce per-package or per-app line coverage using `cargo-llvm-cov` for Rust crates, `pytest-cov` for Python services, and Vitest V8 coverage for TypeScript packages or apps once the coverage jobs land in Phase 1D and [005-mvp-validation-release.md](005-mvp-validation-release.md).
+Coverage thresholds remain a governance and release-gate policy, not an ADR. The machine-readable source of truth for CI is `scripts/coverage-thresholds.json`, and the baseline ratchet below mirrors that file. Raise floors when new tests land; do not lower them without maintainer approval plus a tracker update in this file and [005-mvp-validation-release.md](005-mvp-validation-release.md).
+
+## Coverage Thresholds
+
+Generated packages without handwritten runtime behavior are currently excluded from line-coverage gates. That means the generated TypeScript contract package is not part of the active threshold set.
+
+| Runtime | Target | Minimum line coverage |
+|---|---|---|
+| TypeScript | `apps/command-center` | `60.0%` |
+| Python | `services/ai-analyst` | `80.0%` |
+| Python | `services/emergency-room` | `85.0%` |
+| Python | `services/python-common` | `95.0%` |
+| Rust | `cli/aedo-cli` | `78.5%` |
+| Rust | `crates/aegiscudo-core` | `92.0%` |
+| Rust | `crates/aegiscudo-policy` | `93.5%` |
+| Rust | `crates/aegiscudo-protocol` | `77.5%` |
+| Rust | `crates/aegiscudo-telemetry` | `75.0%` |
+| Rust | `services/aegiscudo-api` | `5.5%` |
+| Rust | `services/feed-harvester` | `13.5%` |
+| Rust | `services/mosquito-net` | `71.5%` |
+| Rust | `services/surgeon` | `76.0%` |
+| Rust | `services/triage-counter` | `69.0%` |

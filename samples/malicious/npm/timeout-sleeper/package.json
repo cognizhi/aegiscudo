@@ -1,0 +1,11 @@
+{
+  "name": "timeout-sleeper",
+  "version": "1.0.0",
+  "description": "Aegiscudo malicious npm fixture that stalls during install to trigger sandbox timeout handling.",
+  "main": "index.js",
+  "scripts": {
+    "preinstall": "node preinstall.js"
+  },
+  "keywords": [],
+  "license": "MIT"
+}

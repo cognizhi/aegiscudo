@@ -1,3 +1,9 @@
+import type {
+  components as GeneratedAegiscudoApiComponents,
+  operations as GeneratedAegiscudoApiOperations,
+  paths as GeneratedAegiscudoApiPaths,
+} from "./generated/aegiscudo-api.js";
+
 export const policyDecisions = [
   "ALLOW",
   "ALLOW_WITH_WARNING",
@@ -35,11 +41,70 @@ export interface DecisionSummary {
   rationale: string[];
 }
 
-export type {
-  components as AegiscudoApiComponents,
-  operations as AegiscudoApiOperations,
-  paths as AegiscudoApiPaths,
-} from "./generated/aegiscudo-api.js";
+export type AegiscudoApiComponents = GeneratedAegiscudoApiComponents;
+export type AegiscudoApiOperations = GeneratedAegiscudoApiOperations;
+export type AegiscudoApiPaths = GeneratedAegiscudoApiPaths;
+export type QuarantineQueueItem =
+  GeneratedAegiscudoApiComponents["schemas"]["QuarantineQueueItem"];
+export type ArtifactEvidence =
+  GeneratedAegiscudoApiComponents["schemas"]["ArtifactEvidence"];
+export type ArtifactStaticAnalysisReports =
+  GeneratedAegiscudoApiComponents["schemas"]["ArtifactStaticAnalysisReports"];
+export type ArtifactSandboxExecutionReports =
+  GeneratedAegiscudoApiComponents["schemas"]["ArtifactSandboxExecutionReports"];
+export type RequestTimelineBucket =
+  GeneratedAegiscudoApiComponents["schemas"]["RequestTimelineBucket"];
+export type DashboardMetrics =
+  GeneratedAegiscudoApiComponents["schemas"]["DashboardMetrics"];
+export type PolicyProfileSummary =
+  GeneratedAegiscudoApiComponents["schemas"]["PolicyProfileSummary"];
+export type PolicySimulationRequest =
+  GeneratedAegiscudoApiComponents["schemas"]["PolicySimulationRequest"];
+export type PolicyDecisionCounts =
+  GeneratedAegiscudoApiComponents["schemas"]["PolicyDecisionCounts"];
+export type PolicySimulationResult =
+  GeneratedAegiscudoApiComponents["schemas"]["PolicySimulationResult"];
+export type OverrideQueueItem =
+  GeneratedAegiscudoApiComponents["schemas"]["OverrideQueueItem"];
+export type OverrideActionRequest =
+  GeneratedAegiscudoApiComponents["schemas"]["OverrideActionRequest"];
+export type OverrideResponse =
+  GeneratedAegiscudoApiComponents["schemas"]["OverrideResponse"];
+export type InvestigationAuditEvent =
+  GeneratedAegiscudoApiComponents["schemas"]["AuditEvent"];
+export type AuthMode = GeneratedAegiscudoApiComponents["schemas"]["AuthMode"];
+export type AuthSubject = GeneratedAegiscudoApiComponents["schemas"]["AuthSubject"];
+export type AuthSession = GeneratedAegiscudoApiComponents["schemas"]["AuthSession"];
+export type MockIdentityList =
+  GeneratedAegiscudoApiComponents["schemas"]["MockIdentityList"];
+export type SetMockAuthSessionRequest =
+  GeneratedAegiscudoApiComponents["schemas"]["SetMockAuthSessionRequest"];
+export type RegistryConfig =
+  GeneratedAegiscudoApiComponents["schemas"]["RegistryConfig"];
+export type CreateRegistryConfigRequest =
+  GeneratedAegiscudoApiComponents["schemas"]["CreateRegistryConfigRequest"];
+export type UpdateRegistryConfigRequest =
+  GeneratedAegiscudoApiComponents["schemas"]["UpdateRegistryConfigRequest"];
+export type CredentialStatus =
+  GeneratedAegiscudoApiComponents["schemas"]["CredentialStatus"];
+export type CreateCredentialRequest =
+  GeneratedAegiscudoApiComponents["schemas"]["CreateCredentialRequest"];
+export type ConnectionTestResult =
+  GeneratedAegiscudoApiComponents["schemas"]["ConnectionTestResult"];
+export type AiProviderConfig =
+  GeneratedAegiscudoApiComponents["schemas"]["AiProviderConfig"];
+export type LlmUsage =
+  GeneratedAegiscudoApiComponents["schemas"]["LlmUsage"];
+export type LlmUsageSummary =
+  GeneratedAegiscudoApiComponents["schemas"]["LlmUsageSummary"];
+export type LlmUsageProviderModel =
+  GeneratedAegiscudoApiComponents["schemas"]["LlmUsageProviderModel"];
+export type LlmUsageAnalysisJob =
+  GeneratedAegiscudoApiComponents["schemas"]["LlmUsageAnalysisJob"];
+export type LlmUsageFailingTrace =
+  GeneratedAegiscudoApiComponents["schemas"]["LlmUsageFailingTrace"];
+export type LlmUsagePromptTemplateVersion =
+  GeneratedAegiscudoApiComponents["schemas"]["LlmUsagePromptTemplateVersion"];
 
 export function purl(coordinate: PackageCoordinate): string {
   const packagePath = coordinate.namespace

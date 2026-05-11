@@ -25,3 +25,30 @@ jobs:
       - run: pnpm audit --audit-level high
       - run: uv sync --dev
       - run: uv run pip-audit
+
+  semgrep:
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install Semgrep
+        run: python -m pip install semgrep
+      - name: Run Semgrep
+        run: >-
+          semgrep scan
+          --config p/supply-chain
+          --config p/security-audit
+          --severity ERROR
+          --error
+          --sarif
+          --output semgrep.sarif
+          .
+      - name: Upload Semgrep SARIF
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: semgrep.sarif

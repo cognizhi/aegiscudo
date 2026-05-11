@@ -110,6 +110,7 @@ Use this matrix as the canonical summary for phase-gated platform support. Compo
 
 ## Cross-Cutting Architecture
 
+- [Authentication and identity](auth-and-identity.md)
 - [Policy and decisions](policy-and-decisions.md)
 - [Data and storage](data-and-storage.md)
 - [External integrations and feeds](external-integrations.md)

@@ -273,8 +273,10 @@ pub enum JobState {
 pub struct AnalysisJob {
     pub id: Uuid,
     pub tenant_id: Uuid,
+    pub registry_config_id: Uuid,
     pub coordinate: PackageCoordinate,
     pub artifact_digest: ArtifactDigest,
+    pub source_url: String,
     pub policy_snapshot_id: Uuid,
     pub state: JobState,
     pub retry_count: u16,
@@ -549,11 +551,13 @@ mod tests {
         let missing_analysis_policy_snapshot_id = serde_json::json!({
             "id": Uuid::now_v7(),
             "tenant_id": Uuid::now_v7(),
+            "registry_config_id": Uuid::now_v7(),
             "coordinate": {
                 "ecosystem": "npm",
                 "name": "left-pad",
             },
             "artifact_digest": sample_digest(),
+            "source_url": "https://registry.npmjs.org/left-pad/-/left-pad-1.3.0.tgz",
             "state": "queued",
             "retry_count": 0,
             "trace_id": "trace-002",

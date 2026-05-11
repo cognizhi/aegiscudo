@@ -10,6 +10,7 @@
   },
   "scripts": {
     "build": "pnpm --recursive --if-present build",
+    "coverage:check": "node scripts/check-coverage-thresholds.mjs",
     "dev": "pnpm --filter @aegiscudo/command-center dev",
     "lint": "pnpm --recursive --if-present lint",
     "openapi:generate": "openapi-typescript contracts/openapi/aegiscudo.openapi.yaml -o packages/shared-types/src/generated/aegiscudo-api.ts",

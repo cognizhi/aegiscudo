@@ -4,9 +4,11 @@ version = "0.1.0"
 description = "Python service foundations for Aegiscudo AI and sandbox orchestration."
 requires-python = ">=3.12"
 dependencies = [
+  "asyncpg>=0.30",
   "fastapi>=0.115",
   "google-genai>=1.0",
   "httpx>=0.28",
+  "jsonschema>=4.23",
   "langfuse>=3.0",
   "orjson>=3.10",
   "pydantic>=2.10",
@@ -22,6 +24,7 @@ dev = [
   "pip-audit>=2.9",
   "pytest>=8.4",
   "pytest-asyncio>=1.0",
+  "pytest-cov>=7.0",
   "ruff>=0.14",
 ]
 
@@ -45,3 +48,10 @@ exclude = ["^services/.*/tests/.*$"]
 testpaths = ["services/python-common/tests", "services/emergency-room/tests", "services/ai-analyst/tests"]
 pythonpath = ["services/python-common/src", "services/emergency-room/src", "services/ai-analyst/src"]
 asyncio_mode = "auto"
+
+[tool.coverage.run]
+source = ["services/python-common/src", "services/emergency-room/src", "services/ai-analyst/src"]
+
+[tool.coverage.report]
+show_missing = true
+skip_empty = true

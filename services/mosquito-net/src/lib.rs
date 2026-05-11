@@ -496,6 +496,9 @@ async fn proxy_get(
         resolved.config.policy_profile_id,
         resolved.config.adapter,
         trace_id.clone(),
+        upstream_request_url(&resolved.config.upstream_url, &resolved.upstream_path)
+            .ok()
+            .map(|url| url.to_string()),
         &resolved.upstream_path,
     ) {
         Ok(request) => request,
@@ -1135,6 +1138,7 @@ async fn prepare_metadata_body(
 ) -> Result<Vec<u8>, UpstreamProxyError> {
     let filtered =
         maybe_filter_metadata_body(state, resolved, parent_decision, headers, body).await?;
+    let filtered = maybe_apply_npm_fallback_metadata(resolved, parent_decision, headers, filtered);
     Ok(maybe_rewrite_metadata_body(
         adapter,
         mount_path,
@@ -1166,6 +1170,52 @@ async fn maybe_filter_metadata_body(
         }
         _ => Ok(body),
     }
+}
+
+fn maybe_apply_npm_fallback_metadata(
+    resolved: &ResolvedRegistryConfig,
+    parent_decision: &DecisionResponse,
+    headers: &HeaderMap,
+    body: Vec<u8>,
+) -> Vec<u8> {
+    let Some(content_type) = headers
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+    else {
+        return body;
+    };
+
+    if resolved.config.adapter != RegistryAdapter::Npm || !content_type.contains("json") {
+        return body;
+    }
+
+    if parent_decision.decision != PolicyDecision::FallbackToApprovedCandidate {
+        return body;
+    }
+
+    let Some(candidate) = parent_decision.fallback_coordinate.as_ref() else {
+        return body;
+    };
+
+    let Ok((kind, requested, explicit_version_or_integrity)) =
+        npm_request_context(&resolved.upstream_path)
+    else {
+        return body;
+    };
+
+    if kind != PackageRequestKind::Metadata
+        || explicit_version_or_integrity
+        || candidate.namespace != requested.namespace
+        || candidate.name != requested.name
+    {
+        return body;
+    }
+
+    let Some(candidate_version) = candidate.version.as_deref() else {
+        return body;
+    };
+
+    filter_npm_packument_to_version(body, candidate_version)
 }
 
 fn maybe_rewrite_metadata_body(
@@ -1327,6 +1377,7 @@ async fn candidate_allowed_for_url_with_digest(
             coordinate,
             trace_id: format!("{}:candidate:{}", parent_decision.trace_id, file_name),
             requested_digest: digest,
+            source_url: Some(url.to_owned()),
             explicit_version_or_integrity: true,
         },
     };
@@ -1461,6 +1512,48 @@ fn rewrite_npm_metadata_urls(mount_path: &str, proxy_base_url: &str, body: Vec<u
             ));
         }
     }
+    serde_json::to_vec(&value).unwrap_or(body)
+}
+
+fn filter_npm_packument_to_version(body: Vec<u8>, version: &str) -> Vec<u8> {
+    let Ok(mut value) = serde_json::from_slice::<serde_json::Value>(&body) else {
+        return body;
+    };
+
+    let Some(selected_version) = value
+        .get("versions")
+        .and_then(|versions| versions.get(version))
+        .cloned()
+    else {
+        return body;
+    };
+
+    let mut filtered_versions = serde_json::Map::new();
+    filtered_versions.insert(version.to_owned(), selected_version);
+    value["versions"] = serde_json::Value::Object(filtered_versions);
+
+    if let Some(dist_tags) = value.get_mut("dist-tags").and_then(|tags| tags.as_object_mut()) {
+        dist_tags.insert(
+            "latest".to_owned(),
+            serde_json::Value::String(version.to_owned()),
+        );
+    }
+
+    if let Some(times) = value.get_mut("time").and_then(|time| time.as_object_mut())
+        && let Some(version_time) = times.get(version).cloned()
+    {
+        let created = times.get("created").cloned();
+        let modified = times.get("modified").cloned();
+        times.clear();
+        if let Some(created) = created {
+            times.insert("created".to_owned(), created);
+        }
+        if let Some(modified) = modified {
+            times.insert("modified".to_owned(), modified);
+        }
+        times.insert(version.to_owned(), version_time);
+    }
+
     serde_json::to_vec(&value).unwrap_or(body)
 }
 
@@ -1840,6 +1933,7 @@ fn decision_request_for_adapter(
     policy_profile_id: Uuid,
     adapter: RegistryAdapter,
     trace_id: String,
+    source_url: Option<String>,
     upstream_path: &str,
 ) -> Result<DecisionRequest, StatusCode> {
     let (kind, coordinate, explicit_version_or_integrity) = match adapter {
@@ -1858,6 +1952,7 @@ fn decision_request_for_adapter(
         coordinate,
         trace_id,
         requested_digest: None,
+        source_url,
         explicit_version_or_integrity,
     };
     Ok(DecisionRequest {
@@ -2188,11 +2283,330 @@ mod tests {
     use axum::http::header::AUTHORIZATION;
     use axum::{extract::State as AxumState, routing::post};
     use registry_config::{CredentialAuthType, RegistryConfig};
-    use std::sync::{
-        Arc, Mutex,
-        atomic::{AtomicUsize, Ordering},
+    use sqlx::postgres::PgPoolOptions;
+    use std::{
+        fs,
+        path::PathBuf,
+        process::{Command, Output},
+        sync::{
+            Arc, Mutex,
+            atomic::{AtomicUsize, Ordering},
+        },
+        time::Duration,
     };
     use tokio::task::JoinHandle;
+
+    fn repo_root() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(2)
+            .expect("repo root")
+            .to_path_buf()
+    }
+
+    fn run_local_command(repo_root: &PathBuf, program: &str, args: &[&str]) -> Output {
+        Command::new(program)
+            .args(args)
+            .current_dir(repo_root)
+            .output()
+            .unwrap_or_else(|error| panic!("failed to run {program}: {error}"))
+    }
+
+    fn assert_command_success(program: &str, args: &[&str], output: &Output) {
+        assert!(
+            output.status.success(),
+            "{program} {} failed with status {:?}\nstdout:\n{}\nstderr:\n{}",
+            args.join(" "),
+            output.status.code(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+    }
+
+    fn recreate_live_local_proxy_stack(repo_root: &PathBuf) {
+        let restart_registry = run_local_command(
+            repo_root,
+            "docker",
+            &[
+                "compose",
+                "-f",
+                "infra/docker-compose.yml",
+                "up",
+                "-d",
+                "--force-recreate",
+                "npm-fixture-registry",
+                "pypi-fixture-registry",
+            ],
+        );
+        assert_command_success(
+            "docker",
+            &[
+                "compose",
+                "-f",
+                "infra/docker-compose.yml",
+                "up",
+                "-d",
+                "--force-recreate",
+                "npm-fixture-registry",
+                "pypi-fixture-registry",
+            ],
+            &restart_registry,
+        );
+
+        let reseed = run_local_command(repo_root, "sh", &["scripts/seed-local-control-plane.sh"]);
+        assert_command_success("sh", &["scripts/seed-local-control-plane.sh"], &reseed);
+
+        let restart_proxy_stack = run_local_command(
+            repo_root,
+            "docker",
+            &[
+                "compose",
+                "-f",
+                "infra/docker-compose.yml",
+                "up",
+                "-d",
+                "--build",
+                "--force-recreate",
+                "triage-counter",
+                "mosquito-net",
+            ],
+        );
+        assert_command_success(
+            "docker",
+            &[
+                "compose",
+                "-f",
+                "infra/docker-compose.yml",
+                "up",
+                "-d",
+                "--build",
+                "--force-recreate",
+                "triage-counter",
+                "mosquito-net",
+            ],
+            &restart_proxy_stack,
+        );
+    }
+
+    fn create_temp_npm_dirs(prefix: &str) -> (PathBuf, PathBuf) {
+        let project_dir = std::env::temp_dir().join(format!(
+            "{prefix}-project-{}",
+            Uuid::now_v7().simple()
+        ));
+        let cache_dir = std::env::temp_dir().join(format!(
+            "{prefix}-cache-{}",
+            Uuid::now_v7().simple()
+        ));
+        fs::create_dir_all(&project_dir).expect("create temp npm project");
+        fs::create_dir_all(&cache_dir).expect("create temp npm cache");
+        (project_dir, cache_dir)
+    }
+
+    fn create_temp_python_dirs(prefix: &str) -> (PathBuf, PathBuf) {
+        let project_dir = std::env::temp_dir().join(format!(
+            "{prefix}-project-{}",
+            Uuid::now_v7().simple()
+        ));
+        let cache_dir = std::env::temp_dir().join(format!(
+            "{prefix}-cache-{}",
+            Uuid::now_v7().simple()
+        ));
+        fs::create_dir_all(&project_dir).expect("create temp python project");
+        fs::create_dir_all(&cache_dir).expect("create temp python cache");
+        (project_dir, cache_dir)
+    }
+
+    fn fetch_json(url: &str) -> serde_json::Value {
+        for attempt in 0..20 {
+            let result = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("build tokio runtime")
+                .block_on(async {
+                    let response = reqwest::get(url).await?;
+                    response.json().await
+                });
+            match result {
+                Ok(payload) => return payload,
+                Err(error) if attempt < 19 => {
+                    let _ = error;
+                    std::thread::sleep(Duration::from_millis(250));
+                }
+                Err(error) => panic!("request json endpoint: {error}"),
+            }
+        }
+        unreachable!("json fetch attempts exhausted")
+    }
+
+    fn fetch_bytes(url: &str) -> (StatusCode, Vec<u8>) {
+        for attempt in 0..20 {
+            let result = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("build tokio runtime")
+                .block_on(async {
+                    let response = reqwest::get(url).await?;
+                    let status = response.status();
+                    let body = response.bytes().await?;
+                    Ok::<_, reqwest::Error>((status, body.to_vec()))
+                });
+            match result {
+                Ok(payload) => return payload,
+                Err(error) if attempt < 19 => {
+                    let _ = error;
+                    std::thread::sleep(Duration::from_millis(250));
+                }
+                Err(error) => panic!("request binary endpoint: {error}"),
+            }
+        }
+        unreachable!("binary fetch attempts exhausted")
+    }
+
+    fn live_analysis_job_count(package_name: &str, package_version: &str) -> i64 {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build tokio runtime")
+            .block_on(async {
+                let pool = PgPoolOptions::new()
+                    .max_connections(1)
+                    .connect("postgres://aegiscudo:aegiscudo@127.0.0.1:15432/aegiscudo")
+                    .await
+                    .expect("connect live local postgres");
+                let count = sqlx::query_scalar::<_, i64>(
+                    r#"
+                    SELECT COUNT(*)
+                    FROM analysis_jobs
+                    WHERE tenant_id = $1
+                      AND package_name = $2
+                      AND package_version = $3
+                    "#,
+                )
+                .bind(
+                    Uuid::parse_str("018f4a6f-55d0-7000-8000-000000000001")
+                        .expect("seed tenant id"),
+                )
+                .bind(package_name)
+                .bind(package_version)
+                .fetch_one(&pool)
+                .await
+                .expect("count analysis jobs");
+                pool.close().await;
+                count
+            })
+    }
+
+    fn insert_live_override(scope: serde_json::Value, expires_at: chrono::DateTime<chrono::Utc>) -> Uuid {
+        let override_id = Uuid::now_v7();
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build tokio runtime")
+            .block_on(async {
+                let pool = PgPoolOptions::new()
+                    .max_connections(1)
+                    .connect("postgres://aegiscudo:aegiscudo@127.0.0.1:15432/aegiscudo")
+                    .await
+                    .expect("connect live local postgres");
+                sqlx::query(
+                    r#"
+                    INSERT INTO overrides (
+                      id,
+                      tenant_id,
+                      scope,
+                      reason,
+                      requested_by,
+                      approved_by,
+                      status,
+                      expires_at,
+                      created_at
+                    )
+                    VALUES ($1, $2, $3, $4, $5, $6, 'approved', $7, NOW())
+                    "#,
+                )
+                .bind(override_id)
+                .bind(
+                    Uuid::parse_str("018f4a6f-55d0-7000-8000-000000000001")
+                        .expect("seed tenant id"),
+                )
+                .bind(scope)
+                .bind("Live override expiry resumption proof")
+                .bind(
+                    Uuid::parse_str("018f4a6f-55d0-7000-8000-000000000011")
+                        .expect("seed approver id"),
+                )
+                .bind(
+                    Uuid::parse_str("018f4a6f-55d0-7000-8000-000000000011")
+                        .expect("seed approver id"),
+                )
+                .bind(expires_at)
+                .execute(&pool)
+                .await
+                .expect("insert live override");
+                pool.close().await;
+            });
+        override_id
+    }
+
+    fn update_live_override_expiry(override_id: Uuid, expires_at: chrono::DateTime<chrono::Utc>) {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build tokio runtime")
+            .block_on(async {
+                let pool = PgPoolOptions::new()
+                    .max_connections(1)
+                    .connect("postgres://aegiscudo:aegiscudo@127.0.0.1:15432/aegiscudo")
+                    .await
+                    .expect("connect live local postgres");
+                sqlx::query(
+                    r#"
+                    UPDATE overrides
+                    SET expires_at = $1
+                    WHERE tenant_id = $2 AND id = $3
+                    "#,
+                )
+                .bind(expires_at)
+                .bind(
+                    Uuid::parse_str("018f4a6f-55d0-7000-8000-000000000001")
+                        .expect("seed tenant id"),
+                )
+                .bind(override_id)
+                .execute(&pool)
+                .await
+                .expect("expire live override");
+                pool.close().await;
+            });
+    }
+
+    fn delete_live_override(override_id: Uuid) {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build tokio runtime")
+            .block_on(async {
+                let pool = PgPoolOptions::new()
+                    .max_connections(1)
+                    .connect("postgres://aegiscudo:aegiscudo@127.0.0.1:15432/aegiscudo")
+                    .await
+                    .expect("connect live local postgres");
+                sqlx::query(
+                    r#"
+                    DELETE FROM overrides
+                    WHERE tenant_id = $1 AND id = $2
+                    "#,
+                )
+                .bind(
+                    Uuid::parse_str("018f4a6f-55d0-7000-8000-000000000001")
+                        .expect("seed tenant id"),
+                )
+                .bind(override_id)
+                .execute(&pool)
+                .await
+                .expect("delete live override");
+                pool.close().await;
+            });
+    }
 
     #[derive(Debug, Clone)]
     struct FakeTriageState {
@@ -2636,7 +3050,54 @@ mod tests {
             .expect("proxy request");
         assert_eq!(response.status(), StatusCode::OK);
         assert!(response.headers().contains_key(ADVISORY_HEADER));
+        let advisory: AdvisoryHeaderPayload = serde_json::from_str(
+            response
+                .headers()
+                .get(ADVISORY_HEADER)
+                .expect("advisory header")
+                .to_str()
+                .expect("advisory header text"),
+        )
+        .expect("advisory payload");
         let body: serde_json::Value = response.json().await.expect("json body");
+        assert_eq!(advisory.decision, PolicyDecision::BlockKnownMalicious);
+        assert_eq!(body["name"], "left-pad");
+
+        mosquito_handle.abort();
+        triage_handle.abort();
+        upstream_handle.abort();
+    }
+
+    #[tokio::test]
+    async fn shadow_mode_keeps_blocking_decision_advisory() {
+        let (triage_url, _calls, triage_handle) =
+            spawn_fake_triage(PolicyDecision::BlockKnownMalicious, PolicyMode::Shadow, None).await;
+        let (upstream_url, _upstream_paths, upstream_handle) = spawn_fake_upstream().await;
+        let store = RegistryConfigStore::new(vec![config_with_upstream(
+            "/proxy/npm-public",
+            PolicyMode::Shadow,
+            &upstream_url,
+        )])
+        .expect("store");
+        let (base_url, mosquito_handle) =
+            spawn_mosquito(store, &triage_url, ProxyRateLimitConfig::default()).await;
+
+        let response = reqwest::get(format!("{base_url}/proxy/npm-public/left-pad"))
+            .await
+            .expect("proxy request");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(response.headers().contains_key(ADVISORY_HEADER));
+        let advisory: AdvisoryHeaderPayload = serde_json::from_str(
+            response
+                .headers()
+                .get(ADVISORY_HEADER)
+                .expect("advisory header")
+                .to_str()
+                .expect("advisory header text"),
+        )
+        .expect("advisory payload");
+        let body: serde_json::Value = response.json().await.expect("json body");
+        assert_eq!(advisory.decision, PolicyDecision::BlockKnownMalicious);
         assert_eq!(body["name"], "left-pad");
 
         mosquito_handle.abort();
@@ -2711,6 +3172,60 @@ mod tests {
         mosquito_handle.abort();
         triage_handle.abort();
         upstream_handle.abort();
+    }
+
+    #[test]
+    fn fallback_metadata_filters_same_package_to_candidate_version() {
+        let resolved = ResolvedRegistryConfig {
+            config: config("/proxy/npm-public", PolicyMode::Enforce),
+            upstream_path: "left-pad".to_owned(),
+        };
+        let decision = DecisionResponse {
+            decision: PolicyDecision::FallbackToApprovedCandidate,
+            tenant_id: resolved.config.tenant_id,
+            policy_profile_id: resolved.config.policy_profile_id,
+            policy_snapshot_id: Uuid::now_v7(),
+            mode: PolicyMode::Enforce,
+            feed_state: aegiscudo_core::FeedState::Fresh,
+            feed_snapshot_age_seconds: 0,
+            trace_id: "trace-fallback".to_owned(),
+            rationale: vec!["eligible resolver metadata flow can use approved fallback candidate"
+                .to_owned()],
+            fallback_coordinate: Some(PackageCoordinate::new(
+                PackageEcosystem::Npm,
+                "left-pad",
+                Some("1.0.0"),
+                None::<String>,
+            )),
+            create_analysis_job: false,
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+        let body = br#"{
+            "name": "left-pad",
+            "dist-tags": { "latest": "1.2.0" },
+            "versions": {
+                "1.0.0": { "name": "left-pad", "version": "1.0.0" },
+                "1.2.0": { "name": "left-pad", "version": "1.2.0" }
+            },
+            "time": {
+                "created": "2026-05-01T00:00:00.000Z",
+                "modified": "2026-05-03T00:00:00.000Z",
+                "1.0.0": "2026-05-01T00:00:00.000Z",
+                "1.2.0": "2026-05-03T00:00:00.000Z"
+            }
+        }"#
+        .to_vec();
+
+        let filtered = maybe_apply_npm_fallback_metadata(&resolved, &decision, &headers, body);
+        let filtered: serde_json::Value =
+            serde_json::from_slice(&filtered).expect("filtered npm metadata json");
+
+        assert_eq!(filtered["dist-tags"]["latest"], "1.0.0");
+        assert_eq!(filtered["versions"].as_object().map(|versions| versions.len()), Some(1));
+        assert!(filtered["versions"].get("1.2.0").is_none());
+        assert_eq!(filtered["versions"]["1.0.0"]["version"], "1.0.0");
+        assert!(filtered["time"].get("1.2.0").is_none());
     }
 
     #[tokio::test]
@@ -3277,5 +3792,427 @@ mod tests {
         assert_eq!(inbound.action, "proxy.request.received");
         assert_eq!(completed.action, "proxy.request.completed");
         assert_eq!(completed.metadata.get("decision"), Some(&json!("ALLOW")));
+    }
+
+    #[test]
+    #[ignore = "requires live local postgres, npm-fixture-registry, triage-counter, mosquito-net, and npm"]
+    fn npm_install_works_against_live_local_proxy() {
+        let repo_root = repo_root();
+        recreate_live_local_proxy_stack(&repo_root);
+        let (project_dir, cache_dir) = create_temp_npm_dirs("aegiscudo-live-npm-allow");
+
+        let npm_init = Command::new("npm")
+            .args(["init", "-y"])
+            .current_dir(&project_dir)
+            .output()
+            .expect("run npm init");
+        assert_command_success("npm", &["init", "-y"], &npm_init);
+
+        let npm_install = Command::new("npm")
+            .args([
+                "install",
+                "aegiscudo-benign-npm-fixture@1.0.0",
+                "--registry",
+                "http://127.0.0.1:18000/proxy/npm-fixtures/",
+                "--cache",
+                cache_dir.to_str().expect("cache dir utf8"),
+                "--no-audit",
+                "--no-fund",
+            ])
+            .current_dir(&project_dir)
+            .output()
+            .expect("run npm install");
+        assert_command_success(
+            "npm",
+            &[
+                "install",
+                "aegiscudo-benign-npm-fixture@1.0.0",
+                "--registry",
+                "http://127.0.0.1:18000/proxy/npm-fixtures/",
+                "--cache",
+                cache_dir.to_str().expect("cache dir utf8"),
+                "--no-audit",
+                "--no-fund",
+            ],
+            &npm_install,
+        );
+
+        let installed_package = fs::read_to_string(
+            project_dir.join("node_modules/aegiscudo-benign-npm-fixture/package.json"),
+        )
+        .expect("read installed package.json");
+        let installed_package: serde_json::Value =
+            serde_json::from_str(&installed_package).expect("installed package json");
+
+        assert_eq!(installed_package["name"], "aegiscudo-benign-npm-fixture");
+        assert_eq!(installed_package["version"], "1.0.0");
+
+        let _ = fs::remove_dir_all(&project_dir);
+        let _ = fs::remove_dir_all(&cache_dir);
+    }
+
+    #[test]
+    #[ignore = "requires live local postgres, npm-fixture-registry, triage-counter, mosquito-net, and npm"]
+    fn npm_latest_metadata_falls_back_to_prior_allowed_version_against_live_local_proxy() {
+        let repo_root = repo_root();
+        recreate_live_local_proxy_stack(&repo_root);
+
+        let (seed_status, seed_body) = fetch_bytes(
+            "http://127.0.0.1:18000/proxy/npm-fixtures/aegiscudo-benign-npm-fixture/-/aegiscudo-benign-npm-fixture-1.0.0.tgz",
+        );
+        assert_eq!(seed_status, StatusCode::OK);
+        assert!(!seed_body.is_empty());
+
+        let packument = fetch_json(
+            "http://127.0.0.1:18000/proxy/npm-fixtures/aegiscudo-benign-npm-fixture",
+        );
+        assert_eq!(packument["dist-tags"]["latest"], "1.0.0");
+        assert_eq!(packument["versions"].as_object().map(|versions| versions.len()), Some(1));
+        assert!(packument["versions"].get("1.2.0").is_none());
+
+        let (project_dir, cache_dir) = create_temp_npm_dirs("aegiscudo-live-npm-fallback");
+        let npm_init = Command::new("npm")
+            .args(["init", "-y"])
+            .current_dir(&project_dir)
+            .output()
+            .expect("run npm init for fallback project");
+        assert_command_success("npm", &["init", "-y"], &npm_init);
+
+        let npm_install = Command::new("npm")
+            .args([
+                "install",
+                "aegiscudo-benign-npm-fixture",
+                "--registry",
+                "http://127.0.0.1:18000/proxy/npm-fixtures/",
+                "--cache",
+                cache_dir.to_str().expect("cache dir utf8"),
+                "--no-audit",
+                "--no-fund",
+            ])
+            .current_dir(&project_dir)
+            .output()
+            .expect("run fallback npm install");
+        assert_command_success(
+            "npm",
+            &[
+                "install",
+                "aegiscudo-benign-npm-fixture",
+                "--registry",
+                "http://127.0.0.1:18000/proxy/npm-fixtures/",
+                "--cache",
+                cache_dir.to_str().expect("cache dir utf8"),
+                "--no-audit",
+                "--no-fund",
+            ],
+            &npm_install,
+        );
+
+        let installed_package = fs::read_to_string(
+            project_dir.join("node_modules/aegiscudo-benign-npm-fixture/package.json"),
+        )
+        .expect("read installed fallback package.json");
+        let installed_package: serde_json::Value =
+            serde_json::from_str(&installed_package).expect("installed fallback package json");
+
+        assert_eq!(installed_package["version"], "1.0.0");
+
+        let _ = fs::remove_dir_all(&project_dir);
+        let _ = fs::remove_dir_all(&cache_dir);
+    }
+
+    #[test]
+    #[ignore = "requires live local postgres, npm-fixture-registry, triage-counter, mosquito-net, and npm"]
+    fn npm_ci_lockfile_install_does_not_fallback_against_live_local_proxy() {
+        let repo_root = repo_root();
+        recreate_live_local_proxy_stack(&repo_root);
+
+        let (seed_status, seed_body) = fetch_bytes(
+            "http://127.0.0.1:18000/proxy/npm-fixtures/aegiscudo-benign-npm-fixture/-/aegiscudo-benign-npm-fixture-1.0.0.tgz",
+        );
+        assert_eq!(seed_status, StatusCode::OK);
+        assert!(!seed_body.is_empty());
+
+        let (project_dir, cache_dir) = create_temp_npm_dirs("aegiscudo-live-npm-lockfile");
+        let npm_init = Command::new("npm")
+            .args(["init", "-y"])
+            .current_dir(&project_dir)
+            .output()
+            .expect("run npm init for lockfile project");
+        assert_command_success("npm", &["init", "-y"], &npm_init);
+
+        let package_lock_only = Command::new("npm")
+            .args([
+                "install",
+                "aegiscudo-benign-npm-fixture@1.2.0",
+                "--package-lock-only",
+                "--ignore-scripts",
+                "--registry",
+                "http://127.0.0.1:18080/",
+                "--cache",
+                cache_dir.to_str().expect("cache dir utf8"),
+                "--no-audit",
+                "--no-fund",
+            ])
+            .current_dir(&project_dir)
+            .output()
+            .expect("generate npm lockfile");
+        assert_command_success(
+            "npm",
+            &[
+                "install",
+                "aegiscudo-benign-npm-fixture@1.2.0",
+                "--package-lock-only",
+                "--ignore-scripts",
+                "--registry",
+                "http://127.0.0.1:18080/",
+                "--cache",
+                cache_dir.to_str().expect("cache dir utf8"),
+                "--no-audit",
+                "--no-fund",
+            ],
+            &package_lock_only,
+        );
+
+        let package_lock = fs::read_to_string(project_dir.join("package-lock.json"))
+            .expect("read package-lock.json");
+        let package_lock: serde_json::Value =
+            serde_json::from_str(&package_lock).expect("parse package-lock.json");
+        let locked_dependency = &package_lock["packages"]["node_modules/aegiscudo-benign-npm-fixture"];
+        assert_eq!(locked_dependency["version"], "1.2.0");
+        assert!(locked_dependency["integrity"].as_str().is_some_and(|value| !value.is_empty()));
+
+        let npm_ci = Command::new("npm")
+            .args([
+                "ci",
+                "--ignore-scripts",
+                "--registry",
+                "http://127.0.0.1:18000/proxy/npm-fixtures/",
+                "--cache",
+                cache_dir.to_str().expect("cache dir utf8"),
+                "--no-audit",
+                "--no-fund",
+            ])
+            .current_dir(&project_dir)
+            .output()
+            .expect("run npm ci");
+        assert_command_success(
+            "npm",
+            &[
+                "ci",
+                "--ignore-scripts",
+                "--registry",
+                "http://127.0.0.1:18000/proxy/npm-fixtures/",
+                "--cache",
+                cache_dir.to_str().expect("cache dir utf8"),
+                "--no-audit",
+                "--no-fund",
+            ],
+            &npm_ci,
+        );
+
+        let installed_package = fs::read_to_string(
+            project_dir.join("node_modules/aegiscudo-benign-npm-fixture/package.json"),
+        )
+        .expect("read installed lockfile package.json");
+        let installed_package: serde_json::Value =
+            serde_json::from_str(&installed_package).expect("installed lockfile package json");
+
+        assert_eq!(installed_package["version"], "1.2.0");
+
+        let _ = fs::remove_dir_all(&project_dir);
+        let _ = fs::remove_dir_all(&cache_dir);
+    }
+
+    #[test]
+    #[ignore = "requires live local postgres, pypi-fixture-registry, triage-counter, mosquito-net, python3, and pip"]
+    fn pypi_simple_index_filters_blocked_candidate_and_still_installs_against_live_local_proxy() {
+        let repo_root = repo_root();
+        recreate_live_local_proxy_stack(&repo_root);
+
+        let (index_status, index_body) = fetch_bytes(
+            "http://127.0.0.1:18000/proxy/pypi-fixtures/simple/aegiscudo-benign-pypi-fixture/",
+        );
+        assert_eq!(index_status, StatusCode::OK);
+        let index_body = String::from_utf8(index_body).expect("simple index utf8");
+        assert!(index_body.contains("aegiscudo_benign_pypi_fixture-1.0.0-py3-none-any.whl"));
+        assert!(!index_body.contains("aegiscudo_benign_pypi_fixture-1.1.0-py3-none-any.whl"));
+
+        let (project_dir, cache_dir) = create_temp_python_dirs("aegiscudo-live-pypi-filter");
+        let venv_create = Command::new("python3")
+            .args(["-m", "venv", ".venv"])
+            .current_dir(&project_dir)
+            .output()
+            .expect("create python venv");
+        assert_command_success("python3", &["-m", "venv", ".venv"], &venv_create);
+
+        let venv_python = project_dir.join(".venv/bin/python");
+        let pip_install = Command::new(&venv_python)
+            .args([
+                "-m",
+                "pip",
+                "install",
+                "--no-deps",
+                "--index-url",
+                "http://127.0.0.1:18000/proxy/pypi-fixtures/simple",
+                "--trusted-host",
+                "127.0.0.1",
+                "--cache-dir",
+                cache_dir.to_str().expect("cache dir utf8"),
+                "--disable-pip-version-check",
+                "aegiscudo-benign-pypi-fixture",
+            ])
+            .current_dir(&project_dir)
+            .output()
+            .expect("run pip install through proxy");
+        assert!(
+            pip_install.status.success(),
+            "python -m pip install --no-deps --index-url http://127.0.0.1:18000/proxy/pypi-fixtures/simple --trusted-host 127.0.0.1 --cache-dir {} --disable-pip-version-check aegiscudo-benign-pypi-fixture failed with status {:?}\nstdout:\n{}\nstderr:\n{}",
+            cache_dir.to_str().expect("cache dir utf8"),
+            pip_install.status.code(),
+            String::from_utf8_lossy(&pip_install.stdout),
+            String::from_utf8_lossy(&pip_install.stderr),
+        );
+
+        let installed_version = Command::new(&venv_python)
+            .args([
+                "-c",
+                "import importlib.metadata as metadata; print(metadata.version('aegiscudo-benign-pypi-fixture'))",
+            ])
+            .current_dir(&project_dir)
+            .output()
+            .expect("read installed PyPI package version");
+        assert_command_success(
+            ".venv/bin/python",
+            &[
+                "-c",
+                "import importlib.metadata as metadata; print(metadata.version('aegiscudo-benign-pypi-fixture'))",
+            ],
+            &installed_version,
+        );
+        assert_eq!(String::from_utf8_lossy(&installed_version.stdout).trim(), "1.0.0");
+
+        let _ = fs::remove_dir_all(&project_dir);
+        let _ = fs::remove_dir_all(&cache_dir);
+    }
+
+    #[test]
+    #[ignore = "requires live local postgres, npm-fixture-registry, triage-counter, and mosquito-net"]
+    fn unknown_npm_artifact_request_creates_analysis_job_against_live_local_proxy() {
+        let repo_root = repo_root();
+        recreate_live_local_proxy_stack(&repo_root);
+
+        let package_name = format!(
+            "aegiscudo-unknown-npm-fixture-{}",
+            Uuid::now_v7().simple()
+        );
+        let package_version = "0.0.1";
+        assert_eq!(live_analysis_job_count(&package_name, package_version), 0);
+
+        let tarball_url = format!(
+            "http://127.0.0.1:18000/proxy/npm-fixtures/{package_name}/-/{package_name}-{package_version}.tgz"
+        );
+        let (tarball_status, tarball_body) = fetch_bytes(&tarball_url);
+        assert_eq!(tarball_status, StatusCode::FORBIDDEN);
+
+        let tarball_body: serde_json::Value =
+            serde_json::from_slice(&tarball_body).expect("unknown artifact response json");
+        assert_eq!(tarball_body["decision"], "QUARANTINE_PENDING_ANALYSIS");
+        assert_eq!(live_analysis_job_count(&package_name, package_version), 1);
+    }
+
+    #[test]
+    #[ignore = "requires live local postgres, npm-fixture-registry, triage-counter, and mosquito-net"]
+    fn approved_override_expiry_resumes_policy_enforcement_against_live_local_proxy() {
+        let repo_root = repo_root();
+        recreate_live_local_proxy_stack(&repo_root);
+
+        let override_id = insert_live_override(
+            json!({
+                "ecosystem": "npm",
+                "name": "fresh-postinstall",
+                "version": "0.1.0",
+                "kind": "artifact",
+                "effect": "allow"
+            }),
+            chrono::Utc::now() + chrono::Duration::hours(1),
+        );
+
+        let tarball_url =
+            "http://127.0.0.1:18000/proxy/npm-fixtures/fresh-postinstall/-/fresh-postinstall-0.1.0.tgz";
+        let (allowed_status, _allowed_body) = fetch_bytes(tarball_url);
+        assert_eq!(allowed_status, StatusCode::OK);
+
+        update_live_override_expiry(override_id, chrono::Utc::now() - chrono::Duration::minutes(1));
+        recreate_live_local_proxy_stack(&repo_root);
+
+        let (blocked_status, blocked_body) = fetch_bytes(tarball_url);
+        assert_eq!(blocked_status, StatusCode::FORBIDDEN);
+        let blocked_body: serde_json::Value =
+            serde_json::from_slice(&blocked_body).expect("expired override response json");
+        assert_eq!(blocked_body["decision"], "BLOCK_POLICY_VIOLATION");
+
+        delete_live_override(override_id);
+    }
+
+    #[test]
+    #[ignore = "requires live local postgres, npm-fixture-registry, triage-counter, mosquito-net, and npm"]
+    fn policy_blocked_npm_install_fails_against_live_local_proxy() {
+        let repo_root = repo_root();
+        recreate_live_local_proxy_stack(&repo_root);
+        let (project_dir, cache_dir) = create_temp_npm_dirs("aegiscudo-live-npm-quarantine");
+
+        let npm_init = Command::new("npm")
+            .args(["init", "-y"])
+            .current_dir(&project_dir)
+            .output()
+            .expect("run npm init");
+        assert_command_success("npm", &["init", "-y"], &npm_init);
+
+        let npm_install = Command::new("npm")
+            .args([
+                "install",
+                "fresh-postinstall@0.1.0",
+                "--registry",
+                "http://127.0.0.1:18000/proxy/npm-fixtures/",
+                "--cache",
+                cache_dir.to_str().expect("cache dir utf8"),
+                "--ignore-scripts",
+                "--no-audit",
+                "--no-fund",
+            ])
+            .current_dir(&project_dir)
+            .output()
+            .expect("run policy-blocked npm install");
+        assert!(
+            !npm_install.status.success(),
+            "expected npm install to fail for policy-blocked package\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&npm_install.stdout),
+            String::from_utf8_lossy(&npm_install.stderr),
+        );
+
+        let (tarball_status, tarball_body): (StatusCode, serde_json::Value) =
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("build tokio runtime")
+                .block_on(async {
+                    let tarball_response = reqwest::get(
+                        "http://127.0.0.1:18000/proxy/npm-fixtures/fresh-postinstall/-/fresh-postinstall-0.1.0.tgz",
+                    )
+                    .await
+                    .expect("request policy-blocked tarball");
+                    let tarball_status = tarball_response.status();
+                    let tarball_body = tarball_response
+                        .json()
+                        .await
+                        .expect("policy-blocked tarball json body");
+                    (tarball_status, tarball_body)
+                });
+        assert_eq!(tarball_status, StatusCode::FORBIDDEN);
+        assert_eq!(tarball_body["decision"], "BLOCK_POLICY_VIOLATION");
+        assert!(!project_dir.join("node_modules/fresh-postinstall").exists());
+
+        let _ = fs::remove_dir_all(&project_dir);
+        let _ = fs::remove_dir_all(&cache_dir);
     }
 }

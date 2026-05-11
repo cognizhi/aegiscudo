@@ -23,4 +23,4 @@ Aegiscudo API is the control-plane entry point for registry, feed, and AI provid
 
 ## Current Implementation State
 
-The Rust service placeholder and initial OpenAPI skeleton exist. Real API handlers, repositories, auth/RBAC, and contract tests remain Phase 1C work.
+The Rust service now serves real tenant-scoped dashboard, evidence, override, audit, registry-config, credential, AI-provider, CLI, and policy-simulator routes, and the OpenAPI contract plus generated shared types are part of the active workflow. Focused PostgreSQL-backed contract tests exist for the investigation routes and the newer policy-profile or replay routes, while auth/RBAC enforcement, broader mutation coverage, report/export surfaces, and fuller integration or E2E validation remain Phase 1C/1D work.

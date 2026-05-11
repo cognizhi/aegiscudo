@@ -36,5 +36,6 @@ Do not use ADRs for:
 | [0007](0007-request-time-triage-client-and-outage-binding.md) | Request-Time Triage Client and Outage Binding | Accepted | control-plane |
 | [0008](0008-analysis-job-request-context-before-artifact-persistence.md) | Analysis Job Request Context Before Artifact Persistence | Accepted | control-plane |
 | [0009](0009-phase-1a-known-vulnerability-threshold-policy-contract.md) | Phase 1A Known Vulnerability Threshold Policy Contract | Accepted | control-plane |
+| [0010](0010-auth-session-and-mock-identity-contract-boundary.md) | Auth Session and Mock Identity Contract Boundary | Accepted | interface |
 
 Use [the ADR template](_template.md) for new records.

@@ -1,0 +1,11 @@
+{
+  "name": "ai-canary-scribbler",
+  "version": "1.0.0",
+  "description": "Aegiscudo malicious npm fixture that modifies planted AI-agent canary files during install.",
+  "main": "index.js",
+  "scripts": {
+    "preinstall": "node preinstall.js"
+  },
+  "keywords": [],
+  "license": "MIT"
+}

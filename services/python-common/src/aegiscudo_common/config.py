@@ -4,6 +4,7 @@ import os
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from ipaddress import IPv4Network, ip_address
+from pathlib import Path
 from urllib.parse import urlparse
 
 
@@ -40,6 +41,45 @@ LOCAL_LLM_ALLOWED_IPV4_NETWORKS = (
     IPv4Network("172.16.0.0/12"),
     IPv4Network("192.168.0.0/16"),
 )
+
+
+def load_workspace_env_file(
+    *,
+    env_file: Path | None = None,
+    override: bool = False,
+) -> bool:
+    resolved_path = env_file or Path(__file__).resolve().parents[4] / ".env"
+    if not resolved_path.is_file():
+        return False
+
+    for raw_line in resolved_path.read_text(encoding="utf-8").splitlines():
+        stripped = raw_line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if stripped.startswith("export "):
+            stripped = stripped[7:].strip()
+        if "=" not in stripped:
+            continue
+
+        name, raw_value = stripped.split("=", 1)
+        key = name.strip()
+        if not key:
+            continue
+        if not override and empty_to_none(os.environ.get(key)) is not None:
+            continue
+        os.environ[key] = _parse_env_value(raw_value)
+
+    return True
+
+
+def _parse_env_value(raw_value: str) -> str:
+    value = raw_value.strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
+        return value[1:-1]
+    comment_index = value.find(" #")
+    if comment_index != -1:
+        value = value[:comment_index]
+    return value.strip()
 
 
 def service_startup_settings(

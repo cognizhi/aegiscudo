@@ -18,4 +18,4 @@ The UI uses Next.js App Router, TypeScript, Tailwind CSS v4, Radix-compatible pr
 
 ## Current Implementation State
 
-The Next.js scaffold, dashboard shell, theme tokens, sidebar, metrics, chart, decision table, tooltip primitive, Vitest test, and Playwright smoke test exist. Real workflows, API integration, persisted personalization, command palette, auth/RBAC, accessibility checks, and full Playwright coverage remain Phase 1C work.
+The Next.js App Router shell, theme tokens, sidebar, KPI/dashboard panels, tenant-scoped timeline, quarantine review, artifact evidence viewer, override workflow, admin panels, and policy simulator are implemented and wired to live or typed control-plane routes. Route-mocked and seeded Playwright coverage now exists for the dashboard, admin, override, and policy simulator slices, while persisted personalization, command palette, auth/RBAC, accessibility hardening, and broader live seeded workflow coverage remain open.

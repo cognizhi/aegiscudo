@@ -169,25 +169,25 @@ impl PostgresRegistryConfigRepository {
         let rows = sqlx::query(
             r#"
             SELECT
-              id,
-              tenant_id,
-              name,
-              adapter::text AS adapter,
-              upstream_url,
-              mount_path,
-              auth_type::text AS auth_type,
-              credential_ref,
+                            registry_configs.id,
+                            registry_configs.tenant_id,
+                            registry_configs.name,
+                            registry_configs.adapter::text AS adapter,
+                            registry_configs.upstream_url,
+                            registry_configs.mount_path,
+                            registry_configs.auth_type::text AS auth_type,
+                            registry_configs.credential_ref,
               credential.name AS credential_env_var,
-              mode::text AS mode,
-              policy_profile_id,
-              cache_ttl_seconds,
-              verify_upstream_tls
+                            registry_configs.mode::text AS mode,
+                            registry_configs.policy_profile_id,
+                            registry_configs.cache_ttl_seconds,
+                            registry_configs.verify_upstream_tls
             FROM registry_configs
                         LEFT JOIN integration_credentials credential
                             ON credential.tenant_id = registry_configs.tenant_id
                          AND credential.id = registry_configs.credential_ref
-            WHERE enabled = true AND deleted_at IS NULL
-            ORDER BY length(mount_path) DESC, mount_path ASC
+                        WHERE registry_configs.enabled = true AND registry_configs.deleted_at IS NULL
+                        ORDER BY length(registry_configs.mount_path) DESC, registry_configs.mount_path ASC
             "#,
         )
         .fetch_all(&self.pool)

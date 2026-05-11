@@ -1,23 +1,67 @@
-import type { DecisionSummary } from "@aegiscudo/shared-types";
+import type { QuarantineQueueItem } from "@aegiscudo/shared-types";
 
-export const decisions: DecisionSummary[] = [
+export const quarantineQueueItems: QuarantineQueueItem[] = [
   {
-    coordinate: { ecosystem: "npm", name: "eslint-config-safe", version: "4.2.1" },
-    decision: "ALLOW",
-    traceId: "trace-allow-001",
-    rationale: ["Previously approved artifact digest"],
-  },
-  {
+    analysis_job_id: "018f4a6f-55d0-7000-8000-000000000101",
+    artifact_id: "018f4a6f-55d0-7000-8000-000000000201",
+    trace_id: "trace-quarantine-002",
     coordinate: { ecosystem: "npm", name: "fresh-postinstall", version: "0.1.0" },
-    decision: "QUARANTINE_PENDING_ANALYSIS",
-    traceId: "trace-quarantine-002",
-    rationale: ["Version is younger than minimum release age", "Lifecycle script detected"],
+    artifact_sha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    recommended_action: "QUARANTINE_PENDING_ANALYSIS",
+    confidence: "medium",
+    requires_hitl: true,
+    summary: {
+      recommended_action: "QUARANTINE_PENDING_ANALYSIS",
+      confidence: "medium",
+      requires_hitl: true,
+      evidence: {
+        static_indicator_count: 2,
+        sandbox_event_count: 0,
+        vulnerability_count: 0,
+        malware_match_count: 0,
+      },
+      limitations: ["Sandbox evidence is missing for this artifact."],
+      ai_observed_behavior: ["Lifecycle script detected during static inspection."],
+      ai_inference: ["Manual review is required before promotion."],
+    },
+    evidence_counts: {
+      static_reports: 1,
+      sandbox_runs: 0,
+      ai_explanations: 1,
+      audit_events: 2,
+    },
+    created_at: "2026-05-05T10:00:00Z",
   },
   {
+    analysis_job_id: "018f4a6f-55d0-7000-8000-000000000102",
+    artifact_id: "018f4a6f-55d0-7000-8000-000000000202",
+    trace_id: "trace-block-003",
     coordinate: { ecosystem: "pypi", name: "requestz", version: "99.0.0" },
-    decision: "BLOCK_POLICY_VIOLATION",
-    traceId: "trace-block-003",
-    rationale: ["Typosquatting similarity to requests"],
+    artifact_sha256: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    recommended_action: "BLOCK_POLICY_VIOLATION",
+    confidence: "high",
+    requires_hitl: false,
+    summary: {
+      recommended_action: "BLOCK_POLICY_VIOLATION",
+      confidence: "high",
+      requires_hitl: false,
+      evidence: {
+        static_indicator_count: 1,
+        sandbox_event_count: 2,
+        vulnerability_count: 0,
+        malware_match_count: 0,
+      },
+      limitations: [],
+      ai_observed_behavior: ["Outbound network attempt observed in sandbox."],
+      ai_inference: ["Typosquatting and runtime behavior indicate a policy violation."],
+    },
+    evidence_counts: {
+      static_reports: 1,
+      sandbox_runs: 1,
+      ai_explanations: 1,
+      audit_events: 3,
+    },
+    created_at: "2026-05-05T10:15:00Z",
   },
 ];
 

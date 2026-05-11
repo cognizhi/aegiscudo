@@ -14,7 +14,115 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace -- -D warnings
-      - run: cargo test --workspace --all-features
+      - name: Run Rust unit tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          cargo test --workspace --all-features | tee artifacts/rust-unit-tests.log
+      - name: Upload Rust unit test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rust-unit-test-log
+          path: artifacts/rust-unit-tests.log
+          if-no-files-found: error
+
+  contract:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg18
+        env:
+          POSTGRES_USER: aegiscudo
+          POSTGRES_PASSWORD: aegiscudo
+          POSTGRES_DB: aegiscudo
+        ports:
+          - 15432:5432
+        options: >-
+          --health-cmd "pg_isready -U aegiscudo -d aegiscudo"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgres://aegiscudo:aegiscudo@localhost:15432/aegiscudo
+      PGPASSWORD: aegiscudo
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install PostgreSQL client
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+      - name: Wait for PostgreSQL
+        run: until pg_isready -h localhost -p 15432 -U aegiscudo -d aegiscudo; do sleep 1; done
+      - name: Apply migrations
+        run: |
+          for migration in migrations/*.sql; do
+            psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f "$migration"
+          done
+      - name: Run API contract tests
+        run: cargo test -p aegiscudo-api -- --ignored
+
+  integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Verify Docker Compose availability
+        run: docker compose version
+      - name: Run compose-backed Mosquito Net integration tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          cargo test -p mosquito-net -- --ignored --nocapture --test-threads=1 | tee artifacts/mosquito-net-compose-integration.log
+      - name: Upload integration test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mosquito-net-compose-integration-log
+          path: artifacts/mosquito-net-compose-integration.log
+          if-no-files-found: error
+
+  container-scan:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        service: [mosquito-net, triage-counter, surgeon, aegiscudo-api, ai-analyst, emergency-room, feed-harvester, command-center]
+    steps:
+      - uses: actions/checkout@v6
+      - name: Build service image for scanning
+        run: >-
+          docker build
+          --build-arg APP_VERSION=ci-scan
+          -f infra/Dockerfile.${{ matrix.service }}
+          -t aegiscudo/${{ matrix.service }}:ci-scan
+          .
+      - name: Run Trivy image scan
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: aegiscudo/${{ matrix.service }}:ci-scan
+          format: sarif
+          output: trivy-${{ matrix.service }}.sarif
+          severity: HIGH,CRITICAL
+          limit-severities-for-sarif: true
+          ignore-unfixed: true
+          vuln-type: os,library
+          scanners: vuln
+          exit-code: 0
+      - name: Upload container scan results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-${{ matrix.service }}-sarif
+          path: trivy-${{ matrix.service }}.sarif
+          if-no-files-found: error
 
   node:
     runs-on: ubuntu-latest
@@ -31,8 +139,73 @@ jobs:
       - run: pnpm openapi:check
       - run: pnpm lint
       - run: pnpm typecheck
-      - run: pnpm test
-      - run: pnpm schema:validate
+      - name: Run Node unit tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          pnpm test | tee artifacts/node-unit-tests.log
+      - name: Run schema validation
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          pnpm schema:validate | tee artifacts/schema-validation.log
+      - name: Upload Node unit test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: node-unit-test-log
+          path: artifacts/node-unit-tests.log
+          if-no-files-found: error
+      - name: Upload schema validation results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: schema-validation-log
+          path: artifacts/schema-validation.log
+          if-no-files-found: error
+
+  playwright:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg18
+        env:
+          POSTGRES_USER: aegiscudo
+          POSTGRES_PASSWORD: aegiscudo
+          POSTGRES_DB: aegiscudo
+        ports:
+          - 15432:5432
+        options: >-
+          --health-cmd "pg_isready -U aegiscudo -d aegiscudo"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgres://aegiscudo:aegiscudo@127.0.0.1:15432/aegiscudo
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: pnpm/action-setup@v5
+        with:
+          version: 10.33.3
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: pnpm
+      - name: Install PostgreSQL client
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm exec playwright install --with-deps chromium
+      - run: pnpm playwright
+      - name: Upload Playwright report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: command-center-playwright-report
+          path: apps/command-center/playwright-report
+          if-no-files-found: ignore
 
   python:
     runs-on: ubuntu-latest
@@ -45,4 +218,87 @@ jobs:
       - run: uv sync --all-extras --dev
       - run: uv run ruff check services/python-common services/emergency-room services/ai-analyst
       - run: uv run mypy services/python-common services/emergency-room services/ai-analyst
-      - run: uv run pytest
+      - name: Run Python unit tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          uv run pytest | tee artifacts/python-unit-tests.log
+      - name: Upload Python unit test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-unit-test-log
+          path: artifacts/python-unit-tests.log
+          if-no-files-found: error
+
+  coverage:
+    runs-on: ubuntu-latest
+    needs: [rust, node, python]
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: pnpm/action-setup@v5
+        with:
+          version: 10.33.3
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: pnpm
+      - uses: astral-sh/setup-uv@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install coverage toolchains
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo install --locked cargo-llvm-cov
+          pnpm install --frozen-lockfile
+          uv sync --all-extras --dev
+      - name: Run Rust coverage
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          cargo llvm-cov --workspace --all-features --lcov --output-path artifacts/rust-coverage.lcov --summary-only | tee artifacts/rust-coverage-summary.txt
+      - name: Run Command Center coverage
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          pnpm --filter @aegiscudo/command-center run coverage | tee artifacts/command-center-coverage.log
+          cp apps/command-center/coverage/coverage-summary.json artifacts/command-center-coverage-summary.json
+          cp apps/command-center/coverage/lcov.info artifacts/command-center-lcov.info
+      - name: Run Python coverage
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          uv run pytest \
+            --cov=services/ai-analyst/src/ai_analyst \
+            --cov=services/emergency-room/src/emergency_room \
+            --cov=services/python-common/src/aegiscudo_common \
+            --cov-report=term-missing:skip-covered \
+            --cov-report=json:artifacts/python-coverage.json | tee artifacts/python-coverage.log
+      - name: Enforce coverage thresholds
+        run: pnpm coverage:check -- --write-summary artifacts/coverage-threshold-summary.md
+      - name: Upload coverage reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-reports
+          path: |
+            artifacts/rust-coverage.lcov
+            artifacts/rust-coverage-summary.txt
+            artifacts/command-center-coverage.log
+            artifacts/command-center-coverage-summary.json
+            artifacts/command-center-lcov.info
+            artifacts/python-coverage.json
+            artifacts/python-coverage.log
+            artifacts/coverage-threshold-summary.md
+            apps/command-center/coverage/lcov-report
+          if-no-files-found: error

@@ -10,32 +10,2291 @@ paths:
       responses:
         "200":
           description: Service health response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthStatus'
+  /v1/auth/session:
+    get:
+      operationId: getAuthSession
+      responses:
+        "200":
+          description: Current API auth session state for local mock auth or future enterprise identity modes.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthSession'
+    delete:
+      operationId: clearAuthSession
+      responses:
+        "204":
+          description: Local auth session cleared or no-op for stateless clients.
+  /v1/auth/session/mock:
+    put:
+      operationId: setMockAuthSession
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SetMockAuthSessionRequest'
+      responses:
+        "200":
+          description: Selected local mock identity for the returned session payload.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthSession'
+        "404":
+          description: Requested mock identity was not found.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        "409":
+          description: Mock identities are unavailable for the configured auth mode.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+  /v1/auth/mock-identities:
+    get:
+      operationId: listMockAuthIdentities
+      responses:
+        "200":
+          description: Available seeded local mock identities for local alpha.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MockIdentityList'
+        "409":
+          description: Mock identities are unavailable for the configured auth mode.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+  /v1/tenants/{tenant_id}/analysis/request-timeline:
+    get:
+      operationId: listRequestTimeline
+      parameters:
+        - name: tenant_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Tenant-scoped hourly decision buckets for the latest eight hours of persisted activity.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/RequestTimelineBucket'
+        "404":
+          description: Tenant was not found.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+  /v1/tenants/{tenant_id}/analysis/dashboard-metrics:
+    get:
+      operationId: getDashboardMetrics
+      parameters:
+        - name: tenant_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Tenant-scoped KPI summary cards for the executive dashboard.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DashboardMetrics'
+        "404":
+          description: Tenant was not found.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+  /v1/tenants/{tenant_id}/policy-profiles:
+    get:
+      operationId: listPolicyProfiles
+      parameters:
+        - name: tenant_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Tenant-scoped policy profiles with latest version metadata.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/PolicyProfileSummary'
+        "404":
+          description: Tenant was not found.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+  /v1/tenants/{tenant_id}/policy-simulator/replay:
+    post:
+      operationId: simulatePolicyReplay
+      parameters:
+        - name: tenant_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PolicySimulationRequest'
+      responses:
+        "200":
+          description: Dry-run replay of historical requests against a target policy profile.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PolicySimulationResult'
+        "400":
+          description: Policy simulation request validation failed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        "404":
+          description: Tenant or policy profile was not found.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        "503":
+          description: Triage Counter is unavailable for replay.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+  /v1/tenants/{tenant_id}/analysis/quarantine-queue:
+    get:
+      operationId: listQuarantineQueue
+      parameters:
+        - name: tenant_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Tenant-scoped quarantine or suspicious analysis queue.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/QuarantineQueueItem'
+        "404":
+          description: Tenant was not found.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+  /v1/tenants/{tenant_id}/artifacts/{artifact_id}/evidence:
+    get:
+      operationId: getArtifactEvidence
+      parameters:
+        - name: tenant_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: artifact_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Aggregated evidence for the latest tenant-scoped analysis of an artifact.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ArtifactEvidence'
+        "404":
+          description: Artifact evidence was not found for the tenant.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+  /v1/tenants/{tenant_id}/artifacts/{artifact_id}/static-analysis-reports:
+    get:
+      operationId: listArtifactStaticAnalysisReports
+      parameters:
+        - name: tenant_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: artifact_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Latest tenant-scoped static analysis report payloads for an artifact.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ArtifactStaticAnalysisReports'
+        "404":
+          description: Artifact reports were not found for the tenant.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+  /v1/tenants/{tenant_id}/artifacts/{artifact_id}/sandbox-execution-reports:
+    get:
+      operationId: listArtifactSandboxExecutionReports
+      parameters:
+        - name: tenant_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: artifact_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Latest tenant-scoped sandbox telemetry payloads for an artifact.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ArtifactSandboxExecutionReports'
+        "404":
+          description: Artifact reports were not found for the tenant.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+  /v1/tenants/{tenant_id}/overrides:
+    get:
+      operationId: listOverrides
+      parameters:
+        - name: tenant_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Tenant-scoped override queue items for pending and resolved review.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/OverrideQueueItem'
+        "404":
+          description: Tenant was not found.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+  /v1/tenants/{tenant_id}/overrides/{override_id}/approve:
+    post:
+      operationId: approveOverride
+      parameters:
+        - name: tenant_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: override_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OverrideActionRequest'
+      responses:
+        "200":
+          description: Override request approved for the tenant.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OverrideResponse'
+        "400":
+          description: Override action request validation failed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        "401":
+          description: Actor identity is required.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        "403":
+          description: Actor is not permitted to manage overrides for the tenant.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        "404":
+          description: Override request was not found or is no longer pending.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+  /v1/tenants/{tenant_id}/overrides/{override_id}/deny:
+    post:
+      operationId: denyOverride
+      parameters:
+        - name: tenant_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: override_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OverrideActionRequest'
+      responses:
+        "200":
+          description: Override request denied for the tenant.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OverrideResponse'
+        "400":
+          description: Override action request validation failed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        "401":
+          description: Actor identity is required.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        "403":
+          description: Actor is not permitted to manage overrides for the tenant.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        "404":
+          description: Override request was not found or is no longer pending.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
   /v1/decisions/evaluate:
     post:
       operationId: evaluateDecision
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DecisionRequest'
       responses:
         "200":
           description: Deterministic policy decision
-  /v1/registry-configs:
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DecisionResponse'
+        "400":
+          description: Decision request validation failed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        "404":
+          description: Policy profile, snapshot, or registry context was not found.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        "503":
+          description: Triage Counter is unavailable.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+  /v1/tenants/{tenant_id}/registry-configs:
     get:
       operationId: listRegistryConfigs
+      parameters:
+        - name: tenant_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
       responses:
         "200":
-          description: Registry configuration list
+          description: Tenant-scoped registry configuration list.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/RegistryConfig'
+        "404":
+          description: Tenant was not found.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
     post:
       operationId: createRegistryConfig
+      parameters:
+        - name: tenant_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateRegistryConfigRequest'
       responses:
         "201":
-          description: Registry configuration created
-  /v1/audit-events:
+          description: Registry configuration created.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RegistryConfig'
+        "400":
+          description: Request validation failed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        "404":
+          description: Tenant or policy profile was not found.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+  /v1/tenants/{tenant_id}/registry-configs/{registry_config_id}:
     get:
-      operationId: listAuditEvents
+      operationId: getRegistryConfig
+      parameters:
+        - name: tenant_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: registry_config_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
       responses:
         "200":
-          description: Append-only audit event page
+          description: Single registry configuration.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RegistryConfig'
+        "404":
+          description: Registry configuration not found.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+    patch:
+      operationId: updateRegistryConfig
+      parameters:
+        - name: tenant_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: registry_config_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateRegistryConfigRequest'
+      responses:
+        "200":
+          description: Registry configuration updated.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RegistryConfig'
+        "400":
+          description: Request validation failed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        "404":
+          description: Registry configuration not found.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+    delete:
+      operationId: deleteRegistryConfig
+      parameters:
+        - name: tenant_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: registry_config_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "204":
+          description: Registry configuration soft-deleted.
+        "404":
+          description: Registry configuration not found.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+  /v1/tenants/{tenant_id}/credentials:
+    get:
+      operationId: listCredentials
+      parameters:
+        - name: tenant_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Tenant-scoped integration credential metadata list (values never returned).
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/CredentialStatus'
+        "404":
+          description: Tenant was not found.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+    post:
+      operationId: createCredential
+      parameters:
+        - name: tenant_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateCredentialRequest'
+      responses:
+        "201":
+          description: Credential created (value never echoed).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CredentialStatus'
+        "400":
+          description: Request validation failed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+  /v1/tenants/{tenant_id}/credentials/{credential_id}:
+    patch:
+      operationId: rotateCredential
+      parameters:
+        - name: tenant_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: credential_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RotateCredentialRequest'
+      responses:
+        "200":
+          description: Credential rotated.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CredentialStatus'
+        "404":
+          description: Credential not found.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+    delete:
+      operationId: deleteCredential
+      parameters:
+        - name: tenant_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: credential_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "204":
+          description: Credential deleted.
+        "404":
+          description: Credential not found.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+  /v1/tenants/{tenant_id}/credentials/{credential_id}/test-connection:
+    post:
+      operationId: testCredentialConnection
+      parameters:
+        - name: tenant_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: credential_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Connection test result.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConnectionTestResult'
+        "404":
+          description: Credential not found.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+  /v1/tenants/{tenant_id}/audit-events:
+    get:
+      operationId: listAuditEvents
+      parameters:
+        - name: tenant_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: action
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: actor
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 50
+            maximum: 200
+      responses:
+        "200":
+          description: Tenant-scoped append-only audit event page.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/AuditEvent'
+        "404":
+          description: Tenant was not found.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+  /v1/tenants/{tenant_id}/audit-events/export.csv:
+    get:
+      operationId: exportAuditEventsCsv
+      parameters:
+        - name: tenant_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: action
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: actor
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 50
+            maximum: 200
+      responses:
+        "200":
+          description: Tenant-scoped audit event export in CSV format.
+          content:
+            text/csv:
+              schema:
+                type: string
+        "404":
+          description: Tenant was not found.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+  /v1/tenants/{tenant_id}/ai-providers:
+    get:
+      operationId: listAiProviders
+      parameters:
+        - name: tenant_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Tenant-scoped AI provider configuration list.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/AiProviderConfig'
+        "404":
+          description: Tenant was not found.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+  /v1/tenants/{tenant_id}/llm-usage:
+    get:
+      operationId: getLlmUsage
+      parameters:
+        - name: tenant_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Tenant-scoped LLM usage metrics and failing trace drill-down.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LlmUsage'
+        "404":
+          description: Tenant was not found.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
   /v1/cli/scans:
     post:
       operationId: submitCliScan
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CliScanRequest'
       responses:
         "202":
           description: Scan accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CliScanResponse'
+        "400":
+          description: CLI scan request validation failed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        "404":
+          description: No matching enabled registry configuration was found.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        "503":
+          description: Triage Counter is unavailable.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+  /v1/cli/explain:
+    post:
+      operationId: explainCliPackage
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CliExplainRequest'
+      responses:
+        "200":
+          description: Latest tenant-scoped explanation for a package coordinate.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CliExplainResponse'
+        "404":
+          description: No matching analyzed package was found.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+components:
+  schemas:
+    AuthMode:
+      type: string
+      enum:
+        - mock_oidc
+        - oidc
+        - saml
+    AuthSubject:
+      type: object
+      additionalProperties: false
+      required:
+        - user_id
+        - tenant_id
+        - display_name
+        - email
+        - roles
+      properties:
+        user_id:
+          type: string
+          format: uuid
+        tenant_id:
+          type: string
+          format: uuid
+        display_name:
+          type: string
+        email:
+          type: string
+          format: email
+        roles:
+          type: array
+          items:
+            type: string
+        mock_identity_id:
+          type:
+            - string
+            - 'null'
+    AuthSession:
+      type: object
+      additionalProperties: false
+      required:
+        - authenticated
+        - auth_mode
+        - mock_identity_supported
+        - subject
+      properties:
+        authenticated:
+          type: boolean
+        auth_mode:
+          $ref: '#/components/schemas/AuthMode'
+        mock_identity_supported:
+          type: boolean
+        subject:
+          oneOf:
+            - $ref: '#/components/schemas/AuthSubject'
+            - type: 'null'
+    MockIdentityList:
+      type: object
+      additionalProperties: false
+      required:
+        - identities
+      properties:
+        identities:
+          type: array
+          items:
+            $ref: '#/components/schemas/AuthSubject'
+    SetMockAuthSessionRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - identity_id
+      properties:
+        identity_id:
+          type: string
+    ErrorBody:
+      type: object
+      additionalProperties: false
+      required:
+        - message
+      properties:
+        message:
+          type: string
+    HealthStatus:
+      type: object
+      additionalProperties: false
+      required:
+        - status
+        - service
+        - version
+        - checked_at
+      properties:
+        status:
+          type: string
+          enum:
+            - ok
+        service:
+          type: string
+        version:
+          type: string
+        checked_at:
+          type: string
+          format: date-time
+    PackageCoordinateSummary:
+      type: object
+      additionalProperties: false
+      required:
+        - ecosystem
+        - name
+      properties:
+        ecosystem:
+          type: string
+          enum:
+            - npm
+            - pypi
+            - cargo
+            - maven
+            - docker-oci
+            - generic-http
+        name:
+          type: string
+        version:
+          type: string
+        namespace:
+          type: string
+    ArtifactDigest:
+      type: object
+      additionalProperties: false
+      required:
+        - algorithm
+        - hex
+      properties:
+        algorithm:
+          type: string
+          enum:
+            - sha256
+        hex:
+          type: string
+          pattern: '^[a-f0-9]{64}$'
+    PackageRequestKind:
+      type: string
+      enum:
+        - metadata
+        - artifact
+    PolicyDecision:
+      type: string
+      enum:
+        - ALLOW
+        - ALLOW_WITH_WARNING
+        - QUARANTINE_PENDING_ANALYSIS
+        - BLOCK_KNOWN_MALICIOUS
+        - BLOCK_POLICY_VIOLATION
+        - REQUIRE_HITL_APPROVAL
+        - FALLBACK_TO_APPROVED_CANDIDATE
+    PolicyMode:
+      type: string
+      enum:
+        - shadow
+        - warn
+        - enforce
+    FeedState:
+      type: string
+      enum:
+        - fresh
+        - stale
+        - degraded
+        - unavailable
+    NormalizedPackageRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - kind
+        - tenant_id
+        - registry_config_id
+        - policy_profile_id
+        - coordinate
+        - trace_id
+        - explicit_version_or_integrity
+      properties:
+        kind:
+          $ref: '#/components/schemas/PackageRequestKind'
+        tenant_id:
+          type: string
+          format: uuid
+        registry_config_id:
+          type: string
+          format: uuid
+        policy_profile_id:
+          type: string
+          format: uuid
+        coordinate:
+          $ref: '#/components/schemas/PackageCoordinateSummary'
+        trace_id:
+          type: string
+        requested_digest:
+          $ref: '#/components/schemas/ArtifactDigest'
+        source_url:
+          type: string
+        explicit_version_or_integrity:
+          type: boolean
+    DecisionRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - tenant_id
+        - registry_config_id
+        - policy_profile_id
+        - request
+      properties:
+        tenant_id:
+          type: string
+          format: uuid
+        registry_config_id:
+          type: string
+          format: uuid
+        policy_profile_id:
+          type: string
+          format: uuid
+        request:
+          $ref: '#/components/schemas/NormalizedPackageRequest'
+    DecisionResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - decision
+        - tenant_id
+        - policy_profile_id
+        - policy_snapshot_id
+        - mode
+        - feed_state
+        - feed_snapshot_age_seconds
+        - trace_id
+        - rationale
+        - create_analysis_job
+      properties:
+        decision:
+          $ref: '#/components/schemas/PolicyDecision'
+        tenant_id:
+          type: string
+          format: uuid
+        policy_profile_id:
+          type: string
+          format: uuid
+        policy_snapshot_id:
+          type: string
+          format: uuid
+        mode:
+          $ref: '#/components/schemas/PolicyMode'
+        feed_state:
+          $ref: '#/components/schemas/FeedState'
+        feed_snapshot_age_seconds:
+          type: integer
+        trace_id:
+          type: string
+        rationale:
+          type: array
+          items:
+            type: string
+        fallback_coordinate:
+          $ref: '#/components/schemas/PackageCoordinateSummary'
+        create_analysis_job:
+          type: boolean
+    CliScanPackageRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - coordinate
+      properties:
+        coordinate:
+          $ref: '#/components/schemas/PackageCoordinateSummary'
+        artifact_sha256:
+          type: string
+          pattern: '^[a-f0-9]{64}$'
+    CliScanRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - packages
+      properties:
+        tenant_id:
+          type: string
+          format: uuid
+        packages:
+          type: array
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/CliScanPackageRequest'
+    CliScanFindingResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - coordinate
+        - decision
+        - trace_id
+        - rationale
+        - create_analysis_job
+      properties:
+        coordinate:
+          $ref: '#/components/schemas/PackageCoordinateSummary'
+        artifact_sha256:
+          type: string
+          pattern: '^[a-f0-9]{64}$'
+        decision:
+          $ref: '#/components/schemas/PolicyDecision'
+        trace_id:
+          type: string
+        rationale:
+          type: array
+          items:
+            type: string
+        fallback_coordinate:
+          $ref: '#/components/schemas/PackageCoordinateSummary'
+        create_analysis_job:
+          type: boolean
+    CliScanResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - tenant_id
+        - registry_config_id
+        - policy_profile_id
+        - findings
+      properties:
+        tenant_id:
+          type: string
+          format: uuid
+        registry_config_id:
+          type: string
+          format: uuid
+        policy_profile_id:
+          type: string
+          format: uuid
+        findings:
+          type: array
+          items:
+            $ref: '#/components/schemas/CliScanFindingResponse'
+    CliExplainRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - coordinate
+      properties:
+        tenant_id:
+          type: string
+          format: uuid
+        coordinate:
+          $ref: '#/components/schemas/PackageCoordinateSummary'
+    CliExplainResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - tenant_id
+        - analysis_job_id
+        - artifact_id
+        - trace_id
+        - coordinate
+        - artifact_sha256
+        - recommended_action
+        - confidence
+        - summary
+        - created_at
+      properties:
+        tenant_id:
+          type: string
+          format: uuid
+        analysis_job_id:
+          type: string
+          format: uuid
+        artifact_id:
+          type: string
+          format: uuid
+        trace_id:
+          type: string
+        coordinate:
+          $ref: '#/components/schemas/PackageCoordinateSummary'
+        artifact_sha256:
+          type: string
+          pattern: '^[a-f0-9]{64}$'
+        recommended_action:
+          $ref: '#/components/schemas/PolicyDecision'
+        confidence:
+          type: string
+        summary:
+          type: object
+          additionalProperties: true
+        ai_explanation:
+          type: object
+          additionalProperties: true
+        created_at:
+          type: string
+          format: date-time
+    EvidenceCounts:
+      type: object
+      additionalProperties: false
+      required:
+        - static_reports
+        - sandbox_runs
+        - ai_explanations
+        - audit_events
+      properties:
+        static_reports:
+          type: integer
+        sandbox_runs:
+          type: integer
+        ai_explanations:
+          type: integer
+        audit_events:
+          type: integer
+    DashboardFeedFreshness:
+      type: string
+      enum:
+        - fresh
+        - stale
+        - missing
+    DashboardMetrics:
+      type: object
+      additionalProperties: false
+      required:
+        - blocked_packages
+        - quarantine_queue_depth
+        - active_overrides
+        - feed_freshness
+      properties:
+        blocked_packages:
+          type: integer
+          format: int64
+        quarantine_queue_depth:
+          type: integer
+          format: int64
+        active_overrides:
+          type: integer
+          format: int64
+        feed_freshness:
+          $ref: '#/components/schemas/DashboardFeedFreshness'
+        feed_snapshot_age_seconds:
+          type: integer
+          format: int64
+          nullable: true
+    RequestTimelineBucket:
+      type: object
+      additionalProperties: false
+      required:
+        - bucket_start
+        - allow
+        - warn
+        - quarantine
+        - block
+      properties:
+        bucket_start:
+          type: string
+          format: date-time
+        allow:
+          type: integer
+        warn:
+          type: integer
+        quarantine:
+          type: integer
+        block:
+          type: integer
+    AuditEvent:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - tenant_id
+        - actor
+        - actor_display
+        - actor_roles
+        - action
+        - resource
+        - trace_id
+        - occurred_at
+        - metadata
+      properties:
+        id:
+          type: string
+          format: uuid
+        tenant_id:
+          type: string
+          format: uuid
+        actor:
+          type: string
+        actor_display:
+          type: string
+        actor_roles:
+          type: array
+          items:
+            type: string
+        action:
+          type: string
+        resource:
+          type: string
+        trace_id:
+          type: string
+        occurred_at:
+          type: string
+          format: date-time
+        metadata:
+          type: object
+          additionalProperties: true
+    OverrideQueueItem:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - scope
+        - reason
+        - status
+        - expires_at
+        - created_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        scope:
+          type: object
+          additionalProperties: true
+        reason:
+          type: string
+        requested_by:
+          type: string
+          format: uuid
+        requested_by_display:
+          type: string
+        approved_by:
+          type: string
+          format: uuid
+        approved_by_display:
+          type: string
+        status:
+          type: string
+        expires_at:
+          type: string
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+    OverrideActionRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - reason
+      properties:
+        reason:
+          type: string
+        actor_id:
+          type: string
+          format: uuid
+    OverrideResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - tenant_id
+        - scope
+        - reason
+        - status
+        - expires_at
+        - created_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        tenant_id:
+          type: string
+          format: uuid
+        scope:
+          type: object
+          additionalProperties: true
+        reason:
+          type: string
+        requested_by:
+          type: string
+          format: uuid
+        approved_by:
+          type: string
+          format: uuid
+        status:
+          type: string
+        expires_at:
+          type: string
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+    QuarantineQueueItem:
+      type: object
+      additionalProperties: false
+      required:
+        - analysis_job_id
+        - artifact_id
+        - trace_id
+        - coordinate
+        - artifact_sha256
+        - recommended_action
+        - confidence
+        - requires_hitl
+        - summary
+        - evidence_counts
+        - created_at
+      properties:
+        analysis_job_id:
+          type: string
+          format: uuid
+        artifact_id:
+          type: string
+          format: uuid
+        trace_id:
+          type: string
+        coordinate:
+          $ref: '#/components/schemas/PackageCoordinateSummary'
+        artifact_sha256:
+          type: string
+          pattern: '^[a-f0-9]{64}$'
+        recommended_action:
+          type: string
+        confidence:
+          type: string
+        requires_hitl:
+          type: boolean
+        summary:
+          type: object
+          additionalProperties: true
+        evidence_counts:
+          $ref: '#/components/schemas/EvidenceCounts'
+        created_at:
+          type: string
+          format: date-time
+    ArtifactEvidence:
+      type: object
+      additionalProperties: false
+      required:
+        - analysis_job_id
+        - artifact_id
+        - trace_id
+        - coordinate
+        - artifact_sha256
+        - recommended_action
+        - confidence
+        - requires_hitl
+        - summary
+        - static_reports
+        - sandbox_runs
+        - audit_events
+      properties:
+        analysis_job_id:
+          type: string
+          format: uuid
+        artifact_id:
+          type: string
+          format: uuid
+        trace_id:
+          type: string
+        coordinate:
+          $ref: '#/components/schemas/PackageCoordinateSummary'
+        artifact_sha256:
+          type: string
+          pattern: '^[a-f0-9]{64}$'
+        recommended_action:
+          type: string
+        confidence:
+          type: string
+        requires_hitl:
+          type: boolean
+        summary:
+          type: object
+          additionalProperties: true
+        static_reports:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        sandbox_runs:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        ai_explanation:
+          type: object
+          additionalProperties: true
+        audit_events:
+          type: array
+          items:
+            $ref: '#/components/schemas/AuditEvent'
+    ArtifactStaticAnalysisReports:
+      type: object
+      additionalProperties: false
+      required:
+        - analysis_job_id
+        - artifact_id
+        - trace_id
+        - reports
+      properties:
+        analysis_job_id:
+          type: string
+          format: uuid
+        artifact_id:
+          type: string
+          format: uuid
+        trace_id:
+          type: string
+        reports:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+    ArtifactSandboxExecutionReports:
+      type: object
+      additionalProperties: false
+      required:
+        - analysis_job_id
+        - artifact_id
+        - trace_id
+        - runs
+      properties:
+        analysis_job_id:
+          type: string
+          format: uuid
+        artifact_id:
+          type: string
+          format: uuid
+        trace_id:
+          type: string
+        runs:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+    PolicyProfileSummary:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - tenant_id
+        - name
+        - mode
+        - latest_version_id
+        - latest_version
+        - latest_effective_at
+        - created_at
+        - request_count_last_30_days
+      properties:
+        id:
+          type: string
+          format: uuid
+        tenant_id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        mode:
+          $ref: '#/components/schemas/PolicyMode'
+        latest_version_id:
+          type: string
+          format: uuid
+        latest_version:
+          type: string
+        latest_effective_at:
+          type: string
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+        request_count_last_30_days:
+          type: integer
+    PolicySimulationRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - policy_profile_id
+      properties:
+        policy_profile_id:
+          type: string
+          format: uuid
+        lookback_days:
+          type: integer
+          default: 30
+          minimum: 1
+          maximum: 30
+        ecosystem:
+          type: string
+          enum:
+            - npm
+            - pypi
+            - cargo
+            - maven
+            - docker-oci
+            - generic-http
+        limit:
+          type: integer
+          default: 50
+          minimum: 1
+          maximum: 200
+    PolicyDecisionCounts:
+      type: object
+      additionalProperties: false
+      required:
+        - allow
+        - allow_with_warning
+        - quarantine_pending_analysis
+        - block_known_malicious
+        - block_policy_violation
+        - require_hitl_approval
+        - fallback_to_approved_candidate
+      properties:
+        allow:
+          type: integer
+        allow_with_warning:
+          type: integer
+        quarantine_pending_analysis:
+          type: integer
+        block_known_malicious:
+          type: integer
+        block_policy_violation:
+          type: integer
+        require_hitl_approval:
+          type: integer
+        fallback_to_approved_candidate:
+          type: integer
+    PolicySimulationDiffItem:
+      type: object
+      additionalProperties: false
+      required:
+        - package_request_id
+        - trace_id
+        - requested_at
+        - coordinate
+        - baseline_policy_profile_id
+        - baseline_policy_profile_name
+        - baseline_decision
+        - baseline_rationale
+        - simulated_decision
+        - simulated_rationale
+        - changed
+      properties:
+        package_request_id:
+          type: string
+          format: uuid
+        trace_id:
+          type: string
+        requested_at:
+          type: string
+          format: date-time
+        coordinate:
+          $ref: '#/components/schemas/PackageCoordinateSummary'
+        baseline_policy_profile_id:
+          type: string
+          format: uuid
+        baseline_policy_profile_name:
+          type: string
+        baseline_decision:
+          $ref: '#/components/schemas/PolicyDecision'
+        baseline_rationale:
+          type: array
+          items:
+            type: string
+        simulated_decision:
+          $ref: '#/components/schemas/PolicyDecision'
+        simulated_rationale:
+          type: array
+          items:
+            type: string
+        changed:
+          type: boolean
+    PolicySimulationResult:
+      type: object
+      additionalProperties: false
+      required:
+        - tenant_id
+        - target_policy_profile_id
+        - target_policy_profile_name
+        - target_policy_mode
+        - target_latest_version_id
+        - target_latest_version
+        - lookback_days
+        - replayed_request_count
+        - changed_request_count
+        - baseline_counts
+        - simulated_counts
+        - items
+        - generated_at
+      properties:
+        tenant_id:
+          type: string
+          format: uuid
+        target_policy_profile_id:
+          type: string
+          format: uuid
+        target_policy_profile_name:
+          type: string
+        target_policy_mode:
+          $ref: '#/components/schemas/PolicyMode'
+        target_latest_version_id:
+          type: string
+          format: uuid
+        target_latest_version:
+          type: string
+        lookback_days:
+          type: integer
+        ecosystem:
+          type: string
+          enum:
+            - npm
+            - pypi
+            - cargo
+            - maven
+            - docker-oci
+            - generic-http
+        replayed_request_count:
+          type: integer
+        changed_request_count:
+          type: integer
+        baseline_counts:
+          $ref: '#/components/schemas/PolicyDecisionCounts'
+        simulated_counts:
+          $ref: '#/components/schemas/PolicyDecisionCounts'
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/PolicySimulationDiffItem'
+        generated_at:
+          type: string
+          format: date-time
+    RegistryConfig:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - tenant_id
+        - name
+        - description
+        - adapter
+        - upstream_url
+        - mount_path
+        - auth_type
+        - mode
+        - policy_profile_id
+        - cache_ttl_seconds
+        - verify_upstream_tls
+        - enabled
+        - created_at
+        - updated_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        tenant_id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        description:
+          type: string
+        adapter:
+          type: string
+          enum: [npm, pypi, cargo, maven, docker-oci, generic-http]
+        upstream_url:
+          type: string
+        mount_path:
+          type: string
+        auth_type:
+          type: string
+          enum: [none, basic, bearer, mtls]
+        credential_ref:
+          type: string
+          format: uuid
+        mode:
+          $ref: '#/components/schemas/PolicyMode'
+        policy_profile_id:
+          type: string
+          format: uuid
+        cache_ttl_seconds:
+          type: integer
+        verify_upstream_tls:
+          type: boolean
+        enabled:
+          type: boolean
+        deleted_at:
+          type: string
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    CreateRegistryConfigRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - name
+        - adapter
+        - upstream_url
+        - mount_path
+        - policy_profile_id
+      properties:
+        name:
+          type: string
+        description:
+          type: string
+        adapter:
+          type: string
+          enum: [npm, pypi, cargo, maven, docker-oci, generic-http]
+        upstream_url:
+          type: string
+        mount_path:
+          type: string
+        auth_type:
+          type: string
+          enum: [none, basic, bearer, mtls]
+        credential_ref:
+          type: string
+          format: uuid
+        mode:
+          $ref: '#/components/schemas/PolicyMode'
+        policy_profile_id:
+          type: string
+          format: uuid
+        cache_ttl_seconds:
+          type: integer
+        verify_upstream_tls:
+          type: boolean
+        enabled:
+          type: boolean
+    UpdateRegistryConfigRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        name:
+          type: string
+        description:
+          type: string
+        upstream_url:
+          type: string
+        auth_type:
+          type: string
+          enum: [none, basic, bearer, mtls]
+        mode:
+          $ref: '#/components/schemas/PolicyMode'
+        policy_profile_id:
+          type: string
+          format: uuid
+        cache_ttl_seconds:
+          type: integer
+        verify_upstream_tls:
+          type: boolean
+        enabled:
+          type: boolean
+    CredentialStatus:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - tenant_id
+        - name
+        - credential_type
+        - source
+        - configured
+        - created_at
+        - updated_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        tenant_id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        credential_type:
+          type: string
+        source:
+          type: string
+        encrypted_value_key_id:
+          type: string
+        configured:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    CreateCredentialRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - name
+        - credential_type
+      properties:
+        name:
+          type: string
+        credential_type:
+          type: string
+        source:
+          type: string
+        configured:
+          type: boolean
+    RotateCredentialRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        configured:
+          type: boolean
+    ConnectionTestResult:
+      type: object
+      additionalProperties: false
+      required:
+        - success
+      properties:
+        success:
+          type: boolean
+        message:
+          type: string
+        latency_ms:
+          type: integer
+    AiProviderConfig:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - tenant_id
+        - display_name
+        - provider_type
+        - model_id
+        - is_local
+        - active
+        - created_at
+        - updated_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        tenant_id:
+          type: string
+          format: uuid
+        display_name:
+          type: string
+        provider_type:
+          type: string
+        base_url:
+          type: string
+        model_id:
+          type: string
+        credential_ref:
+          type: string
+          format: uuid
+        is_local:
+          type: boolean
+        active:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    LlmUsageSummary:
+      type: object
+      additionalProperties: false
+      required:
+        - total_calls
+        - prompt_tokens
+        - completion_tokens
+        - total_tokens
+        - estimated_cost
+        - schema_validation_passes
+        - schema_validation_failures
+        - redaction_failures
+      properties:
+        total_calls:
+          type: integer
+        prompt_tokens:
+          type: integer
+        completion_tokens:
+          type: integer
+        total_tokens:
+          type: integer
+        estimated_cost:
+          type: number
+        avg_latency_ms:
+          type: number
+        p95_latency_ms:
+          type: number
+        schema_validation_passes:
+          type: integer
+        schema_validation_failures:
+          type: integer
+        redaction_failures:
+          type: integer
+    LlmUsageDailyBucket:
+      type: object
+      additionalProperties: false
+      required:
+        - day
+        - total_calls
+        - total_tokens
+      properties:
+        day:
+          type: string
+        total_calls:
+          type: integer
+        total_tokens:
+          type: integer
+    LlmUsageProviderModel:
+      type: object
+      additionalProperties: false
+      required:
+        - provider_display_name
+        - provider_type
+        - model_id
+        - total_calls
+        - prompt_tokens
+        - completion_tokens
+        - total_tokens
+        - estimated_cost
+      properties:
+        provider_display_name:
+          type: string
+        provider_type:
+          type: string
+        model_id:
+          type: string
+        total_calls:
+          type: integer
+        prompt_tokens:
+          type: integer
+        completion_tokens:
+          type: integer
+        total_tokens:
+          type: integer
+        estimated_cost:
+          type: number
+        avg_latency_ms:
+          type: number
+        p95_latency_ms:
+          type: number
+    LlmUsageAnalysisJob:
+      type: object
+      additionalProperties: false
+      required:
+        - analysis_job_id
+        - trace_id
+        - provider_display_name
+        - model_id
+        - total_calls
+        - total_tokens
+        - estimated_cost
+        - last_called_at
+      properties:
+        analysis_job_id:
+          type: string
+          format: uuid
+        trace_id:
+          type: string
+        provider_display_name:
+          type: string
+        model_id:
+          type: string
+        total_calls:
+          type: integer
+        total_tokens:
+          type: integer
+        estimated_cost:
+          type: number
+        langfuse_trace_id:
+          type: string
+        last_called_at:
+          type: string
+          format: date-time
+    LlmUsageFailingTrace:
+      type: object
+      additionalProperties: false
+      required:
+        - analysis_job_id
+        - trace_id
+        - provider_display_name
+        - provider_type
+        - model_id
+        - prompt_template_version
+        - schema_valid
+        - redaction_complete
+        - created_at
+      properties:
+        analysis_job_id:
+          type: string
+          format: uuid
+        trace_id:
+          type: string
+        provider_display_name:
+          type: string
+        provider_type:
+          type: string
+        model_id:
+          type: string
+        langfuse_trace_id:
+          type: string
+        prompt_template_version:
+          type: string
+        schema_valid:
+          type: boolean
+        redaction_complete:
+          type: boolean
+        latency_ms:
+          type: number
+        created_at:
+          type: string
+          format: date-time
+    LlmUsagePromptTemplateVersion:
+      type: object
+      additionalProperties: false
+      required:
+        - prompt_template_version
+        - total_calls
+      properties:
+        prompt_template_version:
+          type: string
+        total_calls:
+          type: integer
+    LlmUsage:
+      type: object
+      additionalProperties: false
+      required:
+        - tenant_id
+        - summary
+        - calls_by_day
+        - provider_models
+        - analysis_jobs
+        - failing_traces
+        - prompt_template_versions
+      properties:
+        tenant_id:
+          type: string
+          format: uuid
+        summary:
+          $ref: '#/components/schemas/LlmUsageSummary'
+        calls_by_day:
+          type: array
+          items:
+            $ref: '#/components/schemas/LlmUsageDailyBucket'
+        provider_models:
+          type: array
+          items:
+            $ref: '#/components/schemas/LlmUsageProviderModel'
+        analysis_jobs:
+          type: array
+          items:
+            $ref: '#/components/schemas/LlmUsageAnalysisJob'
+        failing_traces:
+          type: array
+          items:
+            $ref: '#/components/schemas/LlmUsageFailingTrace'
+        prompt_template_versions:
+          type: array
+          items:
+            $ref: '#/components/schemas/LlmUsagePromptTemplateVersion'

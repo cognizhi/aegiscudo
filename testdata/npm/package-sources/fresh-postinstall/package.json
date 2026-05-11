@@ -1,0 +1,9 @@
+{
+  "name": "fresh-postinstall",
+  "version": "0.1.0",
+  "description": "Quarantined npm fixture with a lifecycle script",
+  "scripts": {
+    "postinstall": "node index.js"
+  },
+  "main": "index.js"
+}

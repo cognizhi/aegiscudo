@@ -89,6 +89,7 @@ pub fn app(policy_repository: PolicyRepository) -> Router {
         .route("/readyz", get(|| async { Json(health(SERVICE_NAME)) }))
         .route("/metrics", get(metrics))
         .route("/v1/decisions/evaluate", post(evaluate_decision))
+    .route("/v1/decisions/simulate", post(simulate_decision))
         .with_state(state)
 }
 
@@ -128,6 +129,13 @@ async fn evaluate_decision(
     Ok(Json(response))
 }
 
+async fn simulate_decision(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<DecisionRequest>,
+) -> Result<Json<aegiscudo_protocol::DecisionResponse>, ApiError> {
+    Ok(Json(simulate_with_state(&state, request).await?))
+}
+
 async fn evaluate_with_state(
     state: &AppState,
     request: DecisionRequest,
@@ -153,6 +161,25 @@ async fn evaluate_with_state(
         request.clone(),
     )
     .await?;
+    state.decision_cache.put(cache_key, &response).await;
+    Ok(response)
+}
+
+async fn simulate_with_state(
+    state: &AppState,
+    request: DecisionRequest,
+) -> Result<aegiscudo_protocol::DecisionResponse, PolicyRepositoryError> {
+    let cache_key = decision_cache_key(&request);
+    if let Some(mut response) = state.decision_cache.get(&cache_key).await {
+        response.trace_id = request.request.trace_id.clone();
+        return Ok(response);
+    }
+
+    let bound_input = state
+        .policy_repository
+        .bind_simulation_request(request.clone())
+        .await?;
+    let response = state.decision_engine.evaluate(bound_input);
     state.decision_cache.put(cache_key, &response).await;
     Ok(response)
 }
@@ -220,7 +247,8 @@ impl IntoResponse for ApiError {
             ),
             PolicyRepositoryError::InconsistentDecisionResponse
             | PolicyRepositoryError::InvalidFeedSnapshotAge
-            | PolicyRepositoryError::MissingArtifactDigestForAnalysisJob => (
+            | PolicyRepositoryError::MissingArtifactDigestForAnalysisJob
+            | PolicyRepositoryError::MissingArtifactSourceUrlForAnalysisJob => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "decision persistence context is invalid",
             ),
@@ -301,6 +329,7 @@ mod tests {
                 ),
                 trace_id: "trace-bind".to_owned(),
                 requested_digest: None,
+                source_url: None,
                 explicit_version_or_integrity: false,
             },
         };
@@ -374,6 +403,9 @@ mod tests {
                 ),
                 trace_id: "trace-unknown-artifact".to_owned(),
                 requested_digest: Some(digest.clone()),
+                source_url: Some(
+                    "https://registry.npmjs.org/left-pad/-/left-pad-1.3.0.tgz".to_owned(),
+                ),
                 explicit_version_or_integrity: true,
             },
         };
@@ -449,6 +481,9 @@ mod tests {
                 ),
                 trace_id: "trace-known-artifact".to_owned(),
                 requested_digest: Some(digest),
+                source_url: Some(
+                    "https://registry.npmjs.org/left-pad/-/left-pad-1.3.0.tgz".to_owned(),
+                ),
                 explicit_version_or_integrity: true,
             },
         };
@@ -463,6 +498,89 @@ mod tests {
 
         assert_eq!(response.decision, aegiscudo_core::PolicyDecision::Allow);
         assert!(!response.create_analysis_job);
+        assert!(repository.analysis_jobs().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn simulate_route_does_not_persist_decisions_or_create_analysis_jobs() {
+        let tenant_id = Uuid::now_v7();
+        let policy_profile_id = Uuid::now_v7();
+        let simulated_policy_profile_id = Uuid::now_v7();
+        let snapshot_id = Uuid::now_v7();
+        let simulated_snapshot_id = Uuid::now_v7();
+        let registry_config_id = Uuid::now_v7();
+        let repository = InMemoryPolicyRepository::new();
+        repository
+            .upsert_profile(LoadedPolicyProfile {
+                id: policy_profile_id,
+                tenant_id,
+                mode: PolicyMode::Warn,
+                latest_snapshot: PolicySnapshot {
+                    id: snapshot_id,
+                    tenant_id,
+                    version: "2026.05.2".to_owned(),
+                    effective_at: chrono::Utc::now(),
+                    immutable_rule_hash: ArtifactDigest::sha256("e".repeat(64)).unwrap(),
+                },
+                signal_configuration: PolicySignalConfiguration::default(),
+            })
+            .await;
+        repository
+            .upsert_profile(LoadedPolicyProfile {
+                id: simulated_policy_profile_id,
+                tenant_id,
+                mode: PolicyMode::Shadow,
+                latest_snapshot: PolicySnapshot {
+                    id: simulated_snapshot_id,
+                    tenant_id,
+                    version: "2026.05.3".to_owned(),
+                    effective_at: chrono::Utc::now(),
+                    immutable_rule_hash: ArtifactDigest::sha256("f".repeat(64)).unwrap(),
+                },
+                signal_configuration: PolicySignalConfiguration::default(),
+            })
+            .await;
+        repository
+            .upsert_registry_binding(RegistryPolicyBinding {
+                tenant_id,
+                registry_config_id,
+                policy_profile_id,
+                mode: PolicyMode::Warn,
+            })
+            .await;
+
+        let request = DecisionRequest {
+            tenant_id,
+            registry_config_id,
+            policy_profile_id: simulated_policy_profile_id,
+            request: NormalizedPackageRequest {
+                kind: PackageRequestKind::Metadata,
+                tenant_id,
+                registry_config_id,
+                policy_profile_id: simulated_policy_profile_id,
+                coordinate: PackageCoordinate::new(
+                    PackageEcosystem::Npm,
+                    "left-pad",
+                    Some("1.3.0"),
+                    None::<String>,
+                ),
+                trace_id: "trace-simulate".to_owned(),
+                requested_digest: None,
+                source_url: None,
+                explicit_version_or_integrity: false,
+            },
+        };
+
+        let state = AppState::new(PolicyRepository::InMemory(repository.clone()));
+        let decision = simulate_with_state(&state, request)
+            .await
+            .expect("simulate response");
+        assert_eq!(decision.trace_id, "trace-simulate");
+        assert_eq!(decision.policy_snapshot_id, simulated_snapshot_id);
+        assert_eq!(decision.policy_profile_id, simulated_policy_profile_id);
+        assert_ne!(decision.policy_snapshot_id, snapshot_id);
+
+        assert!(repository.decision_records().await.is_empty());
         assert!(repository.analysis_jobs().await.is_empty());
     }
 }

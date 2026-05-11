@@ -61,8 +61,8 @@ Legend: a checked row in this matrix means the linked requirement has acceptance
 | Phase A–H sandbox execution phase attribution in evidence records | [003-mvp-analysis-ai-sandbox.md](003-mvp-analysis-ai-sandbox.md) | [ ] |
 | AI agent canary files | [003-mvp-analysis-ai-sandbox.md](003-mvp-analysis-ai-sandbox.md) | [ ] |
 | Feed Harvester OSV, GHSA, OpenSSF Malicious Packages | [002-mvp-control-plane.md](002-mvp-control-plane.md) | [ ] |
-| Dashboard quarantine queue and evidence viewer | [004-mvp-command-center-cli.md](004-mvp-command-center-cli.md) | [ ] |
-| Policy simulator with 30-day historical replay | [004-mvp-command-center-cli.md](004-mvp-command-center-cli.md) | [ ] |
+| Dashboard quarantine queue and evidence viewer | [004-mvp-command-center-cli.md](004-mvp-command-center-cli.md) | [x] |
+| Policy simulator with 30-day historical replay | [004-mvp-command-center-cli.md](004-mvp-command-center-cli.md) | [x] |
 | `aedo-cli` package-lock and requirements scans | [004-mvp-command-center-cli.md](004-mvp-command-center-cli.md) | [x] |
 | AI explanation from redacted evidence only | [003-mvp-analysis-ai-sandbox.md](003-mvp-analysis-ai-sandbox.md) | [ ] |
 | Audit logging, RBAC, shadow mode, and time-bound overrides | [002-mvp-control-plane.md](002-mvp-control-plane.md), [004-mvp-command-center-cli.md](004-mvp-command-center-cli.md) | [ ] |

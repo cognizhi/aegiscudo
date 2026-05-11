@@ -20,6 +20,230 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/auth/session": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["getAuthSession"];
+        put?: never;
+        post?: never;
+        delete: operations["clearAuthSession"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/auth/session/mock": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put: operations["setMockAuthSession"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/auth/mock-identities": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["listMockAuthIdentities"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/tenants/{tenant_id}/analysis/request-timeline": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["listRequestTimeline"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/tenants/{tenant_id}/analysis/dashboard-metrics": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["getDashboardMetrics"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/tenants/{tenant_id}/policy-profiles": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["listPolicyProfiles"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/tenants/{tenant_id}/policy-simulator/replay": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["simulatePolicyReplay"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/tenants/{tenant_id}/analysis/quarantine-queue": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["listQuarantineQueue"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/tenants/{tenant_id}/artifacts/{artifact_id}/evidence": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["getArtifactEvidence"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/tenants/{tenant_id}/artifacts/{artifact_id}/static-analysis-reports": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["listArtifactStaticAnalysisReports"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/tenants/{tenant_id}/artifacts/{artifact_id}/sandbox-execution-reports": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["listArtifactSandboxExecutionReports"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/tenants/{tenant_id}/overrides": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["listOverrides"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/tenants/{tenant_id}/overrides/{override_id}/approve": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["approveOverride"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/tenants/{tenant_id}/overrides/{override_id}/deny": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["denyOverride"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/decisions/evaluate": {
         parameters: {
             query?: never;
@@ -36,7 +260,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/v1/registry-configs": {
+    "/v1/tenants/{tenant_id}/registry-configs": {
         parameters: {
             query?: never;
             header?: never;
@@ -52,7 +276,71 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/v1/audit-events": {
+    "/v1/tenants/{tenant_id}/registry-configs/{registry_config_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["getRegistryConfig"];
+        put?: never;
+        post?: never;
+        delete: operations["deleteRegistryConfig"];
+        options?: never;
+        head?: never;
+        patch: operations["updateRegistryConfig"];
+        trace?: never;
+    };
+    "/v1/tenants/{tenant_id}/credentials": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["listCredentials"];
+        put?: never;
+        post: operations["createCredential"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/tenants/{tenant_id}/credentials/{credential_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete: operations["deleteCredential"];
+        options?: never;
+        head?: never;
+        patch: operations["rotateCredential"];
+        trace?: never;
+    };
+    "/v1/tenants/{tenant_id}/credentials/{credential_id}/test-connection": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["testCredentialConnection"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/tenants/{tenant_id}/audit-events": {
         parameters: {
             query?: never;
             header?: never;
@@ -60,6 +348,54 @@ export interface paths {
             cookie?: never;
         };
         get: operations["listAuditEvents"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/tenants/{tenant_id}/audit-events/export.csv": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["exportAuditEventsCsv"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/tenants/{tenant_id}/ai-providers": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["listAiProviders"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/tenants/{tenant_id}/llm-usage": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["getLlmUsage"];
         put?: never;
         post?: never;
         delete?: never;
@@ -84,10 +420,574 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/cli/explain": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["explainCliPackage"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
-    schemas: never;
+    schemas: {
+        /** @enum {string} */
+        AuthMode: "mock_oidc" | "oidc" | "saml";
+        AuthSubject: {
+            /** Format: uuid */
+            user_id: string;
+            /** Format: uuid */
+            tenant_id: string;
+            display_name: string;
+            /** Format: email */
+            email: string;
+            roles: string[];
+            mock_identity_id?: string | null;
+        };
+        AuthSession: {
+            authenticated: boolean;
+            auth_mode: components["schemas"]["AuthMode"];
+            mock_identity_supported: boolean;
+            subject: components["schemas"]["AuthSubject"] | null;
+        };
+        MockIdentityList: {
+            identities: components["schemas"]["AuthSubject"][];
+        };
+        SetMockAuthSessionRequest: {
+            identity_id: string;
+        };
+        ErrorBody: {
+            message: string;
+        };
+        HealthStatus: {
+            /** @enum {string} */
+            status: "ok";
+            service: string;
+            version: string;
+            /** Format: date-time */
+            checked_at: string;
+        };
+        PackageCoordinateSummary: {
+            /** @enum {string} */
+            ecosystem: "npm" | "pypi" | "cargo" | "maven" | "docker-oci" | "generic-http";
+            name: string;
+            version?: string;
+            namespace?: string;
+        };
+        ArtifactDigest: {
+            /** @enum {string} */
+            algorithm: "sha256";
+            hex: string;
+        };
+        /** @enum {string} */
+        PackageRequestKind: "metadata" | "artifact";
+        /** @enum {string} */
+        PolicyDecision: "ALLOW" | "ALLOW_WITH_WARNING" | "QUARANTINE_PENDING_ANALYSIS" | "BLOCK_KNOWN_MALICIOUS" | "BLOCK_POLICY_VIOLATION" | "REQUIRE_HITL_APPROVAL" | "FALLBACK_TO_APPROVED_CANDIDATE";
+        /** @enum {string} */
+        PolicyMode: "shadow" | "warn" | "enforce";
+        /** @enum {string} */
+        FeedState: "fresh" | "stale" | "degraded" | "unavailable";
+        NormalizedPackageRequest: {
+            kind: components["schemas"]["PackageRequestKind"];
+            /** Format: uuid */
+            tenant_id: string;
+            /** Format: uuid */
+            registry_config_id: string;
+            /** Format: uuid */
+            policy_profile_id: string;
+            coordinate: components["schemas"]["PackageCoordinateSummary"];
+            trace_id: string;
+            requested_digest?: components["schemas"]["ArtifactDigest"];
+            source_url?: string;
+            explicit_version_or_integrity: boolean;
+        };
+        DecisionRequest: {
+            /** Format: uuid */
+            tenant_id: string;
+            /** Format: uuid */
+            registry_config_id: string;
+            /** Format: uuid */
+            policy_profile_id: string;
+            request: components["schemas"]["NormalizedPackageRequest"];
+        };
+        DecisionResponse: {
+            decision: components["schemas"]["PolicyDecision"];
+            /** Format: uuid */
+            tenant_id: string;
+            /** Format: uuid */
+            policy_profile_id: string;
+            /** Format: uuid */
+            policy_snapshot_id: string;
+            mode: components["schemas"]["PolicyMode"];
+            feed_state: components["schemas"]["FeedState"];
+            feed_snapshot_age_seconds: number;
+            trace_id: string;
+            rationale: string[];
+            fallback_coordinate?: components["schemas"]["PackageCoordinateSummary"];
+            create_analysis_job: boolean;
+        };
+        CliScanPackageRequest: {
+            coordinate: components["schemas"]["PackageCoordinateSummary"];
+            artifact_sha256?: string;
+        };
+        CliScanRequest: {
+            /** Format: uuid */
+            tenant_id?: string;
+            packages: components["schemas"]["CliScanPackageRequest"][];
+        };
+        CliScanFindingResponse: {
+            coordinate: components["schemas"]["PackageCoordinateSummary"];
+            artifact_sha256?: string;
+            decision: components["schemas"]["PolicyDecision"];
+            trace_id: string;
+            rationale: string[];
+            fallback_coordinate?: components["schemas"]["PackageCoordinateSummary"];
+            create_analysis_job: boolean;
+        };
+        CliScanResponse: {
+            /** Format: uuid */
+            tenant_id: string;
+            /** Format: uuid */
+            registry_config_id: string;
+            /** Format: uuid */
+            policy_profile_id: string;
+            findings: components["schemas"]["CliScanFindingResponse"][];
+        };
+        CliExplainRequest: {
+            /** Format: uuid */
+            tenant_id?: string;
+            coordinate: components["schemas"]["PackageCoordinateSummary"];
+        };
+        CliExplainResponse: {
+            /** Format: uuid */
+            tenant_id: string;
+            /** Format: uuid */
+            analysis_job_id: string;
+            /** Format: uuid */
+            artifact_id: string;
+            trace_id: string;
+            coordinate: components["schemas"]["PackageCoordinateSummary"];
+            artifact_sha256: string;
+            recommended_action: components["schemas"]["PolicyDecision"];
+            confidence: string;
+            summary: {
+                [key: string]: unknown;
+            };
+            ai_explanation?: {
+                [key: string]: unknown;
+            };
+            /** Format: date-time */
+            created_at: string;
+        };
+        EvidenceCounts: {
+            static_reports: number;
+            sandbox_runs: number;
+            ai_explanations: number;
+            audit_events: number;
+        };
+        /** @enum {string} */
+        DashboardFeedFreshness: "fresh" | "stale" | "missing";
+        DashboardMetrics: {
+            /** Format: int64 */
+            blocked_packages: number;
+            /** Format: int64 */
+            quarantine_queue_depth: number;
+            /** Format: int64 */
+            active_overrides: number;
+            feed_freshness: components["schemas"]["DashboardFeedFreshness"];
+            /** Format: int64 */
+            feed_snapshot_age_seconds?: number | null;
+        };
+        RequestTimelineBucket: {
+            /** Format: date-time */
+            bucket_start: string;
+            allow: number;
+            warn: number;
+            quarantine: number;
+            block: number;
+        };
+        AuditEvent: {
+            /** Format: uuid */
+            id: string;
+            /** Format: uuid */
+            tenant_id: string;
+            actor: string;
+            actor_display: string;
+            actor_roles: string[];
+            action: string;
+            resource: string;
+            trace_id: string;
+            /** Format: date-time */
+            occurred_at: string;
+            metadata: {
+                [key: string]: unknown;
+            };
+        };
+        OverrideQueueItem: {
+            /** Format: uuid */
+            id: string;
+            scope: {
+                [key: string]: unknown;
+            };
+            reason: string;
+            /** Format: uuid */
+            requested_by?: string;
+            requested_by_display?: string;
+            /** Format: uuid */
+            approved_by?: string;
+            approved_by_display?: string;
+            status: string;
+            /** Format: date-time */
+            expires_at: string;
+            /** Format: date-time */
+            created_at: string;
+        };
+        OverrideActionRequest: {
+            reason: string;
+            /** Format: uuid */
+            actor_id?: string;
+        };
+        OverrideResponse: {
+            /** Format: uuid */
+            id: string;
+            /** Format: uuid */
+            tenant_id: string;
+            scope: {
+                [key: string]: unknown;
+            };
+            reason: string;
+            /** Format: uuid */
+            requested_by?: string;
+            /** Format: uuid */
+            approved_by?: string;
+            status: string;
+            /** Format: date-time */
+            expires_at: string;
+            /** Format: date-time */
+            created_at: string;
+        };
+        QuarantineQueueItem: {
+            /** Format: uuid */
+            analysis_job_id: string;
+            /** Format: uuid */
+            artifact_id: string;
+            trace_id: string;
+            coordinate: components["schemas"]["PackageCoordinateSummary"];
+            artifact_sha256: string;
+            recommended_action: string;
+            confidence: string;
+            requires_hitl: boolean;
+            summary: {
+                [key: string]: unknown;
+            };
+            evidence_counts: components["schemas"]["EvidenceCounts"];
+            /** Format: date-time */
+            created_at: string;
+        };
+        ArtifactEvidence: {
+            /** Format: uuid */
+            analysis_job_id: string;
+            /** Format: uuid */
+            artifact_id: string;
+            trace_id: string;
+            coordinate: components["schemas"]["PackageCoordinateSummary"];
+            artifact_sha256: string;
+            recommended_action: string;
+            confidence: string;
+            requires_hitl: boolean;
+            summary: {
+                [key: string]: unknown;
+            };
+            static_reports: {
+                [key: string]: unknown;
+            }[];
+            sandbox_runs: {
+                [key: string]: unknown;
+            }[];
+            ai_explanation?: {
+                [key: string]: unknown;
+            };
+            audit_events: components["schemas"]["AuditEvent"][];
+        };
+        ArtifactStaticAnalysisReports: {
+            /** Format: uuid */
+            analysis_job_id: string;
+            /** Format: uuid */
+            artifact_id: string;
+            trace_id: string;
+            reports: {
+                [key: string]: unknown;
+            }[];
+        };
+        ArtifactSandboxExecutionReports: {
+            /** Format: uuid */
+            analysis_job_id: string;
+            /** Format: uuid */
+            artifact_id: string;
+            trace_id: string;
+            runs: {
+                [key: string]: unknown;
+            }[];
+        };
+        PolicyProfileSummary: {
+            /** Format: uuid */
+            id: string;
+            /** Format: uuid */
+            tenant_id: string;
+            name: string;
+            mode: components["schemas"]["PolicyMode"];
+            /** Format: uuid */
+            latest_version_id: string;
+            latest_version: string;
+            /** Format: date-time */
+            latest_effective_at: string;
+            /** Format: date-time */
+            created_at: string;
+            request_count_last_30_days: number;
+        };
+        PolicySimulationRequest: {
+            /** Format: uuid */
+            policy_profile_id: string;
+            /** @default 30 */
+            lookback_days: number;
+            /** @enum {string} */
+            ecosystem?: "npm" | "pypi" | "cargo" | "maven" | "docker-oci" | "generic-http";
+            /** @default 50 */
+            limit: number;
+        };
+        PolicyDecisionCounts: {
+            allow: number;
+            allow_with_warning: number;
+            quarantine_pending_analysis: number;
+            block_known_malicious: number;
+            block_policy_violation: number;
+            require_hitl_approval: number;
+            fallback_to_approved_candidate: number;
+        };
+        PolicySimulationDiffItem: {
+            /** Format: uuid */
+            package_request_id: string;
+            trace_id: string;
+            /** Format: date-time */
+            requested_at: string;
+            coordinate: components["schemas"]["PackageCoordinateSummary"];
+            /** Format: uuid */
+            baseline_policy_profile_id: string;
+            baseline_policy_profile_name: string;
+            baseline_decision: components["schemas"]["PolicyDecision"];
+            baseline_rationale: string[];
+            simulated_decision: components["schemas"]["PolicyDecision"];
+            simulated_rationale: string[];
+            changed: boolean;
+        };
+        PolicySimulationResult: {
+            /** Format: uuid */
+            tenant_id: string;
+            /** Format: uuid */
+            target_policy_profile_id: string;
+            target_policy_profile_name: string;
+            target_policy_mode: components["schemas"]["PolicyMode"];
+            /** Format: uuid */
+            target_latest_version_id: string;
+            target_latest_version: string;
+            lookback_days: number;
+            /** @enum {string} */
+            ecosystem?: "npm" | "pypi" | "cargo" | "maven" | "docker-oci" | "generic-http";
+            replayed_request_count: number;
+            changed_request_count: number;
+            baseline_counts: components["schemas"]["PolicyDecisionCounts"];
+            simulated_counts: components["schemas"]["PolicyDecisionCounts"];
+            items: components["schemas"]["PolicySimulationDiffItem"][];
+            /** Format: date-time */
+            generated_at: string;
+        };
+        RegistryConfig: {
+            /** Format: uuid */
+            id: string;
+            /** Format: uuid */
+            tenant_id: string;
+            name: string;
+            description: string;
+            /** @enum {string} */
+            adapter: "npm" | "pypi" | "cargo" | "maven" | "docker-oci" | "generic-http";
+            upstream_url: string;
+            mount_path: string;
+            /** @enum {string} */
+            auth_type: "none" | "basic" | "bearer" | "mtls";
+            /** Format: uuid */
+            credential_ref?: string;
+            mode: components["schemas"]["PolicyMode"];
+            /** Format: uuid */
+            policy_profile_id: string;
+            cache_ttl_seconds: number;
+            verify_upstream_tls: boolean;
+            enabled: boolean;
+            /** Format: date-time */
+            deleted_at?: string;
+            /** Format: date-time */
+            created_at: string;
+            /** Format: date-time */
+            updated_at: string;
+        };
+        CreateRegistryConfigRequest: {
+            name: string;
+            description?: string;
+            /** @enum {string} */
+            adapter: "npm" | "pypi" | "cargo" | "maven" | "docker-oci" | "generic-http";
+            upstream_url: string;
+            mount_path: string;
+            /** @enum {string} */
+            auth_type?: "none" | "basic" | "bearer" | "mtls";
+            /** Format: uuid */
+            credential_ref?: string;
+            mode?: components["schemas"]["PolicyMode"];
+            /** Format: uuid */
+            policy_profile_id: string;
+            cache_ttl_seconds?: number;
+            verify_upstream_tls?: boolean;
+            enabled?: boolean;
+        };
+        UpdateRegistryConfigRequest: {
+            name?: string;
+            description?: string;
+            upstream_url?: string;
+            /** @enum {string} */
+            auth_type?: "none" | "basic" | "bearer" | "mtls";
+            mode?: components["schemas"]["PolicyMode"];
+            /** Format: uuid */
+            policy_profile_id?: string;
+            cache_ttl_seconds?: number;
+            verify_upstream_tls?: boolean;
+            enabled?: boolean;
+        };
+        CredentialStatus: {
+            /** Format: uuid */
+            id: string;
+            /** Format: uuid */
+            tenant_id: string;
+            name: string;
+            credential_type: string;
+            source: string;
+            encrypted_value_key_id?: string;
+            configured: boolean;
+            /** Format: date-time */
+            created_at: string;
+            /** Format: date-time */
+            updated_at: string;
+        };
+        CreateCredentialRequest: {
+            name: string;
+            credential_type: string;
+            source?: string;
+            configured?: boolean;
+        };
+        RotateCredentialRequest: {
+            configured?: boolean;
+        };
+        ConnectionTestResult: {
+            success: boolean;
+            message?: string;
+            latency_ms?: number;
+        };
+        AiProviderConfig: {
+            /** Format: uuid */
+            id: string;
+            /** Format: uuid */
+            tenant_id: string;
+            display_name: string;
+            provider_type: string;
+            base_url?: string;
+            model_id: string;
+            /** Format: uuid */
+            credential_ref?: string;
+            is_local: boolean;
+            active: boolean;
+            /** Format: date-time */
+            created_at: string;
+            /** Format: date-time */
+            updated_at: string;
+        };
+        LlmUsageSummary: {
+            total_calls: number;
+            prompt_tokens: number;
+            completion_tokens: number;
+            total_tokens: number;
+            estimated_cost: number;
+            avg_latency_ms?: number;
+            p95_latency_ms?: number;
+            schema_validation_passes: number;
+            schema_validation_failures: number;
+            redaction_failures: number;
+        };
+        LlmUsageDailyBucket: {
+            day: string;
+            total_calls: number;
+            total_tokens: number;
+        };
+        LlmUsageProviderModel: {
+            provider_display_name: string;
+            provider_type: string;
+            model_id: string;
+            total_calls: number;
+            prompt_tokens: number;
+            completion_tokens: number;
+            total_tokens: number;
+            estimated_cost: number;
+            avg_latency_ms?: number;
+            p95_latency_ms?: number;
+        };
+        LlmUsageAnalysisJob: {
+            /** Format: uuid */
+            analysis_job_id: string;
+            trace_id: string;
+            provider_display_name: string;
+            model_id: string;
+            total_calls: number;
+            total_tokens: number;
+            estimated_cost: number;
+            langfuse_trace_id?: string;
+            /** Format: date-time */
+            last_called_at: string;
+        };
+        LlmUsageFailingTrace: {
+            /** Format: uuid */
+            analysis_job_id: string;
+            trace_id: string;
+            provider_display_name: string;
+            provider_type: string;
+            model_id: string;
+            langfuse_trace_id?: string;
+            prompt_template_version: string;
+            schema_valid: boolean;
+            redaction_complete: boolean;
+            latency_ms?: number;
+            /** Format: date-time */
+            created_at: string;
+        };
+        LlmUsagePromptTemplateVersion: {
+            prompt_template_version: string;
+            total_calls: number;
+        };
+        LlmUsage: {
+            /** Format: uuid */
+            tenant_id: string;
+            summary: components["schemas"]["LlmUsageSummary"];
+            calls_by_day: components["schemas"]["LlmUsageDailyBucket"][];
+            provider_models: components["schemas"]["LlmUsageProviderModel"][];
+            analysis_jobs: components["schemas"]["LlmUsageAnalysisJob"][];
+            failing_traces: components["schemas"]["LlmUsageFailingTrace"][];
+            prompt_template_versions: components["schemas"]["LlmUsagePromptTemplateVersion"][];
+        };
+    };
     responses: never;
     parameters: never;
     requestBodies: never;
@@ -110,7 +1010,548 @@ export interface operations {
                 headers: {
                     [name: string]: unknown;
                 };
+                content: {
+                    "application/json": components["schemas"]["HealthStatus"];
+                };
+            };
+        };
+    };
+    getAuthSession: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Current API auth session state for local mock auth or future enterprise identity modes. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AuthSession"];
+                };
+            };
+        };
+    };
+    clearAuthSession: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Local auth session cleared or no-op for stateless clients. */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
                 content?: never;
+            };
+        };
+    };
+    setMockAuthSession: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SetMockAuthSessionRequest"];
+            };
+        };
+        responses: {
+            /** @description Selected local mock identity for the returned session payload. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AuthSession"];
+                };
+            };
+            /** @description Requested mock identity was not found. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Mock identities are unavailable for the configured auth mode. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    listMockAuthIdentities: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Available seeded local mock identities for local alpha. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MockIdentityList"];
+                };
+            };
+            /** @description Mock identities are unavailable for the configured auth mode. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    listRequestTimeline: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                tenant_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Tenant-scoped hourly decision buckets for the latest eight hours of persisted activity. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RequestTimelineBucket"][];
+                };
+            };
+            /** @description Tenant was not found. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    getDashboardMetrics: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                tenant_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Tenant-scoped KPI summary cards for the executive dashboard. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DashboardMetrics"];
+                };
+            };
+            /** @description Tenant was not found. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    listPolicyProfiles: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                tenant_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Tenant-scoped policy profiles with latest version metadata. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PolicyProfileSummary"][];
+                };
+            };
+            /** @description Tenant was not found. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    simulatePolicyReplay: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                tenant_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PolicySimulationRequest"];
+            };
+        };
+        responses: {
+            /** @description Dry-run replay of historical requests against a target policy profile. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PolicySimulationResult"];
+                };
+            };
+            /** @description Policy simulation request validation failed. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Tenant or policy profile was not found. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Triage Counter is unavailable for replay. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    listQuarantineQueue: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                tenant_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Tenant-scoped quarantine or suspicious analysis queue. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["QuarantineQueueItem"][];
+                };
+            };
+            /** @description Tenant was not found. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    getArtifactEvidence: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                tenant_id: string;
+                artifact_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Aggregated evidence for the latest tenant-scoped analysis of an artifact. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ArtifactEvidence"];
+                };
+            };
+            /** @description Artifact evidence was not found for the tenant. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    listArtifactStaticAnalysisReports: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                tenant_id: string;
+                artifact_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Latest tenant-scoped static analysis report payloads for an artifact. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ArtifactStaticAnalysisReports"];
+                };
+            };
+            /** @description Artifact reports were not found for the tenant. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    listArtifactSandboxExecutionReports: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                tenant_id: string;
+                artifact_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Latest tenant-scoped sandbox telemetry payloads for an artifact. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ArtifactSandboxExecutionReports"];
+                };
+            };
+            /** @description Artifact reports were not found for the tenant. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    listOverrides: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                tenant_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Tenant-scoped override queue items for pending and resolved review. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OverrideQueueItem"][];
+                };
+            };
+            /** @description Tenant was not found. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    approveOverride: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                tenant_id: string;
+                override_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["OverrideActionRequest"];
+            };
+        };
+        responses: {
+            /** @description Override request approved for the tenant. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OverrideResponse"];
+                };
+            };
+            /** @description Override action request validation failed. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Actor identity is required. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Actor is not permitted to manage overrides for the tenant. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Override request was not found or is no longer pending. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    denyOverride: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                tenant_id: string;
+                override_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["OverrideActionRequest"];
+            };
+        };
+        responses: {
+            /** @description Override request denied for the tenant. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OverrideResponse"];
+                };
+            };
+            /** @description Override action request validation failed. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Actor identity is required. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Actor is not permitted to manage overrides for the tenant. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Override request was not found or is no longer pending. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
             };
         };
     };
@@ -121,14 +1562,47 @@ export interface operations {
             path?: never;
             cookie?: never;
         };
-        requestBody?: never;
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DecisionRequest"];
+            };
+        };
         responses: {
             /** @description Deterministic policy decision */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["DecisionResponse"];
+                };
+            };
+            /** @description Decision request validation failed. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Policy profile, snapshot, or registry context was not found. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Triage Counter is unavailable. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
             };
         };
     };
@@ -136,17 +1610,30 @@ export interface operations {
         parameters: {
             query?: never;
             header?: never;
-            path?: never;
+            path: {
+                tenant_id: string;
+            };
             cookie?: never;
         };
         requestBody?: never;
         responses: {
-            /** @description Registry configuration list */
+            /** @description Tenant-scoped registry configuration list. */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["RegistryConfig"][];
+                };
+            };
+            /** @description Tenant was not found. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
             };
         };
     };
@@ -154,35 +1641,446 @@ export interface operations {
         parameters: {
             query?: never;
             header?: never;
-            path?: never;
+            path: {
+                tenant_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateRegistryConfigRequest"];
+            };
+        };
+        responses: {
+            /** @description Registry configuration created. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RegistryConfig"];
+                };
+            };
+            /** @description Request validation failed. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Tenant or policy profile was not found. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    getRegistryConfig: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                tenant_id: string;
+                registry_config_id: string;
+            };
             cookie?: never;
         };
         requestBody?: never;
         responses: {
-            /** @description Registry configuration created */
-            201: {
+            /** @description Single registry configuration. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RegistryConfig"];
+                };
+            };
+            /** @description Registry configuration not found. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    deleteRegistryConfig: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                tenant_id: string;
+                registry_config_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Registry configuration soft-deleted. */
+            204: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content?: never;
             };
+            /** @description Registry configuration not found. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
         };
     };
-    listAuditEvents: {
+    updateRegistryConfig: {
         parameters: {
             query?: never;
             header?: never;
-            path?: never;
+            path: {
+                tenant_id: string;
+                registry_config_id: string;
+            };
             cookie?: never;
         };
-        requestBody?: never;
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdateRegistryConfigRequest"];
+            };
+        };
         responses: {
-            /** @description Append-only audit event page */
+            /** @description Registry configuration updated. */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
+                content: {
+                    "application/json": components["schemas"]["RegistryConfig"];
+                };
+            };
+            /** @description Request validation failed. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Registry configuration not found. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    listCredentials: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                tenant_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Tenant-scoped integration credential metadata list (values never returned). */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CredentialStatus"][];
+                };
+            };
+            /** @description Tenant was not found. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    createCredential: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                tenant_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateCredentialRequest"];
+            };
+        };
+        responses: {
+            /** @description Credential created (value never echoed). */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CredentialStatus"];
+                };
+            };
+            /** @description Request validation failed. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    deleteCredential: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                tenant_id: string;
+                credential_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Credential deleted. */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
                 content?: never;
+            };
+            /** @description Credential not found. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    rotateCredential: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                tenant_id: string;
+                credential_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RotateCredentialRequest"];
+            };
+        };
+        responses: {
+            /** @description Credential rotated. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CredentialStatus"];
+                };
+            };
+            /** @description Credential not found. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    testCredentialConnection: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                tenant_id: string;
+                credential_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Connection test result. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ConnectionTestResult"];
+                };
+            };
+            /** @description Credential not found. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    listAuditEvents: {
+        parameters: {
+            query?: {
+                action?: string;
+                actor?: string;
+                limit?: number;
+            };
+            header?: never;
+            path: {
+                tenant_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Tenant-scoped append-only audit event page. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AuditEvent"][];
+                };
+            };
+            /** @description Tenant was not found. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    exportAuditEventsCsv: {
+        parameters: {
+            query?: {
+                action?: string;
+                actor?: string;
+                limit?: number;
+            };
+            header?: never;
+            path: {
+                tenant_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Tenant-scoped audit event export in CSV format. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/csv": string;
+                };
+            };
+            /** @description Tenant was not found. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    listAiProviders: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                tenant_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Tenant-scoped AI provider configuration list. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AiProviderConfig"][];
+                };
+            };
+            /** @description Tenant was not found. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    getLlmUsage: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                tenant_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Tenant-scoped LLM usage metrics and failing trace drill-down. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LlmUsage"];
+                };
+            };
+            /** @description Tenant was not found. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
             };
         };
     };
@@ -193,14 +2091,80 @@ export interface operations {
             path?: never;
             cookie?: never;
         };
-        requestBody?: never;
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CliScanRequest"];
+            };
+        };
         responses: {
             /** @description Scan accepted */
             202: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["CliScanResponse"];
+                };
+            };
+            /** @description CLI scan request validation failed. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description No matching enabled registry configuration was found. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Triage Counter is unavailable. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    explainCliPackage: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CliExplainRequest"];
+            };
+        };
+        responses: {
+            /** @description Latest tenant-scoped explanation for a package coordinate. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CliExplainResponse"];
+                };
+            };
+            /** @description No matching analyzed package was found. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
             };
         };
     };

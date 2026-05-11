@@ -2,7 +2,8 @@
   "release-type": "simple",
   "packages": {
     ".": {
-      "package-name": "aegiscudo"
+      "package-name": "aegiscudo",
+      "changelog-path": "CHANGELOG.md"
     }
   }
 }

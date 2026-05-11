@@ -105,6 +105,26 @@ When a fix is ready, maintainers should aim to:
 - document affected versions or areas
 - credit the reporter when requested and appropriate
 
+## GitHub Security Advisory Draft Process
+
+When a report is confirmed and remediation work needs private coordination, maintainers should open a draft GitHub Security Advisory for this repository before discussing the fix in public issues or PRs.
+
+Recommended flow:
+
+1. Open the repository Security tab and create a new draft advisory.
+2. Add a short title, affected component summary, severity assessment, and the private reporter details if available.
+3. Record the currently affected branches, tags, or unreleased areas, plus any known workarounds.
+4. Link the private fix branch or private patch PR to the advisory discussion instead of opening a public tracking issue.
+5. Use the draft advisory to coordinate reviewer access, remediation notes, release timing, and disclosure decisions.
+6. Only publish the advisory after the fix or mitigation is available and public release notes are ready.
+
+Before publishing the advisory, confirm that:
+
+- the patch or mitigation has landed in the supported development line
+- public changelog or release notes do not expose sensitive exploit details unnecessarily
+- any necessary token rotations, customer notifications, or operational mitigations are already underway
+- the advisory description is redacted for secrets, private infrastructure details, and exploit-enabling payloads
+
 ## Thanks
 
 Responsible disclosure helps keep the project, its contributors, and downstream users safer.

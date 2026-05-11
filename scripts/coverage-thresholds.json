@@ -1,0 +1,78 @@
+{
+  "typescript": [
+    {
+      "name": "command-center",
+      "pathPrefix": "apps/command-center/",
+      "minimumLineCoverage": 60.0
+    }
+  ],
+  "python": [
+    {
+      "name": "ai-analyst",
+      "pathPrefix": "services/ai-analyst/src/ai_analyst/",
+      "minimumLineCoverage": 80.0
+    },
+    {
+      "name": "emergency-room",
+      "pathPrefix": "services/emergency-room/src/emergency_room/",
+      "minimumLineCoverage": 85.0
+    },
+    {
+      "name": "python-common",
+      "pathPrefix": "services/python-common/src/aegiscudo_common/",
+      "minimumLineCoverage": 95.0
+    }
+  ],
+  "rust": [
+    {
+      "name": "aedo-cli",
+      "pathPrefix": "cli/aedo-cli/",
+      "minimumLineCoverage": 78.5
+    },
+    {
+      "name": "aegiscudo-core",
+      "pathPrefix": "crates/aegiscudo-core/",
+      "minimumLineCoverage": 92.0
+    },
+    {
+      "name": "aegiscudo-policy",
+      "pathPrefix": "crates/aegiscudo-policy/",
+      "minimumLineCoverage": 93.5
+    },
+    {
+      "name": "aegiscudo-protocol",
+      "pathPrefix": "crates/aegiscudo-protocol/",
+      "minimumLineCoverage": 77.5
+    },
+    {
+      "name": "aegiscudo-telemetry",
+      "pathPrefix": "crates/aegiscudo-telemetry/",
+      "minimumLineCoverage": 75.0
+    },
+    {
+      "name": "aegiscudo-api",
+      "pathPrefix": "services/aegiscudo-api/",
+      "minimumLineCoverage": 5.5
+    },
+    {
+      "name": "feed-harvester",
+      "pathPrefix": "services/feed-harvester/",
+      "minimumLineCoverage": 13.5
+    },
+    {
+      "name": "mosquito-net",
+      "pathPrefix": "services/mosquito-net/",
+      "minimumLineCoverage": 71.5
+    },
+    {
+      "name": "surgeon",
+      "pathPrefix": "services/surgeon/",
+      "minimumLineCoverage": 76.0
+    },
+    {
+      "name": "triage-counter",
+      "pathPrefix": "services/triage-counter/",
+      "minimumLineCoverage": 69.0
+    }
+  ]
+}

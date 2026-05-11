@@ -1,0 +1,6 @@
+{
+  "artifact_digest": { "algorithm": "sha256", "hex": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" },
+  "analyzer_version": "0.1.0",
+  "rule_set_version": "mvp-static-rules-2026-05",
+  "indicators": []
+}

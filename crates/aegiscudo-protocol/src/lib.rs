@@ -34,6 +34,8 @@ pub struct NormalizedPackageRequest {
     pub trace_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub requested_digest: Option<ArtifactDigest>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_url: Option<String>,
     #[serde(default)]
     pub explicit_version_or_integrity: bool,
 }

@@ -16,5 +16,18 @@ export default defineConfig({
     globals: true,
     include: ["test/**/*.test.ts", "test/**/*.test.tsx"],
     setupFiles: ["./vitest.setup.ts"],
+    coverage: {
+      provider: "v8",
+      reporter: ["text", "json-summary", "lcov"],
+      reportsDirectory: "./coverage",
+      include: ["app/**/*.{ts,tsx}", "components/**/*.{ts,tsx}", "lib/**/*.{ts,tsx}"],
+      exclude: [
+        "app/api/**/*",
+        "**/*.d.ts",
+        "**/*.test.ts",
+        "**/*.test.tsx",
+        "**/vitest.setup.ts",
+      ],
+    },
   },
 });

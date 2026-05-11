@@ -5,7 +5,7 @@ use std::{
 
 use aegiscudo_core::{
     AnalysisJob, ArtifactDigest, AttestationResult, DigestError, FeedState, JobState,
-    PackageCoordinate, PolicyDecision, PolicyMode, PolicySnapshot, StaticEvidence,
+    PackageCoordinate, PolicyDecision, PolicyMode, PolicySnapshot, Severity, StaticEvidence,
 };
 use aegiscudo_policy::{PolicyInput, VulnerabilityPolicyAction};
 use aegiscudo_protocol::{DecisionRequest, DecisionResponse, PackageRequestKind};
@@ -224,6 +224,7 @@ pub struct PersistedPackageRequest {
     pub registry_config_id: Uuid,
     pub client_type: String,
     pub coordinate: PackageCoordinate,
+    pub source_url: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -272,6 +273,8 @@ pub enum PolicyRepositoryError {
     InvalidFeedSnapshotAge,
     #[error("analysis job requires an artifact digest")]
     MissingArtifactDigestForAnalysisJob,
+    #[error("analysis job requires a source URL")]
+    MissingArtifactSourceUrlForAnalysisJob,
     #[error("policy rule action `{action}` is not supported for signal `{signal}`")]
     UnsupportedPolicyRuleAction { signal: String, action: String },
     #[error("policy repository is unavailable")]
@@ -289,6 +292,21 @@ impl PolicyRepository {
         &self,
         request: DecisionRequest,
     ) -> Result<PolicyInput, PolicyRepositoryError> {
+        self.bind_request(request, false).await
+    }
+
+    pub async fn bind_simulation_request(
+        &self,
+        request: DecisionRequest,
+    ) -> Result<PolicyInput, PolicyRepositoryError> {
+        self.bind_request(request, true).await
+    }
+
+    async fn bind_request(
+        &self,
+        request: DecisionRequest,
+        allow_profile_override: bool,
+    ) -> Result<PolicyInput, PolicyRepositoryError> {
         if request.tenant_id != request.request.tenant_id
             || request.registry_config_id != request.request.registry_config_id
             || request.policy_profile_id != request.request.policy_profile_id
@@ -298,11 +316,11 @@ impl PolicyRepository {
         let binding = self
             .load_registry_policy_binding(request.tenant_id, request.registry_config_id)
             .await?;
-        if binding.policy_profile_id != request.policy_profile_id {
+        if !allow_profile_override && binding.policy_profile_id != request.policy_profile_id {
             return Err(PolicyRepositoryError::RegistryPolicyMismatch);
         }
         let profile = self
-            .load_profile(request.tenant_id, binding.policy_profile_id)
+            .load_profile(request.tenant_id, request.policy_profile_id)
             .await?;
         let artifact_exists = match &request.request.requested_digest {
             Some(artifact_digest) => {
@@ -349,6 +367,20 @@ impl PolicyRepository {
                 request.request.requested_digest.as_ref(),
             )
             .await?;
+        let static_analysis_score_violation = self
+            .load_static_analysis_score_violation(
+                request.tenant_id,
+                &request.request.coordinate,
+                request.request.requested_digest.as_ref(),
+            )
+            .await?;
+        let dynamic_sandbox_policy_violation = self
+            .load_dynamic_sandbox_policy_violation(
+                request.tenant_id,
+                &request.request.coordinate,
+                request.request.requested_digest.as_ref(),
+            )
+            .await?;
         let ai_agent_injection_indicator = self
             .load_ai_agent_injection_indicator(
                 request.tenant_id,
@@ -375,11 +407,11 @@ impl PolicyRepository {
         };
         Ok(PolicyInput {
             tenant_id: request.tenant_id,
-            policy_profile_id: binding.policy_profile_id,
+            policy_profile_id: request.policy_profile_id,
             policy_snapshot_id: profile.latest_snapshot.id,
             coordinate: request.request.coordinate,
             trace_id: request.request.trace_id,
-            mode: binding.mode,
+            mode: profile.mode,
             known_safe_verdict,
             known_malicious,
             vulnerable_above_threshold,
@@ -392,8 +424,8 @@ impl PolicyRepository {
             typosquat_risk: package_signal_status.typosquat_risk,
             artifact_digest_reputation_risk: package_signal_status.artifact_digest_reputation_risk,
             cross_ecosystem_ioc_correlation_risk: false,
-            static_analysis_score_violation: false,
-            dynamic_sandbox_policy_violation: false,
+            static_analysis_score_violation,
+            dynamic_sandbox_policy_violation,
             github_to_registry_publish_gap_risk: package_signal_status
                 .github_to_registry_publish_gap_risk,
             trusted_publisher_identity_mismatch: package_signal_status
@@ -673,6 +705,46 @@ impl PolicyRepository {
         }
     }
 
+    async fn load_static_analysis_score_violation(
+        &self,
+        tenant_id: Uuid,
+        coordinate: &PackageCoordinate,
+        artifact_digest: Option<&ArtifactDigest>,
+    ) -> Result<bool, PolicyRepositoryError> {
+        match self {
+            Self::Postgres(repository) => {
+                repository
+                    .load_static_analysis_score_violation(tenant_id, coordinate, artifact_digest)
+                    .await
+            }
+            Self::InMemory(repository) => {
+                repository
+                    .load_static_analysis_score_violation(tenant_id, coordinate, artifact_digest)
+                    .await
+            }
+        }
+    }
+
+    async fn load_dynamic_sandbox_policy_violation(
+        &self,
+        tenant_id: Uuid,
+        coordinate: &PackageCoordinate,
+        artifact_digest: Option<&ArtifactDigest>,
+    ) -> Result<bool, PolicyRepositoryError> {
+        match self {
+            Self::Postgres(repository) => {
+                repository
+                    .load_dynamic_sandbox_policy_violation(tenant_id, coordinate, artifact_digest)
+                    .await
+            }
+            Self::InMemory(repository) => {
+                repository
+                    .load_dynamic_sandbox_policy_violation(tenant_id, coordinate, artifact_digest)
+                    .await
+            }
+        }
+    }
+
     async fn load_override_signal_status(
         &self,
         tenant_id: Uuid,
@@ -944,6 +1016,7 @@ impl PostgresPolicyRepository {
             r#"
             INSERT INTO analysis_jobs (
               tenant_id,
+                  registry_config_id,
               artifact_id,
               policy_version_id,
               ecosystem,
@@ -951,13 +1024,15 @@ impl PostgresPolicyRepository {
               package_name,
               package_version,
               artifact_sha256,
+                  source_url,
               trace_id
             )
-            VALUES ($1, $2, $3, $4::package_ecosystem, $5, $6, $7, $8, $9)
+                VALUES ($1, $2, $3, $4, $5::package_ecosystem, $6, $7, $8, $9, $10, $11)
             RETURNING id, created_at, updated_at
             "#,
         )
         .bind(request.tenant_id)
+            .bind(request.registry_config_id)
         .bind(artifact_id)
         .bind(response.policy_snapshot_id)
         .bind(request.request.coordinate.ecosystem.to_string())
@@ -965,6 +1040,7 @@ impl PostgresPolicyRepository {
         .bind(request.request.coordinate.name.clone())
         .bind(request.request.coordinate.version.clone())
         .bind(&artifact_digest.hex)
+            .bind(request.request.source_url.clone())
         .bind(&response.trace_id)
         .fetch_one(&self.pool)
         .await?;
@@ -972,8 +1048,14 @@ impl PostgresPolicyRepository {
         Ok(Some(AnalysisJob {
             id: row.try_get("id")?,
             tenant_id: request.tenant_id,
+            registry_config_id: request.registry_config_id,
             coordinate: request.request.coordinate.clone(),
             artifact_digest,
+            source_url: request
+                .request
+                .source_url
+                .clone()
+                .ok_or(PolicyRepositoryError::MissingArtifactSourceUrlForAnalysisJob)?,
             policy_snapshot_id: response.policy_snapshot_id,
             state: JobState::Queued,
             retry_count: 0,
@@ -1330,6 +1412,80 @@ impl PostgresPolicyRepository {
         }))
     }
 
+    async fn load_static_analysis_score_violation(
+        &self,
+        tenant_id: Uuid,
+        coordinate: &PackageCoordinate,
+        artifact_digest: Option<&ArtifactDigest>,
+    ) -> Result<bool, PolicyRepositoryError> {
+        let requested_digest_hex = artifact_digest.map(|digest| digest.hex.clone());
+        let rows = sqlx::query(
+            r#"
+            SELECT sar.report
+            FROM static_analysis_reports sar
+            JOIN artifacts a ON a.id = sar.artifact_id
+            WHERE a.tenant_id = $1
+              AND a.ecosystem = $2::package_ecosystem
+              AND a.namespace IS NOT DISTINCT FROM $3
+              AND a.package_name = $4
+              AND a.package_version IS NOT DISTINCT FROM $5
+              AND ($6::text IS NULL OR a.sha256 = $6)
+            "#,
+        )
+        .bind(tenant_id)
+        .bind(coordinate.ecosystem.to_string())
+        .bind(coordinate.namespace.clone())
+        .bind(&coordinate.name)
+        .bind(coordinate.version.clone())
+        .bind(requested_digest_hex)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows.into_iter().any(|row| {
+            row.try_get::<Json<Value>, _>("report")
+                .ok()
+                .and_then(|report| serde_json::from_value::<StaticEvidence>(report.0).ok())
+                .is_some_and(|report| static_report_exceeds_policy_threshold(&report))
+        }))
+    }
+
+    async fn load_dynamic_sandbox_policy_violation(
+        &self,
+        tenant_id: Uuid,
+        coordinate: &PackageCoordinate,
+        artifact_digest: Option<&ArtifactDigest>,
+    ) -> Result<bool, PolicyRepositoryError> {
+        let requested_digest_hex = artifact_digest.map(|digest| digest.hex.clone());
+        let rows = sqlx::query(
+            r#"
+            SELECT sr.telemetry
+            FROM sandbox_runs sr
+            JOIN artifacts a ON a.id = sr.artifact_id
+            WHERE a.tenant_id = $1
+              AND a.ecosystem = $2::package_ecosystem
+              AND a.namespace IS NOT DISTINCT FROM $3
+              AND a.package_name = $4
+              AND a.package_version IS NOT DISTINCT FROM $5
+              AND ($6::text IS NULL OR a.sha256 = $6)
+              AND sr.state = 'completed'
+            "#,
+        )
+        .bind(tenant_id)
+        .bind(coordinate.ecosystem.to_string())
+        .bind(coordinate.namespace.clone())
+        .bind(&coordinate.name)
+        .bind(coordinate.version.clone())
+        .bind(requested_digest_hex)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows.into_iter().any(|row| {
+            row.try_get::<Json<Value>, _>("telemetry")
+                .ok()
+                .is_some_and(|telemetry| sandbox_run_exceeds_policy_threshold(&telemetry.0))
+        }))
+    }
+
     async fn load_override_signal_status(
         &self,
         tenant_id: Uuid,
@@ -1435,6 +1591,7 @@ pub struct InMemoryPolicyRepository {
             )>,
         >,
     >,
+    sandbox_runs: Arc<RwLock<Vec<(Uuid, PackageCoordinate, Option<ArtifactDigest>, Value)>>>,
     override_records: Arc<RwLock<Vec<OverrideRecord>>>,
     package_signal_records: Arc<RwLock<Vec<PackageSignalRecord>>>,
     feed_snapshot_records: Arc<RwLock<Vec<FeedSnapshotRecord>>>,
@@ -1564,6 +1721,22 @@ impl InMemoryPolicyRepository {
     }
 
     #[cfg(test)]
+    async fn remember_sandbox_run(
+        &self,
+        tenant_id: Uuid,
+        coordinate: PackageCoordinate,
+        artifact_digest: Option<ArtifactDigest>,
+        telemetry: Value,
+    ) {
+        self.sandbox_runs.write().await.push((
+            tenant_id,
+            coordinate,
+            artifact_digest,
+            telemetry,
+        ));
+    }
+
+    #[cfg(test)]
     async fn remember_override(
         &self,
         tenant_id: Uuid,
@@ -1660,8 +1833,14 @@ impl InMemoryPolicyRepository {
         let job = AnalysisJob {
             id: Uuid::now_v7(),
             tenant_id: request.tenant_id,
+            registry_config_id: request.registry_config_id,
             coordinate: request.request.coordinate.clone(),
             artifact_digest,
+            source_url: request
+                .request
+                .source_url
+                .clone()
+                .ok_or(PolicyRepositoryError::MissingArtifactSourceUrlForAnalysisJob)?,
             policy_snapshot_id: response.policy_snapshot_id,
             state: JobState::Queued,
             retry_count: 0,
@@ -1826,6 +2005,44 @@ impl InMemoryPolicyRepository {
             .any(|(_, _, _, report)| static_report_has_ai_agent_injection(report)))
     }
 
+    async fn load_static_analysis_score_violation(
+        &self,
+        tenant_id: Uuid,
+        coordinate: &PackageCoordinate,
+        artifact_digest: Option<&ArtifactDigest>,
+    ) -> Result<bool, PolicyRepositoryError> {
+        let reports = self.static_analysis_reports.read().await;
+        Ok(reports
+            .iter()
+            .filter(|(match_tenant_id, match_coordinate, match_digest, _)| {
+                *match_tenant_id == tenant_id
+                    && *match_coordinate == *coordinate
+                    && artifact_digest
+                        .map(|digest| match_digest.as_ref() == Some(digest))
+                        .unwrap_or(true)
+            })
+            .any(|(_, _, _, report)| static_report_exceeds_policy_threshold(report)))
+    }
+
+    async fn load_dynamic_sandbox_policy_violation(
+        &self,
+        tenant_id: Uuid,
+        coordinate: &PackageCoordinate,
+        artifact_digest: Option<&ArtifactDigest>,
+    ) -> Result<bool, PolicyRepositoryError> {
+        let sandbox_runs = self.sandbox_runs.read().await;
+        Ok(sandbox_runs
+            .iter()
+            .filter(|(match_tenant_id, match_coordinate, match_digest, _)| {
+                *match_tenant_id == tenant_id
+                    && *match_coordinate == *coordinate
+                    && artifact_digest
+                        .map(|digest| match_digest.as_ref() == Some(digest))
+                        .unwrap_or(true)
+            })
+            .any(|(_, _, _, telemetry)| sandbox_run_exceeds_policy_threshold(telemetry)))
+    }
+
     async fn load_override_signal_status(
         &self,
         tenant_id: Uuid,
@@ -1892,6 +2109,7 @@ fn persisted_decision_record(
             registry_config_id: request.registry_config_id,
             client_type: client_type_for_request_kind(request.request.kind.clone()).to_owned(),
             coordinate: request.request.coordinate.clone(),
+            source_url: request.request.source_url.clone(),
         },
         artifact_digest: request.request.requested_digest.clone(),
         policy_snapshot_id: response.policy_snapshot_id,
@@ -2073,6 +2291,50 @@ fn static_report_has_ai_agent_injection(report: &StaticEvidence) -> bool {
         .indicators
         .iter()
         .any(|indicator| indicator.indicator_type == "ai-agent-injection")
+}
+
+fn static_report_exceeds_policy_threshold(report: &StaticEvidence) -> bool {
+    report
+        .indicators
+        .iter()
+        .any(|indicator| matches!(indicator.severity, Severity::High | Severity::Critical))
+}
+
+fn sandbox_run_exceeds_policy_threshold(telemetry: &Value) -> bool {
+    sandbox_telemetry_phases(telemetry).into_iter().any(|phase| {
+        let phase_name = phase.get("phase").and_then(Value::as_str);
+        if !matches!(phase_name, Some("D" | "E" | "G")) {
+            return false;
+        }
+
+        phase
+            .get("events")
+            .and_then(Value::as_array)
+            .is_some_and(|events| {
+                events.iter().any(|event| sandbox_event_exceeds_policy_threshold(event))
+            })
+    })
+}
+
+fn sandbox_telemetry_phases(telemetry: &Value) -> Vec<&Value> {
+    if let Some(phases) = telemetry.get("phases").and_then(Value::as_array) {
+        return phases.iter().collect();
+    }
+    telemetry
+        .as_array()
+        .map(|phases| phases.iter().collect())
+        .unwrap_or_default()
+}
+
+fn sandbox_event_exceeds_policy_threshold(event: &Value) -> bool {
+    let event_type = event.get("type").and_then(Value::as_str);
+    let severity = event.get("severity").and_then(Value::as_str);
+    match (event_type, severity) {
+        (Some("canary-secret-access"), Some("critical")) => true,
+        (Some("ai-canary-file-modified"), Some("critical")) => true,
+        (Some("outbound-network-attempt"), Some("high" | "critical")) => true,
+        _ => false,
+    }
 }
 
 fn package_signal_status_from_signals<'a>(
@@ -2263,6 +2525,7 @@ mod tests {
                 coordinate,
                 trace_id: "trace-policy".to_owned(),
                 requested_digest: None,
+                source_url: None,
                 explicit_version_or_integrity: false,
             },
         }
@@ -2594,6 +2857,110 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn in_memory_repository_binds_static_analysis_score_violation_from_reports() {
+        let tenant_id = Uuid::now_v7();
+        let policy_profile_id = Uuid::now_v7();
+        let registry_config_id = Uuid::now_v7();
+        let snapshot_id = Uuid::now_v7();
+        let repository = InMemoryPolicyRepository::new();
+        repository
+            .upsert_profile(profile(tenant_id, policy_profile_id, snapshot_id))
+            .await;
+        repository
+            .upsert_registry_binding(RegistryPolicyBinding {
+                tenant_id,
+                registry_config_id,
+                policy_profile_id,
+                mode: PolicyMode::Warn,
+            })
+            .await;
+
+        let request = decision_request(tenant_id, registry_config_id, policy_profile_id);
+        repository
+            .remember_static_analysis_report(
+                tenant_id,
+                request.request.coordinate.clone(),
+                None,
+                StaticEvidence {
+                    artifact_digest: ArtifactDigest::sha256("f".repeat(64)).expect("valid digest"),
+                    analyzer_version: "0.1.0".to_owned(),
+                    rule_set_version: "mvp-static-rules-2026-05".to_owned(),
+                    indicators: vec![StaticIndicator {
+                        indicator_type: "node-child-process".to_owned(),
+                        severity: Severity::High,
+                        file_path: "package/preinstall.js".to_owned(),
+                        start_line: 1,
+                        end_line: 1,
+                        redacted: true,
+                        summary: "child process execution detected".to_owned(),
+                        details: None,
+                    }],
+                },
+            )
+            .await;
+
+        let bound = PolicyRepository::InMemory(repository)
+            .bind_decision_request(request)
+            .await
+            .expect("policy context should bind");
+
+        assert!(bound.static_analysis_score_violation);
+    }
+
+    #[tokio::test]
+    async fn in_memory_repository_binds_dynamic_sandbox_policy_violation_from_runs() {
+        let tenant_id = Uuid::now_v7();
+        let policy_profile_id = Uuid::now_v7();
+        let registry_config_id = Uuid::now_v7();
+        let snapshot_id = Uuid::now_v7();
+        let repository = InMemoryPolicyRepository::new();
+        repository
+            .upsert_profile(profile(tenant_id, policy_profile_id, snapshot_id))
+            .await;
+        repository
+            .upsert_registry_binding(RegistryPolicyBinding {
+                tenant_id,
+                registry_config_id,
+                policy_profile_id,
+                mode: PolicyMode::Warn,
+            })
+            .await;
+
+        let request = decision_request(tenant_id, registry_config_id, policy_profile_id);
+        repository
+            .remember_sandbox_run(
+                tenant_id,
+                request.request.coordinate.clone(),
+                None,
+                json!({
+                    "run_id": Uuid::now_v7(),
+                    "state": "completed",
+                    "violation_detected": true,
+                    "phases": [
+                        {
+                            "phase": "E",
+                            "events": [
+                                {
+                                    "type": "outbound-network-attempt",
+                                    "severity": "high",
+                                    "message": "captured loopback exfiltration during scripts-enabled install"
+                                }
+                            ]
+                        }
+                    ]
+                }),
+            )
+            .await;
+
+        let bound = PolicyRepository::InMemory(repository)
+            .bind_decision_request(request)
+            .await
+            .expect("policy context should bind");
+
+        assert!(bound.dynamic_sandbox_policy_violation);
+    }
+
+    #[tokio::test]
     async fn in_memory_repository_persists_decision_record_with_coordinate_and_digest() {
         let tenant_id = Uuid::now_v7();
         let policy_profile_id = Uuid::now_v7();
@@ -2903,6 +3270,74 @@ mod tests {
         let response = aegiscudo_policy::DecisionEngine.evaluate(bound);
 
         assert_eq!(response.decision, PolicyDecision::AllowWithWarning);
+    }
+
+    #[tokio::test]
+    async fn expired_approved_override_restores_known_malicious_blocking() {
+        let tenant_id = Uuid::now_v7();
+        let policy_profile_id = Uuid::now_v7();
+        let registry_config_id = Uuid::now_v7();
+
+        let build_repository = || async {
+            let repository = InMemoryPolicyRepository::new();
+            repository
+                .upsert_profile(profile(tenant_id, policy_profile_id, Uuid::now_v7()))
+                .await;
+            repository
+                .upsert_registry_binding(RegistryPolicyBinding {
+                    tenant_id,
+                    registry_config_id,
+                    policy_profile_id,
+                    mode: PolicyMode::Enforce,
+                })
+                .await;
+            let request = decision_request(tenant_id, registry_config_id, policy_profile_id);
+            repository
+                .remember_package_signal(
+                    tenant_id,
+                    request.request.coordinate.clone(),
+                    None,
+                    "known-malicious",
+                    None,
+                )
+                .await;
+
+            (repository, request)
+        };
+
+        let (active_repository, active_request) = build_repository().await;
+        active_repository
+            .remember_override(
+                tenant_id,
+                json!({ "ecosystem": "npm", "name": "left-pad" }),
+                "approved",
+                Utc::now() + chrono::Duration::hours(1),
+            )
+            .await;
+
+        let active_bound = PolicyRepository::InMemory(active_repository)
+            .bind_decision_request(active_request)
+            .await
+            .expect("active override should bind");
+        let active_response = aegiscudo_policy::DecisionEngine.evaluate(active_bound);
+        assert_eq!(active_response.decision, PolicyDecision::AllowWithWarning);
+
+        let (expired_repository, expired_request) = build_repository().await;
+        expired_repository
+            .remember_override(
+                tenant_id,
+                json!({ "ecosystem": "npm", "name": "left-pad" }),
+                "approved",
+                Utc::now() - chrono::Duration::minutes(1),
+            )
+            .await;
+
+        let expired_bound = PolicyRepository::InMemory(expired_repository)
+            .bind_decision_request(expired_request)
+            .await
+            .expect("expired override should bind");
+        let expired_response = aegiscudo_policy::DecisionEngine.evaluate(expired_bound);
+        assert_eq!(expired_response.decision, PolicyDecision::BlockKnownMalicious);
     }
 
     #[tokio::test]

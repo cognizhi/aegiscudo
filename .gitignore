@@ -38,3 +38,10 @@ infra/buckets/*
 .idea/
 .vscode/
 !.vscode/extensions.json
+
+
+# Logs and databases
+output.txt
+*.log
+run_test_script.py
+*.tgz

@@ -43,7 +43,7 @@ serde_json = "1.0.145"
 sha2 = "0.10.9"
 sqlx = { version = "0.8.6", default-features = false, features = ["runtime-tokio-rustls", "postgres", "chrono", "uuid", "json"] }
 thiserror = "2.0.17"
-tokio = { version = "1.52.2", features = ["macros", "rt-multi-thread", "signal"] }
+tokio = { version = "1.52.2", features = ["macros", "rt-multi-thread", "signal", "time"] }
 tower = "0.5.2"
 tower-http = { version = "0.6.9", features = ["catch-panic", "compression-gzip", "limit", "normalize-path", "request-id", "sensitive-headers", "set-header", "timeout", "trace", "util"] }
 tracing = "0.1.44"

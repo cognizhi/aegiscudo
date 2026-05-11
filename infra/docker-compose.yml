@@ -140,6 +140,7 @@ services:
       DATABASE_URL: postgres://aegiscudo:aegiscudo@postgres:5432/aegiscudo
       AEGISCUDO_API_BIND_ADDR: 0.0.0.0:8082
       MOSQUITO_NET_RELOAD_URL: http://mosquito-net:8080/admin/registry-configs/reload
+      TRIAGE_COUNTER_URL: http://triage-counter:8081
     ports:
       - "${AEGISCUDO_API_PORT:-18002}:8082"
 

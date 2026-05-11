@@ -1,0 +1,8 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "timeout-sleeper"
+version = "1.0.0"
+description = "Aegiscudo malicious Python fixture that stalls on import to trigger sandbox timeout handling."

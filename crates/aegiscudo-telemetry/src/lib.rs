@@ -101,7 +101,16 @@ const SENSITIVE_KEYS: &[&str] = &[
 pub struct HealthStatus {
     pub status: &'static str,
     pub service: &'static str,
+    pub version: String,
     pub checked_at: DateTime<Utc>,
+}
+
+pub fn app_version() -> String {
+    std::env::var("APP_VERSION")
+        .ok()
+        .map(|version| version.trim().to_owned())
+        .filter(|version| !version.is_empty())
+        .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_owned())
 }
 
 pub fn init_json_tracing() {
@@ -118,6 +127,7 @@ pub fn health(service: &'static str) -> HealthStatus {
     HealthStatus {
         status: "ok",
         service,
+        version: app_version(),
         checked_at: Utc::now(),
     }
 }
@@ -207,5 +217,15 @@ mod tests {
         assert!(names.iter().any(|name| name.contains("feed")));
         assert!(names.iter().any(|name| name.contains("llm")));
         assert!(default_prometheus_help_text().contains("aegiscudo_llm_tokens_total"));
+    }
+
+    #[test]
+    fn health_includes_runtime_or_package_version() {
+        let status = health("fixture-service");
+
+        assert_eq!(status.status, "ok");
+        assert_eq!(status.service, "fixture-service");
+        assert_eq!(status.version, app_version());
+        assert!(!status.version.is_empty());
     }
 }
