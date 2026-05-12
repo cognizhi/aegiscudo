@@ -1,5 +1,5 @@
 # ---- builder stage: install dependencies into an isolated venv ----
-FROM python:3.12-slim AS builder
+FROM python:3.14-slim AS builder
 WORKDIR /build
 COPY pyproject.toml uv.lock* ./
 COPY services/ai-analyst ./services/ai-analyst
@@ -11,7 +11,7 @@ RUN pip install --no-cache-dir uv \
         fastapi orjson pydantic structlog langfuse "uvicorn[standard]"
 
 # ---- runner stage: copy only the venv and application source ----
-FROM python:3.12-slim AS runner
+FROM python:3.14-slim AS runner
 ARG APP_VERSION=0.1.0
 ENV APP_VERSION=${APP_VERSION} \
     PYTHONDONTWRITEBYTECODE=1 \
