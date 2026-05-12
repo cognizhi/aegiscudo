@@ -1,0 +1,42 @@
+{
+  "results": [
+    {
+      "date": "2026-05-01",
+      "repo": {
+        "name": "github.com/lodash/lodash",
+        "commit": "2da024c3b4f9947a48517639de7560457cd4ec6c"
+      },
+      "scorecard": {
+        "version": "v5.0.0",
+        "commit": "abc123def456"
+      },
+      "score": 8.5,
+      "checks": [
+        { "name": "Code-Review", "score": 10, "reason": "all changesets reviewed", "details": [] },
+        { "name": "Branch-Protection", "score": 8, "reason": "branch protection configured", "details": [] },
+        { "name": "CI-Tests", "score": 10, "reason": "CI tests pass on all commits", "details": [] },
+        { "name": "Maintained", "score": 10, "reason": "active maintenance", "details": [] },
+        { "name": "Signed-Releases", "score": -1, "reason": "no signed releases found", "details": [] }
+      ]
+    },
+    {
+      "date": "2026-05-01",
+      "repo": {
+        "name": "github.com/psf/requests",
+        "commit": "f1234567890abcdef1234567890abcdef12345678"
+      },
+      "scorecard": {
+        "version": "v5.0.0",
+        "commit": "abc123def456"
+      },
+      "score": 7.8,
+      "checks": [
+        { "name": "Code-Review", "score": 10, "reason": "all changesets reviewed", "details": [] },
+        { "name": "Branch-Protection", "score": 7, "reason": "branch protection partially configured", "details": [] },
+        { "name": "CI-Tests", "score": 10, "reason": "CI tests pass on all commits", "details": [] },
+        { "name": "Maintained", "score": 10, "reason": "active maintenance", "details": [] },
+        { "name": "Signed-Releases", "score": 5, "reason": "some releases signed", "details": [] }
+      ]
+    }
+  ]
+}

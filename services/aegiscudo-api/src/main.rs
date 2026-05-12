@@ -16,8 +16,7 @@ async fn main() -> anyhow::Result<()> {
         .transpose()
         .context("configuring Mosquito Net reload client")?;
     let decision_client = DecisionClient::new(
-        std::env::var("TRIAGE_COUNTER_URL")
-            .unwrap_or_else(|_| "http://127.0.0.1:18001".to_owned()),
+        std::env::var("TRIAGE_COUNTER_URL").unwrap_or_else(|_| "http://127.0.0.1:18001".to_owned()),
     )
     .context("configuring Triage Counter client")?;
     let app = app_with_clients(pool, reload_client, decision_client);

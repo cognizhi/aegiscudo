@@ -1,0 +1,829 @@
+diff --git a/services/triage-counter/src/repository.rs b/services/triage-counter/src/repository.rs
+index 375378b..28e0390 100644
+--- a/services/triage-counter/src/repository.rs
++++ b/services/triage-counter/src/repository.rs
+@@ -27,6 +27,7 @@ const MVP_FEED_NAMES: &[&str] = &[
+     "first-epss",
+ ];
+ const FRESH_FEED_MAX_AGE_SECONDS: u64 = 24 * 60 * 60;
++const TRIAGE_COUNTER_ACTOR: &str = "system/triage-counter";
+ 
+ #[derive(Debug, Clone, PartialEq)]
+ pub struct LoadedPolicyProfile {
+@@ -137,10 +138,28 @@ impl VulnerabilitySeverity {
+ }
+ 
+ #[derive(Debug, Clone, PartialEq)]
+-struct VulnerabilityMatchRecord {
+-    severity: Option<VulnerabilitySeverity>,
+-    epss_probability: Option<f64>,
+-    cisa_kev: bool,
++pub(crate) struct VulnerabilityMatchRecord {
++    pub(crate) advisory_id: String,
++    pub(crate) severity: Option<VulnerabilitySeverity>,
++    pub(crate) epss_probability: Option<f64>,
++    pub(crate) cisa_kev: bool,
++}
++
++#[derive(Debug, Clone, Default, PartialEq, Eq)]
++struct VulnerabilitySignalStatus {
++    vulnerable_above_threshold: bool,
++    evidence_references: Vec<String>,
++    under_investigation: bool,
++}
++
++#[derive(Debug, Clone, PartialEq, Eq)]
++struct OpenVexStatementRecord {
++    tenant_id: Uuid,
++    vulnerability_id: String,
++    product_id: String,
++    status: String,
++    document_id: String,
++    expires_at: Option<DateTime<Utc>>,
+ }
+ 
+ #[derive(Debug, Clone, PartialEq, Eq)]
+@@ -241,6 +260,13 @@ pub struct PersistedDecisionRecord {
+     pub trace_id: String,
+ }
+ 
++#[derive(Debug, Clone, PartialEq)]
++pub(crate) struct BoundDecisionContext {
++    pub policy_input: PolicyInput,
++    pub evidence_references: Vec<String>,
++    pub vulnerability_under_investigation: bool,
++}
++
+ #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+ struct DecisionPersistencePayload {
+     rationale: Vec<String>,
+@@ -292,21 +318,39 @@ impl PolicyRepository {
+         &self,
+         request: DecisionRequest,
+     ) -> Result<PolicyInput, PolicyRepositoryError> {
+-        self.bind_request(request, false).await
++        self.bind_request_context(request, false)
++            .await
++            .map(|context| context.policy_input)
+     }
+ 
+     pub async fn bind_simulation_request(
+         &self,
+         request: DecisionRequest,
+     ) -> Result<PolicyInput, PolicyRepositoryError> {
+-        self.bind_request(request, true).await
++        self.bind_request_context(request, true)
++            .await
++            .map(|context| context.policy_input)
++    }
++
++    pub(crate) async fn bind_evaluation_context(
++        &self,
++        request: DecisionRequest,
++    ) -> Result<BoundDecisionContext, PolicyRepositoryError> {
++        self.bind_request_context(request, false).await
+     }
+ 
+-    async fn bind_request(
++    pub(crate) async fn bind_simulation_context(
++        &self,
++        request: DecisionRequest,
++    ) -> Result<BoundDecisionContext, PolicyRepositoryError> {
++        self.bind_request_context(request, true).await
++    }
++
++    async fn bind_request_context(
+         &self,
+         request: DecisionRequest,
+         allow_profile_override: bool,
+-    ) -> Result<PolicyInput, PolicyRepositoryError> {
++    ) -> Result<BoundDecisionContext, PolicyRepositoryError> {
+         if request.tenant_id != request.request.tenant_id
+             || request.registry_config_id != request.request.registry_config_id
+             || request.policy_profile_id != request.request.policy_profile_id
+@@ -329,6 +373,7 @@ impl PolicyRepository {
+             }
+             None => false,
+         };
++        let unknown_artifact = request.request.requested_digest.is_some() && !artifact_exists;
+         let package_signal_status = self
+             .load_package_signal_status(
+                 request.tenant_id,
+@@ -352,8 +397,8 @@ impl PolicyRepository {
+                 request.request.requested_digest.as_ref(),
+             )
+             .await?;
+-        let vulnerable_above_threshold = self
+-            .load_vulnerable_above_threshold(
++        let vulnerability_signal_status = self
++            .load_vulnerability_signal_status(
+                 request.tenant_id,
+                 &request.request.coordinate,
+                 request.request.requested_digest.as_ref(),
+@@ -405,46 +450,52 @@ impl PolicyRepository {
+         } else {
+             None
+         };
+-        Ok(PolicyInput {
+-            tenant_id: request.tenant_id,
+-            policy_profile_id: request.policy_profile_id,
+-            policy_snapshot_id: profile.latest_snapshot.id,
+-            coordinate: request.request.coordinate,
+-            trace_id: request.request.trace_id,
+-            mode: profile.mode,
+-            known_safe_verdict,
+-            known_malicious,
+-            vulnerable_above_threshold,
+-            vulnerable_above_threshold_action: profile
+-                .signal_configuration
+-                .vulnerable_above_threshold_action,
+-            minimum_release_age_violation: package_signal_status.minimum_release_age_violation,
+-            install_script_detected: package_signal_status.install_script_detected,
+-            dependency_confusion_risk: package_signal_status.dependency_confusion_risk,
+-            typosquat_risk: package_signal_status.typosquat_risk,
+-            artifact_digest_reputation_risk: package_signal_status.artifact_digest_reputation_risk,
+-            cross_ecosystem_ioc_correlation_risk: false,
+-            static_analysis_score_violation,
+-            dynamic_sandbox_policy_violation,
+-            github_to_registry_publish_gap_risk: package_signal_status
+-                .github_to_registry_publish_gap_risk,
+-            trusted_publisher_identity_mismatch: package_signal_status
+-                .trusted_publisher_identity_mismatch,
+-            provenance_or_signature_verification_failed: attestation_signal_status
+-                .provenance_or_signature_verification_failed,
+-            missing_or_failed_attestation: attestation_signal_status.missing_or_failed_attestation,
+-            ai_agent_injection_indicator,
+-            maintainer_account_age_risk: package_signal_status.maintainer_account_age_risk,
+-            recent_maintainer_change_risk: package_signal_status.recent_maintainer_change_risk,
+-            new_maintainer_ratio_risk: package_signal_status.new_maintainer_ratio_risk,
+-            unknown_artifact: request.request.requested_digest.is_some() && !artifact_exists,
+-            hitl_required: override_signal_status.hitl_required,
+-            active_override: override_signal_status.active_override,
+-            emergency_bypass: override_signal_status.emergency_bypass,
+-            fallback_eligible: fallback_candidate.is_some(),
+-            fallback_candidate,
+-            feed_state: feed_snapshot_status.state,
+-            feed_snapshot_age_seconds: feed_snapshot_status.age_seconds,
++
++        Ok(BoundDecisionContext {
++            policy_input: PolicyInput {
++                tenant_id: request.tenant_id,
++                policy_profile_id: request.policy_profile_id,
++                policy_snapshot_id: profile.latest_snapshot.id,
++                coordinate: request.request.coordinate,
++                trace_id: request.request.trace_id,
++                mode: profile.mode,
++                known_safe_verdict,
++                known_malicious,
++                vulnerable_above_threshold: vulnerability_signal_status.vulnerable_above_threshold,
++                vulnerable_above_threshold_action: profile
++                    .signal_configuration
++                    .vulnerable_above_threshold_action,
++                minimum_release_age_violation: package_signal_status.minimum_release_age_violation,
++                install_script_detected: package_signal_status.install_script_detected,
++                dependency_confusion_risk: package_signal_status.dependency_confusion_risk,
++                typosquat_risk: package_signal_status.typosquat_risk,
++                artifact_digest_reputation_risk: package_signal_status.artifact_digest_reputation_risk,
++                cross_ecosystem_ioc_correlation_risk: false,
++                static_analysis_score_violation,
++                dynamic_sandbox_policy_violation,
++                github_to_registry_publish_gap_risk: package_signal_status
++                    .github_to_registry_publish_gap_risk,
++                trusted_publisher_identity_mismatch: package_signal_status
++                    .trusted_publisher_identity_mismatch,
++                provenance_or_signature_verification_failed: attestation_signal_status
++                    .provenance_or_signature_verification_failed,
++                missing_or_failed_attestation: attestation_signal_status
++                    .missing_or_failed_attestation,
++                ai_agent_injection_indicator,
++                maintainer_account_age_risk: package_signal_status.maintainer_account_age_risk,
++                recent_maintainer_change_risk: package_signal_status.recent_maintainer_change_risk,
++                new_maintainer_ratio_risk: package_signal_status.new_maintainer_ratio_risk,
++                unknown_artifact,
++                hitl_required: override_signal_status.hitl_required,
++                active_override: override_signal_status.active_override,
++                emergency_bypass: override_signal_status.emergency_bypass,
++                fallback_eligible: fallback_candidate.is_some(),
++                fallback_candidate,
++                feed_state: feed_snapshot_status.state,
++                feed_snapshot_age_seconds: feed_snapshot_status.age_seconds,
++            },
++            evidence_references: vulnerability_signal_status.evidence_references,
++            vulnerability_under_investigation: vulnerability_signal_status.under_investigation,
+         })
+     }
+ 
+@@ -496,13 +547,27 @@ impl PolicyRepository {
+         &self,
+         request: &DecisionRequest,
+         response: &DecisionResponse,
++    ) -> Result<(), PolicyRepositoryError> {
++        self.persist_evaluated_decision_record(request, response, &[])
++            .await
++    }
++
++    pub async fn persist_evaluated_decision_record(
++        &self,
++        request: &DecisionRequest,
++        response: &DecisionResponse,
++        evidence_references: &[String],
+     ) -> Result<(), PolicyRepositoryError> {
+         match self {
+             Self::Postgres(repository) => {
+-                repository.persist_decision_record(request, response).await
++                repository
++                    .persist_evaluated_decision_record(request, response, evidence_references)
++                    .await
+             }
+             Self::InMemory(repository) => {
+-                repository.persist_decision_record(request, response).await
++                repository
++                    .persist_evaluated_decision_record(request, response, evidence_references)
++                    .await
+             }
+         }
+     }
+@@ -634,17 +699,17 @@ impl PolicyRepository {
+         }
+     }
+ 
+-    async fn load_vulnerable_above_threshold(
++    async fn load_vulnerability_signal_status(
+         &self,
+         tenant_id: Uuid,
+         coordinate: &PackageCoordinate,
+         artifact_digest: Option<&ArtifactDigest>,
+         threshold: &KnownVulnerabilityThreshold,
+-    ) -> Result<bool, PolicyRepositoryError> {
++    ) -> Result<VulnerabilitySignalStatus, PolicyRepositoryError> {
+         match self {
+             Self::Postgres(repository) => {
+                 repository
+-                    .load_vulnerable_above_threshold(
++                    .load_vulnerability_signal_status(
+                         tenant_id,
+                         coordinate,
+                         artifact_digest,
+@@ -654,7 +719,7 @@ impl PolicyRepository {
+             }
+             Self::InMemory(repository) => {
+                 repository
+-                    .load_vulnerable_above_threshold(
++                    .load_vulnerability_signal_status(
+                         tenant_id,
+                         coordinate,
+                         artifact_digest,
+@@ -893,12 +958,17 @@ impl PostgresPolicyRepository {
+         })
+     }
+ 
+-    async fn persist_decision_record(
++    async fn persist_evaluated_decision_record(
+         &self,
+         request: &DecisionRequest,
+         response: &DecisionResponse,
++        evidence_references: &[String],
+     ) -> Result<(), PolicyRepositoryError> {
+-        let record = persisted_decision_record(request, response)?;
++        let record = persisted_decision_record_with_evidence_references(
++            request,
++            response,
++            evidence_references.to_vec(),
++        )?;
+         let mut transaction = self.pool.begin().await?;
+ 
+         let package_request_row = sqlx::query(
+@@ -979,6 +1049,28 @@ impl PostgresPolicyRepository {
+         .execute(&mut *transaction)
+         .await?;
+ 
++        if !record.evidence_references.is_empty() {
++            sqlx::query(
++                r#"
++                INSERT INTO audit_events (tenant_id, actor, action, resource, trace_id, metadata)
++                VALUES ($1, $2, $3, $4, $5, $6)
++                "#,
++            )
++            .bind(record.tenant_id)
++            .bind(TRIAGE_COUNTER_ACTOR)
++            .bind("vulnerability.suppressed_by_openvex")
++            .bind(format!("package-request/{package_request_id}"))
++            .bind(&record.trace_id)
++            .bind(Json(json!({
++                "coordinate": record.package_request.coordinate,
++                "requested_digest": record.artifact_digest,
++                "openvex_document_ids": record.evidence_references,
++                "decision": record.decision,
++            })))
++            .execute(&mut *transaction)
++            .await?;
++        }
++
+         transaction.commit().await?;
+         Ok(())
+     }
+@@ -1032,7 +1124,7 @@ impl PostgresPolicyRepository {
+             "#,
+         )
+         .bind(request.tenant_id)
+-            .bind(request.registry_config_id)
++        .bind(request.registry_config_id)
+         .bind(artifact_id)
+         .bind(response.policy_snapshot_id)
+         .bind(request.request.coordinate.ecosystem.to_string())
+@@ -1040,7 +1132,7 @@ impl PostgresPolicyRepository {
+         .bind(request.request.coordinate.name.clone())
+         .bind(request.request.coordinate.version.clone())
+         .bind(&artifact_digest.hex)
+-            .bind(request.request.source_url.clone())
++        .bind(request.request.source_url.clone())
+         .bind(&response.trace_id)
+         .fetch_one(&self.pool)
+         .await?;
+@@ -1276,25 +1368,57 @@ impl PostgresPolicyRepository {
+             .unwrap_or(false))
+     }
+ 
+-    async fn load_vulnerable_above_threshold(
++    async fn load_vulnerability_signal_status(
+         &self,
+         tenant_id: Uuid,
+         coordinate: &PackageCoordinate,
+         artifact_digest: Option<&ArtifactDigest>,
+         threshold: &KnownVulnerabilityThreshold,
+-    ) -> Result<bool, PolicyRepositoryError> {
++    ) -> Result<VulnerabilitySignalStatus, PolicyRepositoryError> {
+         let requested_digest_hex = artifact_digest.map(|digest| digest.hex.clone());
++        let product_id = coordinate.purl();
+         let rows = sqlx::query(
+             r#"
+-            SELECT vm.severity, vm.epss_probability::double precision AS epss_probability, vm.cisa_kev
++            WITH active_openvex AS (
++                SELECT os.vulnerability_id, os.status, od.document_id
++                FROM openvex_statements os
++                JOIN openvex_documents od ON od.id = os.openvex_document_id
++                WHERE os.tenant_id = $1
++                  AND os.product_id = $7
++                  AND (
++                    od.expiry_mode = 'never'
++                    OR (od.expiry_mode = 'expires-at' AND od.expires_at > NOW())
++                  )
++            )
++            SELECT
++              vm.advisory_id,
++              vm.severity,
++              vm.epss_probability::double precision AS epss_probability,
++              vm.cisa_kev,
++              COALESCE(bool_or(active_openvex.status IN ('fixed', 'not_affected')), false) AS suppressed,
++              COALESCE(bool_or(active_openvex.status = 'under_investigation'), false) AS under_investigation,
++              COALESCE(
++                array_remove(
++                  array_agg(
++                    DISTINCT CASE
++                      WHEN active_openvex.status IN ('fixed', 'not_affected') THEN active_openvex.document_id
++                      ELSE NULL
++                    END
++                  ),
++                  NULL
++                ),
++                ARRAY[]::text[]
++              ) AS evidence_references
+             FROM vulnerability_matches vm
+             JOIN artifacts a ON a.id = vm.artifact_id
++            LEFT JOIN active_openvex ON active_openvex.vulnerability_id = vm.advisory_id
+             WHERE a.tenant_id = $1
+               AND a.ecosystem = $2::package_ecosystem
+               AND a.namespace IS NOT DISTINCT FROM $3
+               AND a.package_name = $4
+               AND a.package_version IS NOT DISTINCT FROM $5
+               AND ($6::text IS NULL OR a.sha256 = $6)
++            GROUP BY vm.id, vm.advisory_id, vm.severity, vm.epss_probability, vm.cisa_kev
+             "#,
+         )
+         .bind(tenant_id)
+@@ -1303,26 +1427,41 @@ impl PostgresPolicyRepository {
+         .bind(&coordinate.name)
+         .bind(coordinate.version.clone())
+         .bind(requested_digest_hex)
++        .bind(&product_id)
+         .fetch_all(&self.pool)
+         .await?;
+ 
+-        let records = rows
+-            .into_iter()
+-            .map(|row| {
+-                Ok(VulnerabilityMatchRecord {
+-                    severity: row
+-                        .try_get::<Option<String>, _>("severity")?
+-                        .as_deref()
+-                        .and_then(VulnerabilitySeverity::from_db),
+-                    epss_probability: row.try_get("epss_probability")?,
+-                    cisa_kev: row.try_get("cisa_kev")?,
+-                })
+-            })
+-            .collect::<Result<Vec<_>, sqlx::Error>>()?;
++        let mut status = VulnerabilitySignalStatus::default();
++        let mut evidence_references = HashSet::new();
++
++        for row in rows {
++            let suppressed: bool = row.try_get("suppressed")?;
++            let under_investigation: bool = row.try_get("under_investigation")?;
++            let references: Vec<String> = row.try_get("evidence_references")?;
++            let record = VulnerabilityMatchRecord {
++                advisory_id: row.try_get("advisory_id")?,
++                severity: row
++                    .try_get::<Option<String>, _>("severity")?
++                    .as_deref()
++                    .and_then(VulnerabilitySeverity::from_db),
++                epss_probability: row.try_get("epss_probability")?,
++                cisa_kev: row.try_get("cisa_kev")?,
++            };
++
++            if suppressed {
++                evidence_references.extend(references);
++            }
++            if !suppressed && under_investigation {
++                status.under_investigation = true;
++            }
++            if !suppressed && vulnerability_match_exceeds_threshold(&record, threshold) {
++                status.vulnerable_above_threshold = true;
++            }
++        }
+ 
+-        Ok(records
+-            .into_iter()
+-            .any(|record| vulnerability_match_exceeds_threshold(&record, threshold)))
++        status.evidence_references = evidence_references.into_iter().collect();
++        status.evidence_references.sort();
++        Ok(status)
+     }
+ 
+     async fn load_attestation_signal_status(
+@@ -1569,6 +1708,7 @@ pub struct InMemoryPolicyRepository {
+             )>,
+         >,
+     >,
++    openvex_statements: Arc<RwLock<Vec<OpenVexStatementRecord>>>,
+     attestation_records: Arc<
+         RwLock<
+             Vec<(
+@@ -1669,7 +1809,7 @@ impl InMemoryPolicyRepository {
+     }
+ 
+     #[cfg(test)]
+-    async fn remember_vulnerability_match(
++    pub(crate) async fn remember_vulnerability_match(
+         &self,
+         tenant_id: Uuid,
+         coordinate: PackageCoordinate,
+@@ -1684,6 +1824,26 @@ impl InMemoryPolicyRepository {
+         ));
+     }
+ 
++    #[cfg(test)]
++    pub(crate) async fn remember_openvex_statement(
++        &self,
++        tenant_id: Uuid,
++        vulnerability_id: impl Into<String>,
++        product_id: impl Into<String>,
++        status: impl Into<String>,
++        document_id: impl Into<String>,
++        expires_at: Option<DateTime<Utc>>,
++    ) {
++        self.openvex_statements.write().await.push(OpenVexStatementRecord {
++            tenant_id,
++            vulnerability_id: vulnerability_id.into(),
++            product_id: product_id.into(),
++            status: status.into(),
++            document_id: document_id.into(),
++            expires_at,
++        });
++    }
++
+     #[cfg(test)]
+     async fn remember_attestation_record(
+         &self,
+@@ -1728,12 +1888,10 @@ impl InMemoryPolicyRepository {
+         artifact_digest: Option<ArtifactDigest>,
+         telemetry: Value,
+     ) {
+-        self.sandbox_runs.write().await.push((
+-            tenant_id,
+-            coordinate,
+-            artifact_digest,
+-            telemetry,
+-        ));
++        self.sandbox_runs
++            .write()
++            .await
++            .push((tenant_id, coordinate, artifact_digest, telemetry));
+     }
+ 
+     #[cfg(test)]
+@@ -1803,15 +1961,20 @@ impl InMemoryPolicyRepository {
+             .ok_or(PolicyRepositoryError::RegistryConfigNotFound)
+     }
+ 
+-    async fn persist_decision_record(
++    async fn persist_evaluated_decision_record(
+         &self,
+         request: &DecisionRequest,
+         response: &DecisionResponse,
++        evidence_references: &[String],
+     ) -> Result<(), PolicyRepositoryError> {
+         self.decision_records
+             .write()
+             .await
+-            .push(persisted_decision_record(request, response)?);
++            .push(persisted_decision_record_with_evidence_references(
++                request,
++                response,
++                evidence_references.to_vec(),
++            )?);
+         Ok(())
+     }
+ 
+@@ -1934,26 +2097,60 @@ impl InMemoryPolicyRepository {
+             .map(|record| record.package_request.coordinate.clone()))
+     }
+ 
+-    async fn load_vulnerable_above_threshold(
++    async fn load_vulnerability_signal_status(
+         &self,
+         tenant_id: Uuid,
+         coordinate: &PackageCoordinate,
+         artifact_digest: Option<&ArtifactDigest>,
+         threshold: &KnownVulnerabilityThreshold,
+-    ) -> Result<bool, PolicyRepositoryError> {
++    ) -> Result<VulnerabilitySignalStatus, PolicyRepositoryError> {
+         let matches = self.vulnerability_matches.read().await;
+-        Ok(matches
+-            .iter()
+-            .filter(|(match_tenant_id, match_coordinate, match_digest, _)| {
++        let openvex_statements = self.openvex_statements.read().await;
++        let now = Utc::now();
++        let product_id = coordinate.purl();
++        let mut status = VulnerabilitySignalStatus::default();
++        let mut evidence_references = HashSet::new();
++
++        for (_, _, _, vulnerability_match) in matches.iter().filter(
++            |(match_tenant_id, match_coordinate, match_digest, _)| {
+                 *match_tenant_id == tenant_id
+                     && *match_coordinate == *coordinate
+                     && artifact_digest
+                         .map(|digest| match_digest.as_ref() == Some(digest))
+                         .unwrap_or(true)
+-            })
+-            .any(|(_, _, _, vulnerability_match)| {
+-                vulnerability_match_exceeds_threshold(vulnerability_match, threshold)
+-            }))
++            },
++        ) {
++            let mut suppressed = false;
++            let mut under_investigation = false;
++
++            for statement in openvex_statements.iter().filter(|statement| {
++                statement.tenant_id == tenant_id
++                    && statement.product_id == product_id
++                    && statement.vulnerability_id == vulnerability_match.advisory_id
++                    && statement.expires_at.is_none_or(|expires_at| expires_at > now)
++            }) {
++                match statement.status.as_str() {
++                    "fixed" | "not_affected" => {
++                        suppressed = true;
++                        evidence_references.insert(statement.document_id.clone());
++                    }
++                    "under_investigation" => under_investigation = true,
++                    _ => {}
++                }
++            }
++
++            if !suppressed && under_investigation {
++                status.under_investigation = true;
++            }
++            if !suppressed && vulnerability_match_exceeds_threshold(vulnerability_match, threshold)
++            {
++                status.vulnerable_above_threshold = true;
++            }
++        }
++
++        status.evidence_references = evidence_references.into_iter().collect();
++        status.evidence_references.sort();
++        Ok(status)
+     }
+ 
+     async fn load_attestation_signal_status(
+@@ -2092,9 +2289,10 @@ impl InMemoryPolicyRepository {
+     }
+ }
+ 
+-fn persisted_decision_record(
++fn persisted_decision_record_with_evidence_references(
+     request: &DecisionRequest,
+     response: &DecisionResponse,
++    evidence_references: Vec<String>,
+ ) -> Result<PersistedDecisionRecord, PolicyRepositoryError> {
+     if response.tenant_id != request.tenant_id
+         || response.policy_profile_id != request.policy_profile_id
+@@ -2117,7 +2315,7 @@ fn persisted_decision_record(
+         feed_state: response.feed_state.clone(),
+         feed_snapshot_age_seconds: response.feed_snapshot_age_seconds,
+         rationale: response.rationale.clone(),
+-        evidence_references: Vec::new(),
++        evidence_references,
+         trace_id: response.trace_id.clone(),
+     })
+ }
+@@ -2301,19 +2499,23 @@ fn static_report_exceeds_policy_threshold(report: &StaticEvidence) -> bool {
+ }
+ 
+ fn sandbox_run_exceeds_policy_threshold(telemetry: &Value) -> bool {
+-    sandbox_telemetry_phases(telemetry).into_iter().any(|phase| {
+-        let phase_name = phase.get("phase").and_then(Value::as_str);
+-        if !matches!(phase_name, Some("D" | "E" | "G")) {
+-            return false;
+-        }
++    sandbox_telemetry_phases(telemetry)
++        .into_iter()
++        .any(|phase| {
++            let phase_name = phase.get("phase").and_then(Value::as_str);
++            if !matches!(phase_name, Some("D" | "E" | "G")) {
++                return false;
++            }
+ 
+-        phase
+-            .get("events")
+-            .and_then(Value::as_array)
+-            .is_some_and(|events| {
+-                events.iter().any(|event| sandbox_event_exceeds_policy_threshold(event))
+-            })
+-    })
++            phase
++                .get("events")
++                .and_then(Value::as_array)
++                .is_some_and(|events| {
++                    events
++                        .iter()
++                        .any(|event| sandbox_event_exceeds_policy_threshold(event))
++                })
++        })
+ }
+ 
+ fn sandbox_telemetry_phases(telemetry: &Value) -> Vec<&Value> {
+@@ -2687,6 +2889,7 @@ mod tests {
+                 request.request.coordinate.clone(),
+                 None,
+                 VulnerabilityMatchRecord {
++                    advisory_id: "GHSA-test-critical".to_owned(),
+                     severity: Some(VulnerabilitySeverity::Critical),
+                     epss_probability: None,
+                     cisa_kev: false,
+@@ -2739,6 +2942,7 @@ mod tests {
+                 request.request.coordinate.clone(),
+                 None,
+                 VulnerabilityMatchRecord {
++                    advisory_id: "GHSA-test-high".to_owned(),
+                     severity: Some(VulnerabilitySeverity::High),
+                     epss_probability: Some(0.4),
+                     cisa_kev: false,
+@@ -2753,6 +2957,128 @@ mod tests {
+         assert!(!bound.vulnerable_above_threshold);
+     }
+ 
++    #[tokio::test]
++    async fn in_memory_repository_suppresses_vulnerability_signal_with_active_openvex() {
++        let tenant_id = Uuid::now_v7();
++        let policy_profile_id = Uuid::now_v7();
++        let registry_config_id = Uuid::now_v7();
++        let snapshot_id = Uuid::now_v7();
++        let repository = InMemoryPolicyRepository::new();
++        let mut loaded_profile = profile(tenant_id, policy_profile_id, snapshot_id);
++        loaded_profile.signal_configuration = PolicySignalConfiguration {
++            known_vulnerability_threshold: KnownVulnerabilityThreshold {
++                severity_floor: VulnerabilitySeverity::High,
++                kev_override: true,
++                epss_probability_floor: None,
++            },
++            vulnerable_above_threshold_action: VulnerabilityPolicyAction::Block,
++        };
++        repository.upsert_profile(loaded_profile).await;
++        repository
++            .upsert_registry_binding(RegistryPolicyBinding {
++                tenant_id,
++                registry_config_id,
++                policy_profile_id,
++                mode: PolicyMode::Warn,
++            })
++            .await;
++
++        let request = decision_request(tenant_id, registry_config_id, policy_profile_id);
++        repository
++            .remember_vulnerability_match(
++                tenant_id,
++                request.request.coordinate.clone(),
++                None,
++                VulnerabilityMatchRecord {
++                    advisory_id: "GHSA-test-suppressed".to_owned(),
++                    severity: Some(VulnerabilitySeverity::Critical),
++                    epss_probability: None,
++                    cisa_kev: false,
++                },
++            )
++            .await;
++        repository
++            .remember_openvex_statement(
++                tenant_id,
++                "GHSA-test-suppressed",
++                request.request.coordinate.purl(),
++                "fixed",
++                "openvex-doc-1",
++                None,
++            )
++            .await;
++
++        let bound = PolicyRepository::InMemory(repository)
++            .bind_evaluation_context(request)
++            .await
++            .expect("policy context should bind");
++
++        assert!(!bound.policy_input.vulnerable_above_threshold);
++        assert_eq!(bound.evidence_references, vec!["openvex-doc-1".to_owned()]);
++        assert!(!bound.vulnerability_under_investigation);
++    }
++
++    #[tokio::test]
++    async fn in_memory_repository_marks_vulnerability_under_investigation() {
++        let tenant_id = Uuid::now_v7();
++        let policy_profile_id = Uuid::now_v7();
++        let registry_config_id = Uuid::now_v7();
++        let snapshot_id = Uuid::now_v7();
++        let repository = InMemoryPolicyRepository::new();
++        let mut loaded_profile = profile(tenant_id, policy_profile_id, snapshot_id);
++        loaded_profile.signal_configuration = PolicySignalConfiguration {
++            known_vulnerability_threshold: KnownVulnerabilityThreshold {
++                severity_floor: VulnerabilitySeverity::High,
++                kev_override: true,
++                epss_probability_floor: None,
++            },
++            vulnerable_above_threshold_action: VulnerabilityPolicyAction::Warn,
++        };
++        repository.upsert_profile(loaded_profile).await;
++        repository
++            .upsert_registry_binding(RegistryPolicyBinding {
++                tenant_id,
++                registry_config_id,
++                policy_profile_id,
++                mode: PolicyMode::Warn,
++            })
++            .await;
++
++        let request = decision_request(tenant_id, registry_config_id, policy_profile_id);
++        repository
++            .remember_vulnerability_match(
++                tenant_id,
++                request.request.coordinate.clone(),
++                None,
++                VulnerabilityMatchRecord {
++                    advisory_id: "GHSA-test-investigating".to_owned(),
++                    severity: Some(VulnerabilitySeverity::High),
++                    epss_probability: None,
++                    cisa_kev: false,
++                },
++            )
++            .await;
++        repository
++            .remember_openvex_statement(
++                tenant_id,
++                "GHSA-test-investigating",
++                request.request.coordinate.purl(),
++                "under_investigation",
++                "openvex-doc-2",
++                None,
++            )
++            .await;
++
++        let bound = PolicyRepository::InMemory(repository)
++            .bind_evaluation_context(request)
++            .await
++            .expect("policy context should bind");
++
++        assert!(bound.policy_input.vulnerable_above_threshold);
++        assert!(bound.vulnerability_under_investigation);
++        assert!(bound.evidence_references.is_empty());
++    }
++
+     #[tokio::test]
+     async fn in_memory_repository_binds_attestation_warning_signals_from_records() {
+         let tenant_id = Uuid::now_v7();
+@@ -3337,7 +3663,10 @@ mod tests {
+             .await
+             .expect("expired override should bind");
+         let expired_response = aegiscudo_policy::DecisionEngine.evaluate(expired_bound);
+-        assert_eq!(expired_response.decision, PolicyDecision::BlockKnownMalicious);
++        assert_eq!(
++            expired_response.decision,
++            PolicyDecision::BlockKnownMalicious
++        );
+     }
+ 
+     #[tokio::test]

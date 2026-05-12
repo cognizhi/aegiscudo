@@ -7,6 +7,7 @@ members = [
   "services/aegiscudo-api",
   "services/feed-harvester",
   "services/mosquito-net",
+  "services/sbom-service",
   "services/surgeon",
   "services/triage-counter",
   "cli/aedo-cli",
@@ -49,5 +50,5 @@ tower-http = { version = "0.6.9", features = ["catch-panic", "compression-gzip",
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
 url = { version = "2.5.7", features = ["serde"] }
-uuid = { version = "1.23.1", features = ["serde", "v4", "v7"] }
+uuid = { version = "1.23.1", features = ["serde", "v4", "v7", "v5"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }

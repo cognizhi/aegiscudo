@@ -1,0 +1,301 @@
+{
+  "bomFormat": "CycloneDX",
+  "components": [
+    {
+      "bom-ref": "cargo:pkg:member1:0.1.0",
+      "name": "member1",
+      "properties": [
+        {
+          "name": "aegiscudo:ecosystem",
+          "value": "cargo"
+        },
+        {
+          "name": "aegiscudo:decision_status",
+          "value": "unresolved"
+        }
+      ],
+      "purl": "pkg:cargo/member1@0.1.0",
+      "type": "library",
+      "version": "0.1.0"
+    },
+    {
+      "bom-ref": "cargo:pkg:proc-macro2:1.0.106:registry-https-github.com-rust-lang-crates.io-index",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "8fd00f0bb2e90d81d1044c2b32617f68fcb9fa3bb7640c23e9c748e53fb30934"
+        }
+      ],
+      "name": "proc-macro2",
+      "properties": [
+        {
+          "name": "aegiscudo:ecosystem",
+          "value": "cargo"
+        },
+        {
+          "name": "aegiscudo:decision_status",
+          "value": "unresolved"
+        },
+        {
+          "name": "aegiscudo:integrity",
+          "value": "sha256:8fd00f0bb2e90d81d1044c2b32617f68fcb9fa3bb7640c23e9c748e53fb30934"
+        }
+      ],
+      "purl": "pkg:cargo/proc-macro2@1.0.106",
+      "type": "library",
+      "version": "1.0.106"
+    },
+    {
+      "bom-ref": "cargo:pkg:quote:1.0.45:registry-https-github.com-rust-lang-crates.io-index",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "41f2619966050689382d2b44f664f4bc593e129785a36d6ee376ddf37259b924"
+        }
+      ],
+      "name": "quote",
+      "properties": [
+        {
+          "name": "aegiscudo:ecosystem",
+          "value": "cargo"
+        },
+        {
+          "name": "aegiscudo:decision_status",
+          "value": "unresolved"
+        },
+        {
+          "name": "aegiscudo:integrity",
+          "value": "sha256:41f2619966050689382d2b44f664f4bc593e129785a36d6ee376ddf37259b924"
+        }
+      ],
+      "purl": "pkg:cargo/quote@1.0.45",
+      "type": "library",
+      "version": "1.0.45"
+    },
+    {
+      "bom-ref": "cargo:pkg:serde:1.0.228:registry-https-github.com-rust-lang-crates.io-index",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "9a8e94ea7f378bd32cbbd37198a4a91436180c5bb472411e48b5ec2e2124ae9e"
+        }
+      ],
+      "name": "serde",
+      "properties": [
+        {
+          "name": "aegiscudo:ecosystem",
+          "value": "cargo"
+        },
+        {
+          "name": "aegiscudo:decision_status",
+          "value": "unresolved"
+        },
+        {
+          "name": "aegiscudo:integrity",
+          "value": "sha256:9a8e94ea7f378bd32cbbd37198a4a91436180c5bb472411e48b5ec2e2124ae9e"
+        }
+      ],
+      "purl": "pkg:cargo/serde@1.0.228",
+      "type": "library",
+      "version": "1.0.228"
+    },
+    {
+      "bom-ref": "cargo:pkg:serde_core:1.0.228:registry-https-github.com-rust-lang-crates.io-index",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "41d385c7d4ca58e59fc732af25c3983b67ac852c1a25000afe1175de458b67ad"
+        }
+      ],
+      "name": "serde_core",
+      "properties": [
+        {
+          "name": "aegiscudo:ecosystem",
+          "value": "cargo"
+        },
+        {
+          "name": "aegiscudo:decision_status",
+          "value": "unresolved"
+        },
+        {
+          "name": "aegiscudo:integrity",
+          "value": "sha256:41d385c7d4ca58e59fc732af25c3983b67ac852c1a25000afe1175de458b67ad"
+        }
+      ],
+      "purl": "pkg:cargo/serde_core@1.0.228",
+      "type": "library",
+      "version": "1.0.228"
+    },
+    {
+      "bom-ref": "cargo:pkg:serde_derive:1.0.228:registry-https-github.com-rust-lang-crates.io-index",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "d540f220d3187173da220f885ab66608367b6574e925011a9353e4badda91d79"
+        }
+      ],
+      "name": "serde_derive",
+      "properties": [
+        {
+          "name": "aegiscudo:ecosystem",
+          "value": "cargo"
+        },
+        {
+          "name": "aegiscudo:decision_status",
+          "value": "unresolved"
+        },
+        {
+          "name": "aegiscudo:integrity",
+          "value": "sha256:d540f220d3187173da220f885ab66608367b6574e925011a9353e4badda91d79"
+        }
+      ],
+      "purl": "pkg:cargo/serde_derive@1.0.228",
+      "type": "library",
+      "version": "1.0.228"
+    },
+    {
+      "bom-ref": "cargo:pkg:syn:2.0.117:registry-https-github.com-rust-lang-crates.io-index",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "e665b8803e7b1d2a727f4023456bbbbe74da67099c585258af0ad9c5013b9b99"
+        }
+      ],
+      "name": "syn",
+      "properties": [
+        {
+          "name": "aegiscudo:ecosystem",
+          "value": "cargo"
+        },
+        {
+          "name": "aegiscudo:decision_status",
+          "value": "unresolved"
+        },
+        {
+          "name": "aegiscudo:integrity",
+          "value": "sha256:e665b8803e7b1d2a727f4023456bbbbe74da67099c585258af0ad9c5013b9b99"
+        }
+      ],
+      "purl": "pkg:cargo/syn@2.0.117",
+      "type": "library",
+      "version": "2.0.117"
+    },
+    {
+      "bom-ref": "cargo:pkg:unicode-ident:1.0.24:registry-https-github.com-rust-lang-crates.io-index",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
+        }
+      ],
+      "name": "unicode-ident",
+      "properties": [
+        {
+          "name": "aegiscudo:ecosystem",
+          "value": "cargo"
+        },
+        {
+          "name": "aegiscudo:decision_status",
+          "value": "unresolved"
+        },
+        {
+          "name": "aegiscudo:integrity",
+          "value": "sha256:e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
+        }
+      ],
+      "purl": "pkg:cargo/unicode-ident@1.0.24",
+      "type": "library",
+      "version": "1.0.24"
+    }
+  ],
+  "dependencies": [
+    {
+      "dependsOn": [
+        "cargo:pkg:member1:0.1.0"
+      ],
+      "ref": "aegiscudo-root:cargo"
+    },
+    {
+      "dependsOn": [
+        "cargo:pkg:serde:1.0.228:registry-https-github.com-rust-lang-crates.io-index"
+      ],
+      "ref": "cargo:pkg:member1:0.1.0"
+    },
+    {
+      "dependsOn": [
+        "cargo:pkg:unicode-ident:1.0.24:registry-https-github.com-rust-lang-crates.io-index"
+      ],
+      "ref": "cargo:pkg:proc-macro2:1.0.106:registry-https-github.com-rust-lang-crates.io-index"
+    },
+    {
+      "dependsOn": [
+        "cargo:pkg:proc-macro2:1.0.106:registry-https-github.com-rust-lang-crates.io-index"
+      ],
+      "ref": "cargo:pkg:quote:1.0.45:registry-https-github.com-rust-lang-crates.io-index"
+    },
+    {
+      "dependsOn": [
+        "cargo:pkg:serde_core:1.0.228:registry-https-github.com-rust-lang-crates.io-index"
+      ],
+      "ref": "cargo:pkg:serde:1.0.228:registry-https-github.com-rust-lang-crates.io-index"
+    },
+    {
+      "dependsOn": [
+        "cargo:pkg:serde_derive:1.0.228:registry-https-github.com-rust-lang-crates.io-index"
+      ],
+      "ref": "cargo:pkg:serde_core:1.0.228:registry-https-github.com-rust-lang-crates.io-index"
+    },
+    {
+      "dependsOn": [
+        "cargo:pkg:proc-macro2:1.0.106:registry-https-github.com-rust-lang-crates.io-index",
+        "cargo:pkg:quote:1.0.45:registry-https-github.com-rust-lang-crates.io-index",
+        "cargo:pkg:syn:2.0.117:registry-https-github.com-rust-lang-crates.io-index"
+      ],
+      "ref": "cargo:pkg:serde_derive:1.0.228:registry-https-github.com-rust-lang-crates.io-index"
+    },
+    {
+      "dependsOn": [
+        "cargo:pkg:proc-macro2:1.0.106:registry-https-github.com-rust-lang-crates.io-index",
+        "cargo:pkg:quote:1.0.45:registry-https-github.com-rust-lang-crates.io-index",
+        "cargo:pkg:unicode-ident:1.0.24:registry-https-github.com-rust-lang-crates.io-index"
+      ],
+      "ref": "cargo:pkg:syn:2.0.117:registry-https-github.com-rust-lang-crates.io-index"
+    },
+    {
+      "dependsOn": [],
+      "ref": "cargo:pkg:unicode-ident:1.0.24:registry-https-github.com-rust-lang-crates.io-index"
+    }
+  ],
+  "metadata": {
+    "component": {
+      "bom-ref": "aegiscudo-root:cargo",
+      "name": "Cargo",
+      "properties": [
+        {
+          "name": "aegiscudo:source",
+          "value": "temp_validation_1/Cargo.lock"
+        },
+        {
+          "name": "aegiscudo:generated_at",
+          "value": "2026-05-11T09:30:59Z"
+        },
+        {
+          "name": "aegiscudo:ecosystem",
+          "value": "cargo"
+        }
+      ],
+      "type": "application"
+    },
+    "timestamp": "2026-05-11T09:30:59Z",
+    "tools": [
+      {
+        "name": "aedo-cli",
+        "vendor": "Aegiscudo",
+        "version": "0.1.0"
+      }
+    ]
+  },
+  "serialNumber": "urn:uuid:39f01bf9-a7a1-4355-aeff-b103edd4c755",
+  "specVersion": "1.7",
+  "version": 1
+}

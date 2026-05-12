@@ -1,0 +1,31 @@
+{
+  "results": [
+    {
+      "package": {
+        "name": "lodash",
+        "version": "4.17.21",
+        "ecosystem": "npm"
+      },
+      "createdAt": "2026-05-01T00:00:00Z",
+      "analysis": {
+        "behaviors": [],
+        "status": "COMPLETE"
+      }
+    },
+    {
+      "package": {
+        "name": "malware-sample",
+        "version": "1.0.0",
+        "ecosystem": "npm"
+      },
+      "createdAt": "2026-05-01T00:00:00Z",
+      "analysis": {
+        "behaviors": [
+          { "id": "NETWORK_ACCESS", "description": "package makes network connections" },
+          { "id": "EXEC_BINARY", "description": "package executes external binaries" }
+        ],
+        "status": "COMPLETE"
+      }
+    }
+  ]
+}

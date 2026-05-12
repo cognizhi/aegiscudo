@@ -21,6 +21,17 @@
         "epss_probability_floor": { "type": "number", "minimum": 0, "maximum": 1 }
       }
     },
+    "scorecard_thresholds": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "code_review": { "type": "number", "minimum": -1, "maximum": 10 },
+        "branch_protection": { "type": "number", "minimum": -1, "maximum": 10 },
+        "ci_cd": { "type": "number", "minimum": -1, "maximum": 10 },
+        "maintained": { "type": "number", "minimum": -1, "maximum": 10 },
+        "signed_releases": { "type": "number", "minimum": -1, "maximum": 10 }
+      }
+    },
     "fail_closed": { "type": "boolean" },
     "rules": {
       "type": "array",

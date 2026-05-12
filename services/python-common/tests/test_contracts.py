@@ -81,6 +81,30 @@ def test_policy_profile_requires_explicit_fail_closed() -> None:
         PolicyProfile.model_validate(payload)
 
 
+def test_policy_profile_accepts_scorecard_thresholds() -> None:
+    payload = load_fixture("policy.default.json")
+    payload["scorecard_thresholds"] = {
+        "code_review": 9.5,
+        "branch_protection": 8.0,
+        "ci_cd": 9.0,
+        "maintained": 7.0,
+        "signed_releases": -1.0,
+    }
+
+    policy = PolicyProfile.model_validate(payload)
+
+    assert policy.scorecard_thresholds is not None
+    assert policy.scorecard_thresholds.branch_protection == 8.0
+
+
+def test_policy_profile_rejects_null_scorecard_threshold_value() -> None:
+    payload = load_fixture("policy.default.json")
+    payload["scorecard_thresholds"] = {"code_review": None}
+
+    with pytest.raises(ValidationError):
+        PolicyProfile.model_validate(payload)
+
+
 def test_audit_event_rejects_sensitive_metadata_keys() -> None:
     payload = load_fixture("audit-event.registry-create.json")
     payload["metadata"] = {"credential_ref": "id-only", "credential_value": "raw-value"}

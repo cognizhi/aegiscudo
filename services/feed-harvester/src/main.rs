@@ -29,12 +29,12 @@ async fn main() -> anyhow::Result<()> {
                     Ok(snapshots) => tracing::info!(
                         snapshot_count = snapshots.len(),
                         refresh_interval_secs,
-                        "scheduled feed fixture refresh completed"
+                        "scheduled feed refresh completed"
                     ),
                     Err(error) => tracing::warn!(
                         error = %error,
                         refresh_interval_secs,
-                        "scheduled feed fixture refresh failed"
+                        "scheduled feed refresh failed"
                     ),
                 }
             }

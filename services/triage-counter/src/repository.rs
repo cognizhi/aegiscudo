@@ -7,7 +7,7 @@ use aegiscudo_core::{
     AnalysisJob, ArtifactDigest, AttestationResult, DigestError, FeedState, JobState,
     PackageCoordinate, PolicyDecision, PolicyMode, PolicySnapshot, Severity, StaticEvidence,
 };
-use aegiscudo_policy::{PolicyInput, VulnerabilityPolicyAction};
+use aegiscudo_policy::{PolicyInput, SignalPolicyAction, VulnerabilityPolicyAction};
 use aegiscudo_protocol::{DecisionRequest, DecisionResponse, PackageRequestKind};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -25,6 +25,8 @@ const MVP_FEED_NAMES: &[&str] = &[
     "openssf-malicious-packages",
     "cisa-kev",
     "first-epss",
+    "deps.dev",
+    "openssf-scorecard",
 ];
 const FRESH_FEED_MAX_AGE_SECONDS: u64 = 24 * 60 * 60;
 
@@ -41,6 +43,7 @@ pub struct LoadedPolicyProfile {
 pub struct PolicySignalConfiguration {
     pub known_vulnerability_threshold: KnownVulnerabilityThreshold,
     pub vulnerable_above_threshold_action: VulnerabilityPolicyAction,
+    pub scorecard: ScorecardPolicyConfiguration,
 }
 
 impl Default for PolicySignalConfiguration {
@@ -48,6 +51,43 @@ impl Default for PolicySignalConfiguration {
         Self {
             known_vulnerability_threshold: KnownVulnerabilityThreshold::default(),
             vulnerable_above_threshold_action: VulnerabilityPolicyAction::Warn,
+            scorecard: ScorecardPolicyConfiguration::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ScorecardPolicyConfiguration {
+    pub code_review: ScorecardCheckPolicy,
+    pub branch_protection: ScorecardCheckPolicy,
+    pub ci_cd: ScorecardCheckPolicy,
+    pub maintained: ScorecardCheckPolicy,
+    pub signed_releases: ScorecardCheckPolicy,
+}
+
+impl Default for ScorecardPolicyConfiguration {
+    fn default() -> Self {
+        Self {
+            code_review: ScorecardCheckPolicy::default(),
+            branch_protection: ScorecardCheckPolicy::default(),
+            ci_cd: ScorecardCheckPolicy::default(),
+            maintained: ScorecardCheckPolicy::default(),
+            signed_releases: ScorecardCheckPolicy::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ScorecardCheckPolicy {
+    pub min_score: f64,
+    pub action: SignalPolicyAction,
+}
+
+impl Default for ScorecardCheckPolicy {
+    fn default() -> Self {
+        Self {
+            min_score: 10.0,
+            action: SignalPolicyAction::Warn,
         }
     }
 }
@@ -82,6 +122,8 @@ pub enum VulnerabilitySeverity {
 struct PolicyDocumentSignalConfiguration {
     known_vulnerability_threshold: PolicyDocumentKnownVulnerabilityThreshold,
     #[serde(default)]
+    scorecard_thresholds: PolicyDocumentScorecardThresholds,
+    #[serde(default)]
     rules: Vec<PolicyDocumentRule>,
 }
 
@@ -91,6 +133,36 @@ struct PolicyDocumentKnownVulnerabilityThreshold {
     kev_override: bool,
     #[serde(default)]
     epss_probability_floor: Option<f64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+struct PolicyDocumentScorecardThresholds {
+    #[serde(default = "default_scorecard_min_score")]
+    code_review: f64,
+    #[serde(default = "default_scorecard_min_score")]
+    branch_protection: f64,
+    #[serde(default = "default_scorecard_min_score")]
+    ci_cd: f64,
+    #[serde(default = "default_scorecard_min_score")]
+    maintained: f64,
+    #[serde(default = "default_scorecard_min_score")]
+    signed_releases: f64,
+}
+
+impl Default for PolicyDocumentScorecardThresholds {
+    fn default() -> Self {
+        Self {
+            code_review: default_scorecard_min_score(),
+            branch_protection: default_scorecard_min_score(),
+            ci_cd: default_scorecard_min_score(),
+            maintained: default_scorecard_min_score(),
+            signed_releases: default_scorecard_min_score(),
+        }
+    }
+}
+
+fn default_scorecard_min_score() -> f64 {
+    10.0
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -173,10 +245,24 @@ struct PackageSignalStatus {
     artifact_digest_reputation_risk: bool,
     github_to_registry_publish_gap_risk: bool,
     trusted_publisher_identity_mismatch: bool,
+    scorecard_code_review_risk: bool,
+    scorecard_branch_protection_risk: bool,
+    scorecard_ci_cd_risk: bool,
+    scorecard_maintained_risk: bool,
+    scorecard_signed_releases_risk: bool,
     maintainer_account_age_risk: bool,
     recent_maintainer_change_risk: bool,
     new_maintainer_ratio_risk: bool,
     known_malicious: bool,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
+struct ScorecardSignalStatus {
+    code_review_risk: bool,
+    branch_protection_risk: bool,
+    ci_cd_risk: bool,
+    maintained_risk: bool,
+    signed_releases_risk: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -186,6 +272,18 @@ struct PackageSignalRecord {
     artifact_digest: Option<ArtifactDigest>,
     signal: String,
     expires_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct DepsDevPackageRecord {
+    coordinate: PackageCoordinate,
+    project_links: Vec<Value>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct ScorecardResultRecord {
+    repo_name: String,
+    checks: Vec<(String, f64)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -334,6 +432,7 @@ impl PolicyRepository {
                 request.tenant_id,
                 &request.request.coordinate,
                 request.request.requested_digest.as_ref(),
+                &profile.signal_configuration.scorecard,
             )
             .await?;
         let known_malicious = package_signal_status.known_malicious
@@ -430,6 +529,26 @@ impl PolicyRepository {
                 .github_to_registry_publish_gap_risk,
             trusted_publisher_identity_mismatch: package_signal_status
                 .trusted_publisher_identity_mismatch,
+            scorecard_code_review_risk: package_signal_status.scorecard_code_review_risk,
+            scorecard_branch_protection_risk: package_signal_status
+                .scorecard_branch_protection_risk,
+            scorecard_ci_cd_risk: package_signal_status.scorecard_ci_cd_risk,
+            scorecard_maintained_risk: package_signal_status.scorecard_maintained_risk,
+            scorecard_signed_releases_risk: package_signal_status
+                .scorecard_signed_releases_risk,
+            scorecard_code_review_action: profile.signal_configuration.scorecard.code_review.action,
+            scorecard_branch_protection_action: profile
+                .signal_configuration
+                .scorecard
+                .branch_protection
+                .action,
+            scorecard_ci_cd_action: profile.signal_configuration.scorecard.ci_cd.action,
+            scorecard_maintained_action: profile.signal_configuration.scorecard.maintained.action,
+            scorecard_signed_releases_action: profile
+                .signal_configuration
+                .scorecard
+                .signed_releases
+                .action,
             provenance_or_signature_verification_failed: attestation_signal_status
                 .provenance_or_signature_verification_failed,
             missing_or_failed_attestation: attestation_signal_status.missing_or_failed_attestation,
@@ -570,16 +689,27 @@ impl PolicyRepository {
         tenant_id: Uuid,
         coordinate: &PackageCoordinate,
         artifact_digest: Option<&ArtifactDigest>,
+        scorecard_policy: &ScorecardPolicyConfiguration,
     ) -> Result<PackageSignalStatus, PolicyRepositoryError> {
         match self {
             Self::Postgres(repository) => {
                 repository
-                    .load_package_signal_status(tenant_id, coordinate, artifact_digest)
+                    .load_package_signal_status(
+                        tenant_id,
+                        coordinate,
+                        artifact_digest,
+                        scorecard_policy,
+                    )
                     .await
             }
             Self::InMemory(repository) => {
                 repository
-                    .load_package_signal_status(tenant_id, coordinate, artifact_digest)
+                    .load_package_signal_status(
+                        tenant_id,
+                        coordinate,
+                        artifact_digest,
+                        scorecard_policy,
+                    )
                     .await
             }
         }
@@ -1122,6 +1252,7 @@ impl PostgresPolicyRepository {
         tenant_id: Uuid,
         coordinate: &PackageCoordinate,
         artifact_digest: Option<&ArtifactDigest>,
+        scorecard_policy: &ScorecardPolicyConfiguration,
     ) -> Result<PackageSignalStatus, PolicyRepositoryError> {
         let requested_digest_hex = artifact_digest.map(|digest| digest.hex.clone());
         let rows = sqlx::query(
@@ -1150,8 +1281,96 @@ impl PostgresPolicyRepository {
             .into_iter()
             .map(|row| row.try_get::<String, _>("signal"))
             .collect::<Result<Vec<_>, _>>()?;
-        Ok(package_signal_status_from_signals(
-            signals.iter().map(String::as_str),
+        let mut status = package_signal_status_from_signals(signals.iter().map(String::as_str));
+        merge_scorecard_signal_status(
+            &mut status,
+            self.load_scorecard_signal_status(coordinate, scorecard_policy)
+                .await?,
+        );
+        Ok(status)
+    }
+
+    async fn load_scorecard_signal_status(
+        &self,
+        coordinate: &PackageCoordinate,
+        scorecard_policy: &ScorecardPolicyConfiguration,
+    ) -> Result<ScorecardSignalStatus, PolicyRepositoryError> {
+        let project_links_row = sqlx::query(
+            r#"
+            SELECT ddp.project_links
+            FROM deps_dev_packages ddp
+            JOIN feed_snapshots fs ON fs.id = ddp.snapshot_id
+            WHERE fs.feed_name = 'deps.dev'
+              AND ddp.ecosystem = $1::package_ecosystem
+              AND ddp.namespace IS NOT DISTINCT FROM $2
+              AND ddp.package_name = $3
+              AND ($4::text IS NULL OR ddp.package_version = $4)
+            ORDER BY fs.created_at DESC, ddp.created_at DESC
+            LIMIT 1
+            "#,
+        )
+        .bind(coordinate.ecosystem.to_string())
+        .bind(coordinate.namespace.clone())
+        .bind(&coordinate.name)
+        .bind(coordinate.version.clone())
+        .fetch_optional(&self.pool)
+        .await?;
+
+        let Some(project_links_row) = project_links_row else {
+            return Ok(ScorecardSignalStatus::default());
+        };
+        let project_links = project_links_row.try_get::<Json<Value>, _>("project_links")?.0;
+        let Some(repo_name) = project_links
+            .as_array()
+            .and_then(|links| scorecard_repo_name_from_project_links(links))
+        else {
+            return Ok(ScorecardSignalStatus::default());
+        };
+
+        let latest_result_row = sqlx::query(
+            r#"
+            SELECT r.id
+            FROM openssf_scorecard_results r
+            JOIN feed_snapshots fs ON fs.id = r.snapshot_id
+            WHERE fs.feed_name = 'openssf-scorecard'
+              AND r.repo_name = $1
+            ORDER BY r.observed_on DESC NULLS LAST, fs.created_at DESC, r.created_at DESC
+            LIMIT 1
+            "#,
+        )
+        .bind(&repo_name)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        let Some(latest_result_row) = latest_result_row else {
+            return Ok(ScorecardSignalStatus::default());
+        };
+        let result_id = latest_result_row.try_get::<Uuid, _>("id")?;
+
+        let check_rows = sqlx::query(
+            r#"
+            SELECT check_name, score
+            FROM openssf_scorecard_checks
+            WHERE result_id = $1
+            "#,
+        )
+        .bind(result_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let checks = check_rows
+            .into_iter()
+            .map(|row| {
+                Ok((
+                    row.try_get::<String, _>("check_name")?,
+                    row.try_get::<f64, _>("score")?,
+                ))
+            })
+            .collect::<Result<Vec<_>, sqlx::Error>>()?;
+
+        Ok(scorecard_signal_status_from_checks(
+            checks.iter().map(|(check_name, score)| (check_name.as_str(), *score)),
+            scorecard_policy,
         ))
     }
 
@@ -1594,6 +1813,8 @@ pub struct InMemoryPolicyRepository {
     sandbox_runs: Arc<RwLock<Vec<(Uuid, PackageCoordinate, Option<ArtifactDigest>, Value)>>>,
     override_records: Arc<RwLock<Vec<OverrideRecord>>>,
     package_signal_records: Arc<RwLock<Vec<PackageSignalRecord>>>,
+    deps_dev_package_records: Arc<RwLock<Vec<DepsDevPackageRecord>>>,
+    scorecard_result_records: Arc<RwLock<Vec<ScorecardResultRecord>>>,
     feed_snapshot_records: Arc<RwLock<Vec<FeedSnapshotRecord>>>,
     analysis_jobs: Arc<RwLock<Vec<AnalysisJob>>>,
 }
@@ -1640,6 +1861,36 @@ impl InMemoryPolicyRepository {
                 state,
                 last_success_at,
                 created_at,
+            });
+    }
+
+    #[cfg(test)]
+    async fn remember_deps_dev_package(
+        &self,
+        coordinate: PackageCoordinate,
+        project_links: Vec<Value>,
+    ) {
+        self.deps_dev_package_records
+            .write()
+            .await
+            .push(DepsDevPackageRecord {
+                coordinate,
+                project_links,
+            });
+    }
+
+    #[cfg(test)]
+    async fn remember_scorecard_result(
+        &self,
+        repo_name: impl Into<String>,
+        checks: Vec<(String, f64)>,
+    ) {
+        self.scorecard_result_records
+            .write()
+            .await
+            .push(ScorecardResultRecord {
+                repo_name: repo_name.into(),
+                checks,
             });
     }
 
@@ -1889,6 +2140,7 @@ impl InMemoryPolicyRepository {
         tenant_id: Uuid,
         coordinate: &PackageCoordinate,
         artifact_digest: Option<&ArtifactDigest>,
+        scorecard_policy: &ScorecardPolicyConfiguration,
     ) -> Result<PackageSignalStatus, PolicyRepositoryError> {
         let now = Utc::now();
         let records = self.package_signal_records.read().await;
@@ -1903,7 +2155,49 @@ impl InMemoryPolicyRepository {
                     && record.expires_at.is_none_or(|expires_at| expires_at > now)
             })
             .map(|record| record.signal.as_str());
-        Ok(package_signal_status_from_signals(signals))
+        let mut status = package_signal_status_from_signals(signals);
+        merge_scorecard_signal_status(
+            &mut status,
+            self.load_scorecard_signal_status(coordinate, scorecard_policy)
+                .await,
+        );
+        Ok(status)
+    }
+
+    async fn load_scorecard_signal_status(
+        &self,
+        coordinate: &PackageCoordinate,
+        scorecard_policy: &ScorecardPolicyConfiguration,
+    ) -> ScorecardSignalStatus {
+        let package_records = self.deps_dev_package_records.read().await;
+        let Some(package_record) = package_records.iter().rev().find(|record| {
+            record.coordinate.ecosystem == coordinate.ecosystem
+                && record.coordinate.namespace == coordinate.namespace
+                && record.coordinate.name == coordinate.name
+                && (coordinate.version.is_none() || record.coordinate.version == coordinate.version)
+        }) else {
+            return ScorecardSignalStatus::default();
+        };
+        let Some(repo_name) = scorecard_repo_name_from_project_links(&package_record.project_links)
+        else {
+            return ScorecardSignalStatus::default();
+        };
+
+        let scorecard_results = self.scorecard_result_records.read().await;
+        let Some(scorecard_result) = scorecard_results
+            .iter()
+            .rev()
+            .find(|record| record.repo_name == repo_name)
+        else {
+            return ScorecardSignalStatus::default();
+        };
+        scorecard_signal_status_from_checks(
+            scorecard_result
+                .checks
+                .iter()
+                .map(|(check_name, score)| (check_name.as_str(), *score)),
+            scorecard_policy,
+        )
     }
 
     async fn load_feed_snapshot_status(
@@ -2215,6 +2509,34 @@ fn policy_signal_configuration_from_document(
         })
         .transpose()?
         .unwrap_or(VulnerabilityPolicyAction::Warn);
+    let scorecard = ScorecardPolicyConfiguration {
+        code_review: ScorecardCheckPolicy {
+            min_score: parsed.scorecard_thresholds.code_review,
+            action: scorecard_action_from_document_rules(&parsed.rules, "scorecard_code_review_risk")?,
+        },
+        branch_protection: ScorecardCheckPolicy {
+            min_score: parsed.scorecard_thresholds.branch_protection,
+            action: scorecard_action_from_document_rules(
+                &parsed.rules,
+                "scorecard_branch_protection_risk",
+            )?,
+        },
+        ci_cd: ScorecardCheckPolicy {
+            min_score: parsed.scorecard_thresholds.ci_cd,
+            action: scorecard_action_from_document_rules(&parsed.rules, "scorecard_ci_cd_risk")?,
+        },
+        maintained: ScorecardCheckPolicy {
+            min_score: parsed.scorecard_thresholds.maintained,
+            action: scorecard_action_from_document_rules(&parsed.rules, "scorecard_maintained_risk")?,
+        },
+        signed_releases: ScorecardCheckPolicy {
+            min_score: parsed.scorecard_thresholds.signed_releases,
+            action: scorecard_action_from_document_rules(
+                &parsed.rules,
+                "scorecard_signed_releases_risk",
+            )?,
+        },
+    };
 
     Ok(PolicySignalConfiguration {
         known_vulnerability_threshold: KnownVulnerabilityThreshold {
@@ -2223,7 +2545,32 @@ fn policy_signal_configuration_from_document(
             epss_probability_floor: parsed.known_vulnerability_threshold.epss_probability_floor,
         },
         vulnerable_above_threshold_action,
+        scorecard,
     })
+}
+
+fn scorecard_action_from_document_rules(
+    rules: &[PolicyDocumentRule],
+    signal: &str,
+) -> Result<SignalPolicyAction, PolicyRepositoryError> {
+    let Some(rule) = rules.iter().rev().find(|rule| rule.signal == signal) else {
+        return Ok(SignalPolicyAction::Allow);
+    };
+
+    if !rule.enabled {
+        return Ok(SignalPolicyAction::Allow);
+    }
+
+    match rule.action {
+        PolicyDocumentRuleAction::Allow => Ok(SignalPolicyAction::Allow),
+        PolicyDocumentRuleAction::Warn => Ok(SignalPolicyAction::Warn),
+        PolicyDocumentRuleAction::Block => Ok(SignalPolicyAction::Block),
+        PolicyDocumentRuleAction::Hitl => Ok(SignalPolicyAction::Hitl),
+        action => Err(PolicyRepositoryError::UnsupportedPolicyRuleAction {
+            signal: signal.to_owned(),
+            action: action.as_str().to_owned(),
+        }),
+    }
 }
 
 fn vulnerability_match_exceeds_threshold(
@@ -2362,6 +2709,82 @@ fn package_signal_status_from_signals<'a>(
         }
     }
     status
+}
+
+fn merge_scorecard_signal_status(
+    package_signal_status: &mut PackageSignalStatus,
+    scorecard_signal_status: ScorecardSignalStatus,
+) {
+    package_signal_status.scorecard_code_review_risk |= scorecard_signal_status.code_review_risk;
+    package_signal_status.scorecard_branch_protection_risk |=
+        scorecard_signal_status.branch_protection_risk;
+    package_signal_status.scorecard_ci_cd_risk |= scorecard_signal_status.ci_cd_risk;
+    package_signal_status.scorecard_maintained_risk |= scorecard_signal_status.maintained_risk;
+    package_signal_status.scorecard_signed_releases_risk |=
+        scorecard_signal_status.signed_releases_risk;
+}
+
+fn scorecard_signal_status_from_checks<'a>(
+    checks: impl IntoIterator<Item = (&'a str, f64)>,
+    scorecard_policy: &ScorecardPolicyConfiguration,
+) -> ScorecardSignalStatus {
+    let mut status = ScorecardSignalStatus::default();
+    for (check_name, score) in checks {
+        match check_name.to_ascii_lowercase().as_str() {
+            "code-review" => {
+                status.code_review_risk = score < scorecard_policy.code_review.min_score;
+            }
+            "branch-protection" => {
+                status.branch_protection_risk = score < scorecard_policy.branch_protection.min_score;
+            }
+            "ci-tests" => {
+                status.ci_cd_risk = score < scorecard_policy.ci_cd.min_score;
+            }
+            "maintained" => {
+                status.maintained_risk = score < scorecard_policy.maintained.min_score;
+            }
+            "signed-releases" => {
+                status.signed_releases_risk = score < scorecard_policy.signed_releases.min_score;
+            }
+            _ => {}
+        }
+    }
+    status
+}
+
+fn scorecard_repo_name_from_project_links(project_links: &[Value]) -> Option<String> {
+    project_links
+        .iter()
+        .filter(|link| {
+            link.get("type")
+                .and_then(Value::as_str)
+                .is_none_or(|link_type| link_type == "SOURCE_REPO")
+        })
+        .filter_map(|link| link.get("url").and_then(Value::as_str))
+        .find_map(normalize_scorecard_repo_name)
+}
+
+fn normalize_scorecard_repo_name(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let trimmed = trimmed.trim_end_matches('/');
+    let trimmed = trimmed.strip_suffix(".git").unwrap_or(trimmed);
+    let trimmed = trimmed.strip_prefix("https://").unwrap_or(trimmed);
+    let trimmed = trimmed.strip_prefix("http://").unwrap_or(trimmed);
+    let trimmed = trimmed.strip_prefix("www.").unwrap_or(trimmed);
+    let trimmed = trimmed.strip_prefix("git+").unwrap_or(trimmed);
+    let trimmed = trimmed.strip_prefix("https://").unwrap_or(trimmed);
+    let trimmed = trimmed.strip_prefix("http://").unwrap_or(trimmed);
+    let trimmed = trimmed.strip_prefix("www.").unwrap_or(trimmed);
+    let path = trimmed.strip_prefix("github.com/")?;
+
+    let mut segments = path.split('/').filter(|segment| !segment.is_empty());
+    let owner = segments.next()?;
+    let repo = segments.next()?;
+    Some(format!("github.com/{owner}/{repo}"))
 }
 
 fn feed_snapshot_status_from_records(
@@ -2654,6 +3077,85 @@ mod tests {
         );
     }
 
+    #[test]
+    fn policy_signal_configuration_reads_scorecard_thresholds_and_actions() {
+        let document = serde_json::json!({
+            "known_vulnerability_threshold": {
+                "severity_floor": "high",
+                "kev_override": true
+            },
+            "scorecard_thresholds": {
+                "code_review": 9.5,
+                "branch_protection": 8.0,
+                "ci_cd": 9.0,
+                "maintained": 7.0,
+                "signed_releases": 6.0
+            },
+            "rules": [
+                {
+                    "id": "scorecard-branch",
+                    "signal": "scorecard_branch_protection_risk",
+                    "action": "block",
+                    "enabled": true
+                },
+                {
+                    "id": "scorecard-maintained",
+                    "signal": "scorecard_maintained_risk",
+                    "action": "warn",
+                    "enabled": false
+                },
+                {
+                    "id": "scorecard-signed",
+                    "signal": "scorecard_signed_releases_risk",
+                    "action": "hitl",
+                    "enabled": true
+                }
+            ]
+        });
+
+        let configuration = policy_signal_configuration_from_document(&document)
+            .expect("policy signal configuration should parse");
+
+        assert_eq!(configuration.scorecard.code_review.min_score, 9.5);
+        assert_eq!(configuration.scorecard.branch_protection.min_score, 8.0);
+        assert_eq!(configuration.scorecard.branch_protection.action, SignalPolicyAction::Block);
+        assert_eq!(configuration.scorecard.maintained.action, SignalPolicyAction::Allow);
+        assert_eq!(configuration.scorecard.signed_releases.action, SignalPolicyAction::Hitl);
+    }
+
+    #[test]
+    fn scorecard_rules_default_to_allow_for_legacy_policy_documents() {
+        let document = serde_json::json!({
+            "known_vulnerability_threshold": {
+                "severity_floor": "high",
+                "kev_override": true
+            },
+            "rules": [
+                {
+                    "id": "known-vulnerable",
+                    "signal": "vulnerable_above_threshold",
+                    "action": "warn",
+                    "enabled": true
+                }
+            ]
+        });
+
+        let configuration = policy_signal_configuration_from_document(&document)
+            .expect("policy signal configuration should parse");
+
+        assert_eq!(configuration.scorecard.code_review.action, SignalPolicyAction::Allow);
+        assert_eq!(
+            configuration.scorecard.branch_protection.action,
+            SignalPolicyAction::Allow
+        );
+        assert_eq!(configuration.scorecard.ci_cd.action, SignalPolicyAction::Allow);
+        assert_eq!(configuration.scorecard.maintained.action, SignalPolicyAction::Allow);
+        assert_eq!(
+            configuration.scorecard.signed_releases.action,
+            SignalPolicyAction::Allow
+        );
+    }
+
     #[tokio::test]
     async fn in_memory_repository_binds_vulnerability_signal_when_match_exceeds_threshold() {
         let tenant_id = Uuid::now_v7();
@@ -2669,6 +3171,7 @@ mod tests {
                 epss_probability_floor: None,
             },
             vulnerable_above_threshold_action: VulnerabilityPolicyAction::Block,
+            scorecard: ScorecardPolicyConfiguration::default(),
         };
         repository.upsert_profile(loaded_profile).await;
         repository
@@ -2721,6 +3224,7 @@ mod tests {
                 epss_probability_floor: Some(0.9),
             },
             vulnerable_above_threshold_action: VulnerabilityPolicyAction::Warn,
+            scorecard: ScorecardPolicyConfiguration::default(),
         };
         repository.upsert_profile(loaded_profile).await;
         repository
@@ -3525,6 +4029,164 @@ mod tests {
         assert!(bound.maintainer_account_age_risk);
         assert!(bound.recent_maintainer_change_risk);
         assert!(bound.new_maintainer_ratio_risk);
+    }
+
+    #[tokio::test]
+    async fn deps_dev_and_scorecard_records_bind_policy_inputs() {
+        let tenant_id = Uuid::now_v7();
+        let policy_profile_id = Uuid::now_v7();
+        let registry_config_id = Uuid::now_v7();
+        let repository = InMemoryPolicyRepository::new();
+        repository
+            .upsert_profile(profile(tenant_id, policy_profile_id, Uuid::now_v7()))
+            .await;
+        repository
+            .upsert_registry_binding(RegistryPolicyBinding {
+                tenant_id,
+                registry_config_id,
+                policy_profile_id,
+                mode: PolicyMode::Warn,
+            })
+            .await;
+
+        let request = decision_request(tenant_id, registry_config_id, policy_profile_id);
+        repository
+            .remember_deps_dev_package(
+                request.request.coordinate.clone(),
+                vec![json!({
+                    "type": "SOURCE_REPO",
+                    "url": "https://github.com/lodash/lodash"
+                })],
+            )
+            .await;
+        repository
+            .remember_scorecard_result(
+                "github.com/lodash/lodash",
+                vec![
+                    ("Code-Review".to_owned(), 10.0),
+                    ("Branch-Protection".to_owned(), 8.0),
+                    ("CI-Tests".to_owned(), 10.0),
+                    ("Maintained".to_owned(), 10.0),
+                    ("Signed-Releases".to_owned(), -1.0),
+                ],
+            )
+            .await;
+
+        let bound = PolicyRepository::InMemory(repository)
+            .bind_decision_request(request)
+            .await
+            .expect("policy context should bind");
+
+        assert!(!bound.scorecard_code_review_risk);
+        assert!(bound.scorecard_branch_protection_risk);
+        assert!(!bound.scorecard_ci_cd_risk);
+        assert!(!bound.scorecard_maintained_risk);
+        assert!(bound.scorecard_signed_releases_risk);
+    }
+
+    #[tokio::test]
+    async fn scorecard_thresholds_control_bound_policy_inputs() {
+        let tenant_id = Uuid::now_v7();
+        let policy_profile_id = Uuid::now_v7();
+        let registry_config_id = Uuid::now_v7();
+        let snapshot_id = Uuid::now_v7();
+        let repository = InMemoryPolicyRepository::new();
+        let mut loaded_profile = profile(tenant_id, policy_profile_id, snapshot_id);
+        loaded_profile.signal_configuration.scorecard.branch_protection.min_score = 8.0;
+        loaded_profile.signal_configuration.scorecard.signed_releases.min_score = -1.0;
+        repository.upsert_profile(loaded_profile).await;
+        repository
+            .upsert_registry_binding(RegistryPolicyBinding {
+                tenant_id,
+                registry_config_id,
+                policy_profile_id,
+                mode: PolicyMode::Warn,
+            })
+            .await;
+
+        let request = decision_request(tenant_id, registry_config_id, policy_profile_id);
+        repository
+            .remember_deps_dev_package(
+                request.request.coordinate.clone(),
+                vec![json!({
+                    "type": "SOURCE_REPO",
+                    "url": "https://github.com/lodash/lodash"
+                })],
+            )
+            .await;
+        repository
+            .remember_scorecard_result(
+                "github.com/lodash/lodash",
+                vec![
+                    ("Branch-Protection".to_owned(), 8.0),
+                    ("Signed-Releases".to_owned(), -1.0),
+                ],
+            )
+            .await;
+
+        let bound = PolicyRepository::InMemory(repository)
+            .bind_decision_request(request)
+            .await
+            .expect("policy context should bind");
+
+        assert!(!bound.scorecard_branch_protection_risk);
+        assert!(!bound.scorecard_signed_releases_risk);
+    }
+
+    #[tokio::test]
+    async fn latest_scorecard_result_wins_in_memory_binding() {
+        let tenant_id = Uuid::now_v7();
+        let policy_profile_id = Uuid::now_v7();
+        let registry_config_id = Uuid::now_v7();
+        let repository = InMemoryPolicyRepository::new();
+        repository
+            .upsert_profile(profile(tenant_id, policy_profile_id, Uuid::now_v7()))
+            .await;
+        repository
+            .upsert_registry_binding(RegistryPolicyBinding {
+                tenant_id,
+                registry_config_id,
+                policy_profile_id,
+                mode: PolicyMode::Warn,
+            })
+            .await;
+
+        let request = decision_request(tenant_id, registry_config_id, policy_profile_id);
+        repository
+            .remember_deps_dev_package(
+                request.request.coordinate.clone(),
+                vec![json!({
+                    "type": "SOURCE_REPO",
+                    "url": "https://github.com/lodash/lodash"
+                })],
+            )
+            .await;
+        repository
+            .remember_scorecard_result(
+                "github.com/lodash/lodash",
+                vec![
+                    ("Branch-Protection".to_owned(), 8.0),
+                    ("Signed-Releases".to_owned(), -1.0),
+                ],
+            )
+            .await;
+        repository
+            .remember_scorecard_result(
+                "github.com/lodash/lodash",
+                vec![
+                    ("Branch-Protection".to_owned(), 10.0),
+                    ("Signed-Releases".to_owned(), 10.0),
+                ],
+            )
+            .await;
+
+        let bound = PolicyRepository::InMemory(repository)
+            .bind_decision_request(request)
+            .await
+            .expect("policy context should bind");
+
+        assert!(!bound.scorecard_branch_protection_risk);
+        assert!(!bound.scorecard_signed_releases_risk);
     }
 
     #[tokio::test]

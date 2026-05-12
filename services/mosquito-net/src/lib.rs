@@ -1532,7 +1532,10 @@ fn filter_npm_packument_to_version(body: Vec<u8>, version: &str) -> Vec<u8> {
     filtered_versions.insert(version.to_owned(), selected_version);
     value["versions"] = serde_json::Value::Object(filtered_versions);
 
-    if let Some(dist_tags) = value.get_mut("dist-tags").and_then(|tags| tags.as_object_mut()) {
+    if let Some(dist_tags) = value
+        .get_mut("dist-tags")
+        .and_then(|tags| tags.as_object_mut())
+    {
         dist_tags.insert(
             "latest".to_owned(),
             serde_json::Value::String(version.to_owned()),
@@ -2389,28 +2392,20 @@ mod tests {
     }
 
     fn create_temp_npm_dirs(prefix: &str) -> (PathBuf, PathBuf) {
-        let project_dir = std::env::temp_dir().join(format!(
-            "{prefix}-project-{}",
-            Uuid::now_v7().simple()
-        ));
-        let cache_dir = std::env::temp_dir().join(format!(
-            "{prefix}-cache-{}",
-            Uuid::now_v7().simple()
-        ));
+        let project_dir =
+            std::env::temp_dir().join(format!("{prefix}-project-{}", Uuid::now_v7().simple()));
+        let cache_dir =
+            std::env::temp_dir().join(format!("{prefix}-cache-{}", Uuid::now_v7().simple()));
         fs::create_dir_all(&project_dir).expect("create temp npm project");
         fs::create_dir_all(&cache_dir).expect("create temp npm cache");
         (project_dir, cache_dir)
     }
 
     fn create_temp_python_dirs(prefix: &str) -> (PathBuf, PathBuf) {
-        let project_dir = std::env::temp_dir().join(format!(
-            "{prefix}-project-{}",
-            Uuid::now_v7().simple()
-        ));
-        let cache_dir = std::env::temp_dir().join(format!(
-            "{prefix}-cache-{}",
-            Uuid::now_v7().simple()
-        ));
+        let project_dir =
+            std::env::temp_dir().join(format!("{prefix}-project-{}", Uuid::now_v7().simple()));
+        let cache_dir =
+            std::env::temp_dir().join(format!("{prefix}-cache-{}", Uuid::now_v7().simple()));
         fs::create_dir_all(&project_dir).expect("create temp python project");
         fs::create_dir_all(&cache_dir).expect("create temp python cache");
         (project_dir, cache_dir)
@@ -2496,7 +2491,10 @@ mod tests {
             })
     }
 
-    fn insert_live_override(scope: serde_json::Value, expires_at: chrono::DateTime<chrono::Utc>) -> Uuid {
+    fn insert_live_override(
+        scope: serde_json::Value,
+        expires_at: chrono::DateTime<chrono::Utc>,
+    ) -> Uuid {
         let override_id = Uuid::now_v7();
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -3070,8 +3068,12 @@ mod tests {
 
     #[tokio::test]
     async fn shadow_mode_keeps_blocking_decision_advisory() {
-        let (triage_url, _calls, triage_handle) =
-            spawn_fake_triage(PolicyDecision::BlockKnownMalicious, PolicyMode::Shadow, None).await;
+        let (triage_url, _calls, triage_handle) = spawn_fake_triage(
+            PolicyDecision::BlockKnownMalicious,
+            PolicyMode::Shadow,
+            None,
+        )
+        .await;
         let (upstream_url, _upstream_paths, upstream_handle) = spawn_fake_upstream().await;
         let store = RegistryConfigStore::new(vec![config_with_upstream(
             "/proxy/npm-public",
@@ -3189,8 +3191,9 @@ mod tests {
             feed_state: aegiscudo_core::FeedState::Fresh,
             feed_snapshot_age_seconds: 0,
             trace_id: "trace-fallback".to_owned(),
-            rationale: vec!["eligible resolver metadata flow can use approved fallback candidate"
-                .to_owned()],
+            rationale: vec![
+                "eligible resolver metadata flow can use approved fallback candidate".to_owned(),
+            ],
             fallback_coordinate: Some(PackageCoordinate::new(
                 PackageEcosystem::Npm,
                 "left-pad",
@@ -3222,7 +3225,12 @@ mod tests {
             serde_json::from_slice(&filtered).expect("filtered npm metadata json");
 
         assert_eq!(filtered["dist-tags"]["latest"], "1.0.0");
-        assert_eq!(filtered["versions"].as_object().map(|versions| versions.len()), Some(1));
+        assert_eq!(
+            filtered["versions"]
+                .as_object()
+                .map(|versions| versions.len()),
+            Some(1)
+        );
         assert!(filtered["versions"].get("1.2.0").is_none());
         assert_eq!(filtered["versions"]["1.0.0"]["version"], "1.0.0");
         assert!(filtered["time"].get("1.2.0").is_none());
@@ -3863,11 +3871,15 @@ mod tests {
         assert_eq!(seed_status, StatusCode::OK);
         assert!(!seed_body.is_empty());
 
-        let packument = fetch_json(
-            "http://127.0.0.1:18000/proxy/npm-fixtures/aegiscudo-benign-npm-fixture",
-        );
+        let packument =
+            fetch_json("http://127.0.0.1:18000/proxy/npm-fixtures/aegiscudo-benign-npm-fixture");
         assert_eq!(packument["dist-tags"]["latest"], "1.0.0");
-        assert_eq!(packument["versions"].as_object().map(|versions| versions.len()), Some(1));
+        assert_eq!(
+            packument["versions"]
+                .as_object()
+                .map(|versions| versions.len()),
+            Some(1)
+        );
         assert!(packument["versions"].get("1.2.0").is_none());
 
         let (project_dir, cache_dir) = create_temp_npm_dirs("aegiscudo-live-npm-fallback");
@@ -3977,9 +3989,14 @@ mod tests {
             .expect("read package-lock.json");
         let package_lock: serde_json::Value =
             serde_json::from_str(&package_lock).expect("parse package-lock.json");
-        let locked_dependency = &package_lock["packages"]["node_modules/aegiscudo-benign-npm-fixture"];
+        let locked_dependency =
+            &package_lock["packages"]["node_modules/aegiscudo-benign-npm-fixture"];
         assert_eq!(locked_dependency["version"], "1.2.0");
-        assert!(locked_dependency["integrity"].as_str().is_some_and(|value| !value.is_empty()));
+        assert!(
+            locked_dependency["integrity"]
+                .as_str()
+                .is_some_and(|value| !value.is_empty())
+        );
 
         let npm_ci = Command::new("npm")
             .args([
@@ -4089,7 +4106,10 @@ mod tests {
             ],
             &installed_version,
         );
-        assert_eq!(String::from_utf8_lossy(&installed_version.stdout).trim(), "1.0.0");
+        assert_eq!(
+            String::from_utf8_lossy(&installed_version.stdout).trim(),
+            "1.0.0"
+        );
 
         let _ = fs::remove_dir_all(&project_dir);
         let _ = fs::remove_dir_all(&cache_dir);
@@ -4101,10 +4121,7 @@ mod tests {
         let repo_root = repo_root();
         recreate_live_local_proxy_stack(&repo_root);
 
-        let package_name = format!(
-            "aegiscudo-unknown-npm-fixture-{}",
-            Uuid::now_v7().simple()
-        );
+        let package_name = format!("aegiscudo-unknown-npm-fixture-{}", Uuid::now_v7().simple());
         let package_version = "0.0.1";
         assert_eq!(live_analysis_job_count(&package_name, package_version), 0);
 
@@ -4137,12 +4154,14 @@ mod tests {
             chrono::Utc::now() + chrono::Duration::hours(1),
         );
 
-        let tarball_url =
-            "http://127.0.0.1:18000/proxy/npm-fixtures/fresh-postinstall/-/fresh-postinstall-0.1.0.tgz";
+        let tarball_url = "http://127.0.0.1:18000/proxy/npm-fixtures/fresh-postinstall/-/fresh-postinstall-0.1.0.tgz";
         let (allowed_status, _allowed_body) = fetch_bytes(tarball_url);
         assert_eq!(allowed_status, StatusCode::OK);
 
-        update_live_override_expiry(override_id, chrono::Utc::now() - chrono::Duration::minutes(1));
+        update_live_override_expiry(
+            override_id,
+            chrono::Utc::now() - chrono::Duration::minutes(1),
+        );
         recreate_live_local_proxy_stack(&repo_root);
 
         let (blocked_status, blocked_body) = fetch_bytes(tarball_url);

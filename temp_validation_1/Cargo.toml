@@ -1,0 +1,6 @@
+[workspace]
+members = ["member1"]
+resolver = "2"
+[workspace.package]
+name = "workspace-root"
+version = "0.1.0"

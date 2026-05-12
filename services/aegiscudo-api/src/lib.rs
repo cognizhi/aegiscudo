@@ -1,4 +1,4 @@
-use std::{collections::HashMap, time::Duration};
+use std::{collections::{HashMap, HashSet}, time::Duration};
 
 use aegiscudo_core::{
     ArtifactDigest, AuditEvent, Metadata, PackageCoordinate, PackageEcosystem, PolicyDecision,
@@ -18,6 +18,7 @@ use axum::{
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Row, postgres::PgPoolOptions, types::Json as SqlJson};
 #[cfg(test)]
 use std::sync::Arc;
@@ -98,13 +99,14 @@ pub struct DecisionClient {
 
 #[derive(Clone)]
 enum DecisionClientInner {
-    Http { client: reqwest::Client, url: String },
+    Http {
+        client: reqwest::Client,
+        url: String,
+    },
     #[cfg(test)]
     Test {
         handler: Arc<
-            dyn Fn(DecisionRequest) -> Result<DecisionResponse, DecisionClientError>
-                + Send
-                + Sync,
+            dyn Fn(DecisionRequest) -> Result<DecisionResponse, DecisionClientError> + Send + Sync,
         >,
     },
 }
@@ -117,7 +119,9 @@ impl std::fmt::Debug for DecisionClient {
 
 impl DecisionClient {
     pub fn new(url: impl Into<String>) -> Result<Self, reqwest::Error> {
-        let client = reqwest::Client::builder().timeout(DECISION_TIMEOUT).build()?;
+        let client = reqwest::Client::builder()
+            .timeout(DECISION_TIMEOUT)
+            .build()?;
         Ok(Self {
             inner: DecisionClientInner::Http {
                 client,
@@ -135,14 +139,16 @@ impl DecisionClient {
         &self,
         request: DecisionRequest,
     ) -> Result<DecisionResponse, DecisionClientError> {
-        self.execute_request("/v1/decisions/evaluate", request).await
+        self.execute_request("/v1/decisions/evaluate", request)
+            .await
     }
 
     async fn simulate(
         &self,
         request: DecisionRequest,
     ) -> Result<DecisionResponse, DecisionClientError> {
-        self.execute_request("/v1/decisions/simulate", request).await
+        self.execute_request("/v1/decisions/simulate", request)
+            .await
     }
 
     async fn execute_request(
@@ -342,13 +348,18 @@ fn app_with_clients_and_auth_config(
             get(export_audit_events_csv),
         )
         .route(
+            "/v1/tenants/{tenant_id}/openvex-documents",
+            get(list_openvex_documents).post(create_openvex_document),
+        )
+        .route(
+            "/v1/tenants/{tenant_id}/openvex-documents/{openvex_document_id}",
+            get(get_openvex_document),
+        )
+        .route(
             "/v1/tenants/{tenant_id}/ai-providers",
             get(list_ai_providers),
         )
-        .route(
-            "/v1/tenants/{tenant_id}/llm-usage",
-            get(get_llm_usage),
-        )
+        .route("/v1/tenants/{tenant_id}/llm-usage", get(get_llm_usage))
         .with_state(state)
 }
 
@@ -379,14 +390,17 @@ impl RegistryAdapterDto {
         matches!(self, Self::Npm | Self::Pypi)
     }
 
-    fn from_ecosystem(ecosystem: PackageEcosystem) -> Self {
+    fn from_ecosystem(ecosystem: PackageEcosystem) -> Result<Self, ApiError> {
         match ecosystem {
-            PackageEcosystem::Npm => Self::Npm,
-            PackageEcosystem::Pypi => Self::Pypi,
-            PackageEcosystem::Cargo => Self::Cargo,
-            PackageEcosystem::Maven => Self::Maven,
-            PackageEcosystem::DockerOci => Self::DockerOci,
-            PackageEcosystem::GenericHttp => Self::GenericHttp,
+            PackageEcosystem::Npm => Ok(Self::Npm),
+            PackageEcosystem::Pypi => Ok(Self::Pypi),
+            PackageEcosystem::Cargo => Ok(Self::Cargo),
+            PackageEcosystem::Maven => Ok(Self::Maven),
+            PackageEcosystem::DockerOci => Ok(Self::DockerOci),
+            PackageEcosystem::GenericHttp => Ok(Self::GenericHttp),
+            PackageEcosystem::GithubActions => Err(ApiError::InvalidRequest(
+                "githubactions packages do not map to a registry adapter".to_owned(),
+            )),
         }
     }
 }
@@ -545,6 +559,91 @@ pub struct RegistryConfigResponse {
     pub updated_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum OpenVexExpiryMode {
+    Never,
+    ExpiresAt,
+}
+
+impl OpenVexExpiryMode {
+    fn as_db(self) -> &'static str {
+        match self {
+            Self::Never => "never",
+            Self::ExpiresAt => "expires_at",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OpenVexExpiryPolicyRequest {
+    pub mode: OpenVexExpiryMode,
+    #[serde(default)]
+    pub expires_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CreateOpenVexDocumentRequest {
+    pub source: String,
+    pub document: Value,
+    #[serde(default = "default_openvex_expiry_policy")]
+    pub expiry_policy: OpenVexExpiryPolicyRequest,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OpenVexExpiryPolicyResponse {
+    pub mode: OpenVexExpiryMode,
+    #[serde(default)]
+    pub expires_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct OpenVexDocumentSummaryResponse {
+    pub id: Uuid,
+    pub tenant_id: Uuid,
+    pub source: String,
+    pub document_id: String,
+    pub author: String,
+    pub context: String,
+    pub version: i64,
+    pub document_timestamp: DateTime<Utc>,
+    pub imported_at: DateTime<Utc>,
+    pub expiry_policy: OpenVexExpiryPolicyResponse,
+    pub document_digest: String,
+    pub statement_count: i32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct OpenVexDocumentResponse {
+    #[serde(flatten)]
+    pub summary: OpenVexDocumentSummaryResponse,
+    pub document: Value,
+}
+
+#[derive(Debug, Clone)]
+struct ValidatedOpenVexDocument {
+    context: String,
+    document_id: String,
+    author: String,
+    version: i64,
+    document_timestamp: DateTime<Utc>,
+    statement_count: i32,
+    statements: Vec<ValidatedOpenVexStatement>,
+}
+
+#[derive(Debug, Clone)]
+struct ValidatedOpenVexStatement {
+    statement_index: i32,
+    vulnerability_id: String,
+    status: String,
+    product_id: String,
+    justification: Option<String>,
+    impact_statement: Option<String>,
+    action_statement: Option<String>,
+    statement_timestamp: Option<DateTime<Utc>>,
+    raw_statement: Value,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CliScanRequest {
     #[serde(default)]
@@ -573,6 +672,8 @@ pub struct CliScanFindingResponse {
     #[serde(default)]
     pub artifact_sha256: Option<String>,
     pub decision: PolicyDecision,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decision_timestamp: Option<DateTime<Utc>>,
     pub trace_id: String,
     pub rationale: Vec<String>,
     #[serde(default)]
@@ -925,8 +1026,12 @@ async fn get_auth_session(
         Some(actor_id) => load_auth_subject_by_user_id(&state.pool, actor_id).await?,
         None if headers.contains_key(ACTOR_HEADER) => return Err(ApiError::MissingActor),
         None => {
-            load_mock_identity_subject(&state.pool, state.local_auth_tenant_id, DEFAULT_MOCK_IDENTITY_ID)
-                .await?
+            load_mock_identity_subject(
+                &state.pool,
+                state.local_auth_tenant_id,
+                DEFAULT_MOCK_IDENTITY_ID,
+            )
+            .await?
         }
     };
 
@@ -1008,11 +1113,13 @@ async fn submit_cli_scan(
                 },
             })
             .await?;
+        let decision_timestamp = Utc::now();
 
         findings.push(CliScanFindingResponse {
             coordinate: package.coordinate,
             artifact_sha256: package.artifact_sha256,
             decision: decision.decision,
+            decision_timestamp: Some(decision_timestamp),
             trace_id: decision.trace_id,
             rationale: decision.rationale,
             fallback_coordinate: decision.fallback_coordinate,
@@ -1120,7 +1227,10 @@ async fn explain_cli_package(
     .bind(analysis_job_id)
     .fetch_optional(&state.pool)
     .await?
-    .map(|row| row.try_get::<SqlJson<Value>, _>("explanation").map(|value| value.0))
+    .map(|row| {
+        row.try_get::<SqlJson<Value>, _>("explanation")
+            .map(|value| value.0)
+    })
     .transpose()?;
 
     Ok(Json(CliExplainResponse {
@@ -1144,10 +1254,10 @@ async fn explain_cli_package(
 }
 
 async fn list_quarantine_queue(
-        State(state): State<AppState>,
-        Path(tenant_id): Path<Uuid>,
+    State(state): State<AppState>,
+    Path(tenant_id): Path<Uuid>,
 ) -> Result<Json<Vec<QuarantineQueueItemResponse>>, ApiError> {
-        let rows = sqlx::query(
+    let rows = sqlx::query(
                 r#"
                 SELECT summaries.analysis_job_id,
                              summaries.artifact_id,
@@ -1202,18 +1312,18 @@ async fn list_quarantine_queue(
         .fetch_all(&state.pool)
         .await?;
 
-        let items = rows
-                .iter()
-                .map(quarantine_queue_item_from_row)
-                .collect::<Result<Vec<_>, _>>()?;
-        Ok(Json(items))
+    let items = rows
+        .iter()
+        .map(quarantine_queue_item_from_row)
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(Json(items))
 }
 
 async fn list_request_timeline(
-        State(state): State<AppState>,
-        Path(tenant_id): Path<Uuid>,
+    State(state): State<AppState>,
+    Path(tenant_id): Path<Uuid>,
 ) -> Result<Json<Vec<RequestTimelineBucketResponse>>, ApiError> {
-        let rows = sqlx::query(
+    let rows = sqlx::query(
                 r#"
                 WITH tenant_summaries AS (
                     SELECT summaries.created_at, summaries.recommended_action
@@ -1266,11 +1376,11 @@ async fn list_request_timeline(
         .fetch_all(&state.pool)
         .await?;
 
-        let items = rows
-                .iter()
-                .map(request_timeline_bucket_from_row)
-                .collect::<Result<Vec<_>, _>>()?;
-        Ok(Json(items))
+    let items = rows
+        .iter()
+        .map(request_timeline_bucket_from_row)
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(Json(items))
 }
 
 async fn get_dashboard_metrics(
@@ -1339,7 +1449,8 @@ async fn get_dashboard_metrics(
     .fetch_one(&state.pool)
     .await?;
 
-    let feed_snapshot_age_seconds: Option<i64> = feed_snapshot_row.try_get("snapshot_age_seconds")?;
+    let feed_snapshot_age_seconds: Option<i64> =
+        feed_snapshot_row.try_get("snapshot_age_seconds")?;
     let feed_freshness = match feed_snapshot_age_seconds {
         Some(age_seconds) if age_seconds <= 86_400 => DashboardFeedFreshness::Fresh,
         Some(_) => DashboardFeedFreshness::Stale,
@@ -1492,15 +1603,15 @@ async fn simulate_policy_replay(
         let baseline_policy_profile_id: Uuid = row.try_get("baseline_policy_profile_id")?;
         let baseline_policy_profile_name: String = row.try_get("baseline_policy_profile_name")?;
         let baseline_decision = policy_decision_from_db(row.try_get("baseline_decision")?)?;
-        let baseline_rationale = string_list_from_json_value(
-            row.try_get::<SqlJson<Value>, _>("baseline_rationale")?.0,
-        );
+        let baseline_rationale =
+            string_list_from_json_value(row.try_get::<SqlJson<Value>, _>("baseline_rationale")?.0);
         let requested_digest = row
             .try_get::<Option<String>, _>("requested_digest")?
             .map(|hex| {
                 ArtifactDigest::sha256(hex).map_err(|_| {
                     ApiError::InvalidRequest(
-                        "stored requested digest is invalid for policy simulation replay".to_owned(),
+                        "stored requested digest is invalid for policy simulation replay"
+                            .to_owned(),
                     )
                 })
             })
@@ -1584,11 +1695,11 @@ async fn simulate_policy_replay(
 }
 
 async fn get_artifact_evidence(
-        State(state): State<AppState>,
-        Path((tenant_id, artifact_id)): Path<(Uuid, Uuid)>,
+    State(state): State<AppState>,
+    Path((tenant_id, artifact_id)): Path<(Uuid, Uuid)>,
 ) -> Result<Json<ArtifactEvidenceResponse>, ApiError> {
-        let summary_row = sqlx::query(
-                r#"
+    let summary_row = sqlx::query(
+        r#"
                 SELECT summaries.analysis_job_id,
                              summaries.artifact_id,
                              jobs.trace_id,
@@ -1609,99 +1720,108 @@ async fn get_artifact_evidence(
                 ORDER BY summaries.created_at DESC
                 LIMIT 1
                 "#,
-        )
-        .bind(tenant_id)
-        .bind(artifact_id)
-        .fetch_optional(&state.pool)
-        .await?
-        .ok_or(ApiError::NotFound)?;
+    )
+    .bind(tenant_id)
+    .bind(artifact_id)
+    .fetch_optional(&state.pool)
+    .await?
+    .ok_or(ApiError::NotFound)?;
 
-        let analysis_job_id: Uuid = summary_row.try_get("analysis_job_id")?;
-        let trace_id: String = summary_row.try_get("trace_id")?;
-        let resource = format!("analysis-job/{analysis_job_id}");
+    let analysis_job_id: Uuid = summary_row.try_get("analysis_job_id")?;
+    let trace_id: String = summary_row.try_get("trace_id")?;
+    let resource = format!("analysis-job/{analysis_job_id}");
 
-        let static_reports = sqlx::query(
-                r#"
+    let static_reports = sqlx::query(
+        r#"
                 SELECT report
                 FROM static_analysis_reports
                 WHERE analysis_job_id = $1
                     AND artifact_id = $2
                 ORDER BY created_at ASC
                 "#,
-        )
-        .bind(analysis_job_id)
-        .bind(artifact_id)
-        .fetch_all(&state.pool)
-        .await?
-        .into_iter()
-        .map(|row| row.try_get::<SqlJson<Value>, _>("report").map(|value| value.0))
-        .collect::<Result<Vec<_>, _>>()?;
+    )
+    .bind(analysis_job_id)
+    .bind(artifact_id)
+    .fetch_all(&state.pool)
+    .await?
+    .into_iter()
+    .map(|row| {
+        row.try_get::<SqlJson<Value>, _>("report")
+            .map(|value| value.0)
+    })
+    .collect::<Result<Vec<_>, _>>()?;
 
-        let sandbox_runs = sqlx::query(
-                r#"
+    let sandbox_runs = sqlx::query(
+        r#"
                 SELECT telemetry
                 FROM sandbox_runs
                 WHERE analysis_job_id = $1
                     AND artifact_id = $2
                 ORDER BY started_at ASC NULLS LAST, completed_at ASC NULLS LAST
                 "#,
-        )
-        .bind(analysis_job_id)
-        .bind(artifact_id)
-        .fetch_all(&state.pool)
-        .await?
-        .into_iter()
-        .map(|row| row.try_get::<SqlJson<Value>, _>("telemetry").map(|value| value.0))
-        .collect::<Result<Vec<_>, _>>()?;
+    )
+    .bind(analysis_job_id)
+    .bind(artifact_id)
+    .fetch_all(&state.pool)
+    .await?
+    .into_iter()
+    .map(|row| {
+        row.try_get::<SqlJson<Value>, _>("telemetry")
+            .map(|value| value.0)
+    })
+    .collect::<Result<Vec<_>, _>>()?;
 
-        let ai_explanation = sqlx::query(
-                r#"
+    let ai_explanation = sqlx::query(
+        r#"
                 SELECT explanation
                 FROM ai_explanations
                 WHERE analysis_job_id = $1
                 ORDER BY created_at DESC
                 LIMIT 1
                 "#,
-        )
-        .bind(analysis_job_id)
-        .fetch_optional(&state.pool)
-        .await?
-        .map(|row| row.try_get::<SqlJson<Value>, _>("explanation").map(|value| value.0))
-        .transpose()?;
+    )
+    .bind(analysis_job_id)
+    .fetch_optional(&state.pool)
+    .await?
+    .map(|row| {
+        row.try_get::<SqlJson<Value>, _>("explanation")
+            .map(|value| value.0)
+    })
+    .transpose()?;
 
-        let audit_events = sqlx::query(
-                r#"
+    let audit_events = sqlx::query(
+        r#"
                 SELECT id, tenant_id, actor, action, resource, trace_id, metadata, occurred_at
                 FROM audit_events
                 WHERE tenant_id = $1
                     AND (resource = $2 OR trace_id = $3)
                 ORDER BY occurred_at ASC, id ASC
                 "#,
-        )
-        .bind(tenant_id)
-        .bind(&resource)
-        .bind(&trace_id)
-        .fetch_all(&state.pool)
-        .await?
-        .iter()
-        .map(audit_event_from_row)
-        .collect::<Result<Vec<_>, _>>()?;
+    )
+    .bind(tenant_id)
+    .bind(&resource)
+    .bind(&trace_id)
+    .fetch_all(&state.pool)
+    .await?
+    .iter()
+    .map(audit_event_from_row)
+    .collect::<Result<Vec<_>, _>>()?;
 
-        Ok(Json(ArtifactEvidenceResponse {
-                analysis_job_id,
-                artifact_id,
-                trace_id,
-                coordinate: coordinate_summary_from_row(&summary_row)?,
-                artifact_sha256: summary_row.try_get("artifact_sha256")?,
-                recommended_action: summary_row.try_get("recommended_action")?,
-                confidence: summary_row.try_get("confidence")?,
-                requires_hitl: summary_row.try_get("requires_hitl")?,
-                summary: summary_row.try_get::<SqlJson<Value>, _>("summary")?.0,
-                static_reports,
-                sandbox_runs,
-                ai_explanation,
-                audit_events,
-        }))
+    Ok(Json(ArtifactEvidenceResponse {
+        analysis_job_id,
+        artifact_id,
+        trace_id,
+        coordinate: coordinate_summary_from_row(&summary_row)?,
+        artifact_sha256: summary_row.try_get("artifact_sha256")?,
+        recommended_action: summary_row.try_get("recommended_action")?,
+        confidence: summary_row.try_get("confidence")?,
+        requires_hitl: summary_row.try_get("requires_hitl")?,
+        summary: summary_row.try_get::<SqlJson<Value>, _>("summary")?.0,
+        static_reports,
+        sandbox_runs,
+        ai_explanation,
+        audit_events,
+    }))
 }
 
 async fn list_artifact_static_analysis_reports(
@@ -1743,7 +1863,10 @@ async fn list_artifact_static_analysis_reports(
     .fetch_all(&state.pool)
     .await?
     .into_iter()
-    .map(|row| row.try_get::<SqlJson<Value>, _>("report").map(|value| value.0))
+    .map(|row| {
+        row.try_get::<SqlJson<Value>, _>("report")
+            .map(|value| value.0)
+    })
     .collect::<Result<Vec<_>, _>>()?;
 
     Ok(Json(ArtifactStaticAnalysisReportsResponse {
@@ -1793,7 +1916,10 @@ async fn list_artifact_sandbox_execution_reports(
     .fetch_all(&state.pool)
     .await?
     .into_iter()
-    .map(|row| row.try_get::<SqlJson<Value>, _>("telemetry").map(|value| value.0))
+    .map(|row| {
+        row.try_get::<SqlJson<Value>, _>("telemetry")
+            .map(|value| value.0)
+    })
     .collect::<Result<Vec<_>, _>>()?;
 
     Ok(Json(ArtifactSandboxExecutionReportsResponse {
@@ -1805,10 +1931,10 @@ async fn list_artifact_sandbox_execution_reports(
 }
 
 async fn list_overrides(
-        State(state): State<AppState>,
-        Path(tenant_id): Path<Uuid>,
+    State(state): State<AppState>,
+    Path(tenant_id): Path<Uuid>,
 ) -> Result<Json<Vec<OverrideQueueItemResponse>>, ApiError> {
-        let rows = sqlx::query(
+    let rows = sqlx::query(
                 r#"
                 SELECT overrides.id,
                              overrides.scope,
@@ -1842,11 +1968,11 @@ async fn list_overrides(
         .fetch_all(&state.pool)
         .await?;
 
-        let items = rows
-                .iter()
-                .map(override_queue_item_from_row)
-                .collect::<Result<Vec<_>, _>>()?;
-        Ok(Json(items))
+    let items = rows
+        .iter()
+        .map(override_queue_item_from_row)
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(Json(items))
 }
 
 async fn create_override(
@@ -2608,7 +2734,9 @@ async fn list_audit_events(
     let actor_id = actor_id_from_headers(&headers).ok_or(ApiError::MissingActor)?;
     ensure_override_manager(&state.pool, tenant_id, actor_id).await?;
     let filters = audit_event_filters(&params);
-    Ok(Json(load_audit_events(&state.pool, tenant_id, &filters).await?))
+    Ok(Json(
+        load_audit_events(&state.pool, tenant_id, &filters).await?,
+    ))
 }
 
 async fn export_audit_events_csv(
@@ -2628,10 +2756,193 @@ async fn export_audit_events_csv(
     );
     response.headers_mut().insert(
         header::CONTENT_DISPOSITION,
-        HeaderValue::from_str(&format!("attachment; filename=\"audit-events-{tenant_id}.csv\""))
-            .expect("valid content disposition"),
+        HeaderValue::from_str(&format!(
+            "attachment; filename=\"audit-events-{tenant_id}.csv\""
+        ))
+        .expect("valid content disposition"),
     );
     Ok(response)
+}
+
+async fn list_openvex_documents(
+    State(state): State<AppState>,
+    Path(tenant_id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<OpenVexDocumentSummaryResponse>>, ApiError> {
+    let actor_id = actor_id_from_headers(&headers).ok_or(ApiError::MissingActor)?;
+    ensure_override_manager(&state.pool, tenant_id, actor_id).await?;
+    let rows = sqlx::query(
+        r#"
+        SELECT id, tenant_id, source, document_id, author, context, version,
+               document_timestamp, imported_at, expiry_mode, expires_at,
+               document_digest, statement_count
+        FROM openvex_documents
+        WHERE tenant_id = $1
+        ORDER BY imported_at DESC, id DESC
+        "#,
+    )
+    .bind(tenant_id)
+    .fetch_all(&state.pool)
+    .await?;
+
+    rows.iter()
+        .map(openvex_document_summary_from_row)
+        .collect::<Result<Vec<_>, _>>()
+        .map(Json)
+}
+
+async fn get_openvex_document(
+    State(state): State<AppState>,
+    Path((tenant_id, openvex_document_id)): Path<(Uuid, Uuid)>,
+    headers: HeaderMap,
+) -> Result<Json<OpenVexDocumentResponse>, ApiError> {
+    let actor_id = actor_id_from_headers(&headers).ok_or(ApiError::MissingActor)?;
+    ensure_override_manager(&state.pool, tenant_id, actor_id).await?;
+    let row = sqlx::query(
+        r#"
+        SELECT id, tenant_id, source, document_id, author, context, version,
+               document_timestamp, imported_at, expiry_mode, expires_at,
+               document_digest, statement_count, document
+        FROM openvex_documents
+        WHERE tenant_id = $1 AND id = $2
+        "#,
+    )
+    .bind(tenant_id)
+    .bind(openvex_document_id)
+    .fetch_optional(&state.pool)
+    .await?
+    .ok_or(ApiError::NotFound)?;
+
+    Ok(Json(openvex_document_from_row(&row)?))
+}
+
+async fn create_openvex_document(
+    State(state): State<AppState>,
+    Path(tenant_id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(request): Json<CreateOpenVexDocumentRequest>,
+) -> Result<Json<OpenVexDocumentResponse>, ApiError> {
+    let actor_id = actor_id_from_headers(&headers).ok_or(ApiError::MissingActor)?;
+    ensure_override_manager(&state.pool, tenant_id, actor_id).await?;
+    let validated = validate_openvex_request(&request)?;
+    let source = request.source.trim().to_owned();
+    let document_bytes = serde_json::to_vec(&request.document)
+        .map_err(|error| ApiError::InvalidRequest(format!("document must be valid JSON: {error}")))?;
+    let document_digest = hex_sha256(&document_bytes);
+    let imported_at = Utc::now();
+    let openvex_document_id = Uuid::now_v7();
+    let audit_event = build_audit_event(
+        tenant_id,
+        actor_label(actor_id),
+        "openvex.document.imported",
+        &format!("openvex-document/{openvex_document_id}"),
+        trace_id(&headers),
+        Metadata::from([
+            ("source".to_owned(), json!(source.clone())),
+            (
+                "document_id".to_owned(),
+                json!(validated.document_id.clone()),
+            ),
+            (
+                "statement_count".to_owned(),
+                json!(validated.statement_count),
+            ),
+            (
+                "expiry_mode".to_owned(),
+                json!(request.expiry_policy.mode.as_db()),
+            ),
+            (
+                "expires_at".to_owned(),
+                json!(request.expiry_policy.expires_at),
+            ),
+            (
+                "document_digest".to_owned(),
+                json!(document_digest.clone()),
+            ),
+        ]),
+    )?;
+
+    let mut transaction = state.pool.begin().await?;
+    sqlx::query(
+        r#"
+        INSERT INTO openvex_documents (
+          id, tenant_id, source, document_id, author, context, version,
+          document_timestamp, imported_at, expiry_mode, expires_at,
+          document_digest, statement_count, document
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+        "#,
+    )
+    .bind(openvex_document_id)
+    .bind(tenant_id)
+    .bind(&source)
+    .bind(&validated.document_id)
+    .bind(&validated.author)
+    .bind(&validated.context)
+    .bind(validated.version)
+    .bind(validated.document_timestamp)
+    .bind(imported_at)
+    .bind(request.expiry_policy.mode.as_db())
+    .bind(request.expiry_policy.expires_at)
+    .bind(&document_digest)
+    .bind(validated.statement_count)
+    .bind(SqlJson(request.document.clone()))
+    .execute(&mut *transaction)
+    .await?;
+
+    for statement in &validated.statements {
+        sqlx::query(
+            r#"
+            INSERT INTO openvex_statements (
+              id, openvex_document_id, tenant_id, statement_index, vulnerability_id,
+              status, product_id, justification, impact_statement, action_statement,
+              statement_timestamp, raw_statement
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+            "#,
+        )
+        .bind(Uuid::now_v7())
+        .bind(openvex_document_id)
+        .bind(tenant_id)
+        .bind(statement.statement_index)
+        .bind(&statement.vulnerability_id)
+        .bind(&statement.status)
+        .bind(&statement.product_id)
+        .bind(statement.justification.as_deref())
+        .bind(statement.impact_statement.as_deref())
+        .bind(statement.action_statement.as_deref())
+        .bind(statement.statement_timestamp)
+        .bind(SqlJson(statement.raw_statement.clone()))
+        .execute(&mut *transaction)
+        .await?;
+    }
+
+    insert_audit_event(&mut *transaction, audit_event).await?;
+
+    transaction.commit().await?;
+
+    let response = OpenVexDocumentResponse {
+        summary: OpenVexDocumentSummaryResponse {
+            id: openvex_document_id,
+            tenant_id,
+            source,
+            document_id: validated.document_id.clone(),
+            author: validated.author.clone(),
+            context: validated.context.clone(),
+            version: validated.version,
+            document_timestamp: validated.document_timestamp,
+            imported_at,
+            expiry_policy: OpenVexExpiryPolicyResponse {
+                mode: request.expiry_policy.mode,
+                expires_at: request.expiry_policy.expires_at,
+            },
+            document_digest: document_digest.clone(),
+            statement_count: validated.statement_count,
+        },
+        document: request.document,
+    };
+
+    Ok(Json(response))
 }
 
 fn audit_event_filters(params: &HashMap<String, String>) -> AuditEventFilters {
@@ -3107,7 +3418,10 @@ fn role_can_manage_control_plane(role: &str) -> bool {
 }
 
 fn role_can_view_llm_usage(role: &str) -> bool {
-    matches!(role.trim().to_ascii_lowercase().as_str(), "admin" | "platform-admin")
+    matches!(
+        role.trim().to_ascii_lowercase().as_str(),
+        "admin" | "platform-admin"
+    )
 }
 
 async fn expire_overrides(
@@ -3232,17 +3546,16 @@ async fn audit_credential_action(
     .await
 }
 
-async fn audit(
-    pool: &PgPool,
+fn build_audit_event(
     tenant_id: Uuid,
     actor: String,
     action: &'static str,
     resource: &str,
     trace_id: String,
     metadata: Metadata,
-) -> Result<(), ApiError> {
+) -> Result<AuditEvent, ApiError> {
     validate_audit_metadata(&metadata).map_err(ApiError::InvalidRequest)?;
-    let event = AuditEvent {
+    Ok(AuditEvent {
         id: Uuid::now_v7(),
         tenant_id,
         actor,
@@ -3251,7 +3564,13 @@ async fn audit(
         trace_id,
         occurred_at: Utc::now(),
         metadata,
-    };
+    })
+}
+
+async fn insert_audit_event<'a, E>(executor: E, event: AuditEvent) -> Result<(), sqlx::Error>
+where
+    E: sqlx::Executor<'a, Database = sqlx::Postgres>,
+{
     sqlx::query(
         r#"
         INSERT INTO audit_events (id, tenant_id, actor, action, resource, trace_id, metadata, occurred_at)
@@ -3266,8 +3585,22 @@ async fn audit(
     .bind(&event.trace_id)
     .bind(SqlJson(event.metadata))
     .bind(event.occurred_at)
-    .execute(pool)
+    .execute(executor)
     .await?;
+    Ok(())
+}
+
+async fn audit(
+    pool: &PgPool,
+    tenant_id: Uuid,
+    actor: String,
+    action: &'static str,
+    resource: &str,
+    trace_id: String,
+    metadata: Metadata,
+) -> Result<(), ApiError> {
+    let event = build_audit_event(tenant_id, actor, action, resource, trace_id, metadata)?;
+    insert_audit_event(pool, event).await?;
     Ok(())
 }
 
@@ -3358,50 +3691,48 @@ fn validate_adapter_phase(adapter: RegistryAdapterDto) -> Result<(), ApiError> {
     }
 }
 
-    fn validate_cli_scan_request(request: &CliScanRequest) -> Result<PackageEcosystem, ApiError> {
-        let first = request.packages.first().ok_or_else(|| {
-            ApiError::InvalidRequest("cli scan request must include at least one package".to_owned())
-        })?;
-        let ecosystem = first.coordinate.ecosystem.clone();
-        let adapter = RegistryAdapterDto::from_ecosystem(ecosystem.clone());
-        if !adapter.phase_1a_supported() {
-            return Err(ApiError::InvalidRequest(
-                "cli scan currently supports npm and pypi packages only".to_owned(),
-            ));
-        }
-        if request
-            .packages
-            .iter()
-            .any(|package| package.coordinate.ecosystem != ecosystem)
-        {
-            return Err(ApiError::InvalidRequest(
-                "cli scan request packages must all share the same ecosystem".to_owned(),
-            ));
-        }
-        Ok(ecosystem)
+fn validate_cli_scan_request(request: &CliScanRequest) -> Result<PackageEcosystem, ApiError> {
+    let first = request.packages.first().ok_or_else(|| {
+        ApiError::InvalidRequest("cli scan request must include at least one package".to_owned())
+    })?;
+    let ecosystem = first.coordinate.ecosystem.clone();
+    let adapter = RegistryAdapterDto::from_ecosystem(ecosystem.clone()).map_err(|_| {
+        ApiError::InvalidRequest("cli scan currently supports npm and pypi packages only".to_owned())
+    })?;
+    if !adapter.phase_1a_supported() {
+        return Err(ApiError::InvalidRequest(
+            "cli scan currently supports npm and pypi packages only".to_owned(),
+        ));
     }
-
-    fn parse_requested_digest(value: Option<&str>) -> Result<Option<ArtifactDigest>, ApiError> {
-        value
-            .map(ArtifactDigest::sha256)
-            .transpose()
-            .map_err(|_| {
-                ApiError::InvalidRequest(
-                    "artifact_sha256 must contain exactly 64 lowercase hexadecimal characters"
-                        .to_owned(),
-                )
-            })
+    if request
+        .packages
+        .iter()
+        .any(|package| package.coordinate.ecosystem != ecosystem)
+    {
+        return Err(ApiError::InvalidRequest(
+            "cli scan request packages must all share the same ecosystem".to_owned(),
+        ));
     }
+    Ok(ecosystem)
+}
 
-    async fn resolve_cli_scan_registry_context(
-        pool: &PgPool,
-        tenant_id: Option<Uuid>,
-        ecosystem: PackageEcosystem,
-    ) -> Result<CliScanRegistryContext, ApiError> {
-        let adapter = RegistryAdapterDto::from_ecosystem(ecosystem);
-        let row = if let Some(tenant_id) = tenant_id {
-            sqlx::query(
-                r#"
+fn parse_requested_digest(value: Option<&str>) -> Result<Option<ArtifactDigest>, ApiError> {
+    value.map(ArtifactDigest::sha256).transpose().map_err(|_| {
+        ApiError::InvalidRequest(
+            "artifact_sha256 must contain exactly 64 lowercase hexadecimal characters".to_owned(),
+        )
+    })
+}
+
+async fn resolve_cli_scan_registry_context(
+    pool: &PgPool,
+    tenant_id: Option<Uuid>,
+    ecosystem: PackageEcosystem,
+) -> Result<CliScanRegistryContext, ApiError> {
+    let adapter = RegistryAdapterDto::from_ecosystem(ecosystem)?;
+    let row = if let Some(tenant_id) = tenant_id {
+        sqlx::query(
+            r#"
                 SELECT id, tenant_id, policy_profile_id
                 FROM registry_configs
                 WHERE tenant_id = $1
@@ -3411,14 +3742,14 @@ fn validate_adapter_phase(adapter: RegistryAdapterDto) -> Result<(), ApiError> {
                 ORDER BY created_at ASC, id ASC
                 LIMIT 1
                 "#,
-            )
-            .bind(tenant_id)
-            .bind(adapter.as_db())
-            .fetch_optional(pool)
-            .await?
-        } else {
-            sqlx::query(
-                r#"
+        )
+        .bind(tenant_id)
+        .bind(adapter.as_db())
+        .fetch_optional(pool)
+        .await?
+    } else {
+        sqlx::query(
+            r#"
                 SELECT id, tenant_id, policy_profile_id
                 FROM registry_configs
                 WHERE adapter::text = $1
@@ -3427,19 +3758,19 @@ fn validate_adapter_phase(adapter: RegistryAdapterDto) -> Result<(), ApiError> {
                 ORDER BY created_at ASC, id ASC
                 LIMIT 1
                 "#,
-            )
-            .bind(adapter.as_db())
-            .fetch_optional(pool)
-            .await?
-        }
-        .ok_or(ApiError::NotFound)?;
-
-        Ok(CliScanRegistryContext {
-            registry_config_id: row.try_get("id")?,
-            tenant_id: row.try_get("tenant_id")?,
-            policy_profile_id: row.try_get("policy_profile_id")?,
-        })
+        )
+        .bind(adapter.as_db())
+        .fetch_optional(pool)
+        .await?
     }
+    .ok_or(ApiError::NotFound)?;
+
+    Ok(CliScanRegistryContext {
+        registry_config_id: row.try_get("id")?,
+        tenant_id: row.try_get("tenant_id")?,
+        policy_profile_id: row.try_get("policy_profile_id")?,
+    })
+}
 
 fn validate_mount_path(mount_path: &str) -> Result<(), ApiError> {
     let trimmed = mount_path.trim();
@@ -3639,6 +3970,37 @@ fn credential_response_from_row(
     })
 }
 
+fn openvex_document_summary_from_row(
+    row: &sqlx::postgres::PgRow,
+) -> Result<OpenVexDocumentSummaryResponse, ApiError> {
+    Ok(OpenVexDocumentSummaryResponse {
+        id: row.try_get("id")?,
+        tenant_id: row.try_get("tenant_id")?,
+        source: row.try_get("source")?,
+        document_id: row.try_get("document_id")?,
+        author: row.try_get("author")?,
+        context: row.try_get("context")?,
+        version: row.try_get("version")?,
+        document_timestamp: row.try_get("document_timestamp")?,
+        imported_at: row.try_get("imported_at")?,
+        expiry_policy: OpenVexExpiryPolicyResponse {
+            mode: openvex_expiry_mode_from_db(row.try_get("expiry_mode")?)?,
+            expires_at: row.try_get("expires_at")?,
+        },
+        document_digest: row.try_get("document_digest")?,
+        statement_count: row.try_get("statement_count")?,
+    })
+}
+
+fn openvex_document_from_row(
+    row: &sqlx::postgres::PgRow,
+) -> Result<OpenVexDocumentResponse, ApiError> {
+    Ok(OpenVexDocumentResponse {
+        summary: openvex_document_summary_from_row(row)?,
+        document: row.try_get::<SqlJson<Value>, _>("document")?.0,
+    })
+}
+
 fn coordinate_summary_from_row(
     row: &sqlx::postgres::PgRow,
 ) -> Result<PackageCoordinateSummaryResponse, ApiError> {
@@ -3798,6 +4160,16 @@ fn policy_mode_db_value(mode: &PolicyMode) -> &'static str {
     }
 }
 
+fn openvex_expiry_mode_from_db(value: String) -> Result<OpenVexExpiryMode, ApiError> {
+    match value.as_str() {
+        "never" => Ok(OpenVexExpiryMode::Never),
+        "expires_at" => Ok(OpenVexExpiryMode::ExpiresAt),
+        _ => Err(ApiError::InvalidRequest(
+            "invalid OpenVEX expiry mode in stored data".to_owned(),
+        )),
+    }
+}
+
 fn policy_decision_from_db(value: String) -> Result<PolicyDecision, ApiError> {
     match value.as_str() {
         "ALLOW" => Ok(PolicyDecision::Allow),
@@ -3953,7 +4325,10 @@ async fn load_mock_identity_subjects(
     pool: &PgPool,
     tenant_id: Uuid,
 ) -> Result<Vec<AuthSubjectResponse>, sqlx::Error> {
-    let emails: Vec<&str> = LOCAL_MOCK_IDENTITIES.iter().map(|identity| identity.email).collect();
+    let emails: Vec<&str> = LOCAL_MOCK_IDENTITIES
+        .iter()
+        .map(|identity| identity.email)
+        .collect();
     let rows = sqlx::query(
         r#"
         SELECT
@@ -3986,7 +4361,11 @@ async fn load_mock_identity_subjects(
 
     Ok(LOCAL_MOCK_IDENTITIES
         .iter()
-        .filter_map(|identity| identities_by_email.get(&identity.email.to_ascii_lowercase()).cloned())
+        .filter_map(|identity| {
+            identities_by_email
+                .get(&identity.email.to_ascii_lowercase())
+                .cloned()
+        })
         .collect())
 }
 
@@ -4034,7 +4413,8 @@ fn auth_subject_from_row(row: sqlx::postgres::PgRow) -> AuthSubjectResponse {
         display_name: row.try_get("display_name").unwrap(),
         email,
         roles: row.try_get("roles").unwrap_or_default(),
-        mock_identity_id: mock_identity_id_for_email(&row.try_get::<String, _>("email").unwrap()).map(str::to_owned),
+        mock_identity_id: mock_identity_id_for_email(&row.try_get::<String, _>("email").unwrap())
+            .map(str::to_owned),
     }
 }
 
@@ -4069,6 +4449,264 @@ fn default_auth_type() -> CredentialAuthTypeDto {
 
 fn default_credential_source() -> String {
     "environment".to_owned()
+}
+
+fn default_openvex_expiry_policy() -> OpenVexExpiryPolicyRequest {
+    OpenVexExpiryPolicyRequest {
+        mode: OpenVexExpiryMode::Never,
+        expires_at: None,
+    }
+}
+
+fn validate_openvex_request(
+    request: &CreateOpenVexDocumentRequest,
+) -> Result<ValidatedOpenVexDocument, ApiError> {
+    if request.source.trim().is_empty() {
+        return Err(ApiError::InvalidRequest(
+            "openvex source must not be blank".to_owned(),
+        ));
+    }
+    validate_openvex_expiry_policy(&request.expiry_policy)?;
+
+    let document = request.document.as_object().ok_or(ApiError::InvalidRequest(
+        "openvex document must be a JSON object".to_owned(),
+    ))?;
+    let context = required_non_empty_json_string(document.get("@context"), "document.@context")?;
+    if context != "https://openvex.dev/ns/v0.2.0" {
+        return Err(ApiError::InvalidRequest(
+            "document.@context must be https://openvex.dev/ns/v0.2.0".to_owned(),
+        ));
+    }
+
+    let document_id = required_non_empty_json_string(document.get("@id"), "document.@id")?;
+    let author = required_non_empty_json_string(document.get("author"), "document.author")?;
+    let version = document
+        .get("version")
+        .and_then(Value::as_i64)
+        .filter(|value| *value > 0)
+        .ok_or(ApiError::InvalidRequest(
+            "document.version must be a positive integer".to_owned(),
+        ))?;
+    let document_timestamp = parse_required_rfc3339_timestamp(
+        document.get("timestamp"),
+        "document.timestamp",
+    )?;
+
+    let statements = document
+        .get("statements")
+        .and_then(Value::as_array)
+        .ok_or(ApiError::InvalidRequest(
+            "document.statements must be an array".to_owned(),
+        ))?;
+    if statements.is_empty() {
+        return Err(ApiError::InvalidRequest(
+            "document.statements must contain at least one statement".to_owned(),
+        ));
+    }
+
+    let mut normalized_statements = Vec::new();
+    for (index, statement) in statements.iter().enumerate() {
+        let statement_path = format!("document.statements[{index}]");
+        let statement_object = statement.as_object().ok_or(ApiError::InvalidRequest(
+            format!("{statement_path} must be an object"),
+        ))?;
+
+        let vulnerability_id = statement_object
+            .get("vulnerability")
+            .and_then(Value::as_object)
+            .ok_or(ApiError::InvalidRequest(format!(
+                "{statement_path}.vulnerability must be an object"
+            )))
+            .and_then(|vulnerability| {
+                required_non_empty_json_string(
+                    vulnerability.get("name"),
+                    &format!("{statement_path}.vulnerability.name"),
+                )
+            })?;
+
+        let status = required_non_empty_json_string(
+            statement_object.get("status"),
+            &format!("{statement_path}.status"),
+        )?;
+        validate_openvex_status(&status, &format!("{statement_path}.status"))?;
+
+        let products = statement_object
+            .get("products")
+            .and_then(Value::as_array)
+            .ok_or(ApiError::InvalidRequest(format!(
+                "{statement_path}.products must be an array"
+            )))?;
+        if products.is_empty() {
+            return Err(ApiError::InvalidRequest(format!(
+                "{statement_path}.products must contain at least one product"
+            )));
+        }
+
+        let justification = optional_non_empty_json_string(
+            statement_object.get("justification"),
+            &format!("{statement_path}.justification"),
+        )?;
+        if let Some(value) = justification.as_deref() {
+            validate_openvex_justification(value, &format!("{statement_path}.justification"))?;
+        }
+        let impact_statement = optional_non_empty_json_string(
+            statement_object.get("impact_statement"),
+            &format!("{statement_path}.impact_statement"),
+        )?;
+        let action_statement = optional_non_empty_json_string(
+            statement_object.get("action_statement"),
+            &format!("{statement_path}.action_statement"),
+        )?;
+        let statement_timestamp = parse_optional_rfc3339_timestamp(
+            statement_object.get("timestamp"),
+            &format!("{statement_path}.timestamp"),
+        )?;
+        validate_openvex_statement_requirements(
+            &status,
+            justification.as_deref(),
+            impact_statement.as_deref(),
+            action_statement.as_deref(),
+            &statement_path,
+        )?;
+
+        let mut seen_product_ids = HashSet::new();
+
+        for (product_index, product) in products.iter().enumerate() {
+            let product_path = format!("{statement_path}.products[{product_index}]");
+            let product_object = product.as_object().ok_or(ApiError::InvalidRequest(
+                format!("{product_path} must be an object"),
+            ))?;
+            let product_id = required_non_empty_json_string(
+                product_object.get("@id"),
+                &format!("{product_path}.@id"),
+            )?;
+            if !seen_product_ids.insert(product_id.clone()) {
+                return Err(ApiError::InvalidRequest(format!(
+                    "{product_path}.@id must be unique within the statement"
+                )));
+            }
+            normalized_statements.push(ValidatedOpenVexStatement {
+                statement_index: index as i32,
+                vulnerability_id: vulnerability_id.clone(),
+                status: status.clone(),
+                product_id,
+                justification: justification.clone(),
+                impact_statement: impact_statement.clone(),
+                action_statement: action_statement.clone(),
+                statement_timestamp,
+                raw_statement: statement.clone(),
+            });
+        }
+    }
+
+    Ok(ValidatedOpenVexDocument {
+        context,
+        document_id,
+        author,
+        version,
+        document_timestamp,
+        statement_count: statements.len() as i32,
+        statements: normalized_statements,
+    })
+}
+
+fn validate_openvex_expiry_policy(policy: &OpenVexExpiryPolicyRequest) -> Result<(), ApiError> {
+    match policy.mode {
+        OpenVexExpiryMode::Never if policy.expires_at.is_none() => Ok(()),
+        OpenVexExpiryMode::Never => Err(ApiError::InvalidRequest(
+            "expiry_policy.expires_at must be omitted when mode is never".to_owned(),
+        )),
+        OpenVexExpiryMode::ExpiresAt if policy.expires_at.is_some() => Ok(()),
+        OpenVexExpiryMode::ExpiresAt => Err(ApiError::InvalidRequest(
+            "expiry_policy.expires_at is required when mode is expires-at".to_owned(),
+        )),
+    }
+}
+
+fn validate_openvex_status(status: &str, field: &str) -> Result<(), ApiError> {
+    match status {
+        "affected" | "fixed" | "not_affected" | "under_investigation" => Ok(()),
+        _ => Err(ApiError::InvalidRequest(format!(
+            "{field} must be one of affected, fixed, not_affected, under_investigation"
+        ))),
+    }
+}
+
+fn validate_openvex_justification(justification: &str, field: &str) -> Result<(), ApiError> {
+    match justification {
+        "component_not_present"
+        | "vulnerable_code_not_present"
+        | "vulnerable_code_not_in_execute_path"
+        | "vulnerable_code_cannot_be_controlled_by_adversary"
+        | "inline_mitigations_already_exist" => Ok(()),
+        _ => Err(ApiError::InvalidRequest(format!(
+            "{field} must be one of component_not_present, vulnerable_code_not_present, vulnerable_code_not_in_execute_path, vulnerable_code_cannot_be_controlled_by_adversary, inline_mitigations_already_exist"
+        ))),
+    }
+}
+
+fn validate_openvex_statement_requirements(
+    status: &str,
+    justification: Option<&str>,
+    impact_statement: Option<&str>,
+    action_statement: Option<&str>,
+    statement_path: &str,
+) -> Result<(), ApiError> {
+    match status {
+        "not_affected" if justification.is_none() && impact_statement.is_none() => {
+            Err(ApiError::InvalidRequest(format!(
+                "{statement_path} with status not_affected must include justification or impact_statement"
+            )))
+        }
+        "affected" if action_statement.is_none() => Err(ApiError::InvalidRequest(format!(
+            "{statement_path} with status affected must include action_statement"
+        ))),
+        _ => Ok(()),
+    }
+}
+
+fn required_non_empty_json_string(value: Option<&Value>, field: &str) -> Result<String, ApiError> {
+    value
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .ok_or(ApiError::InvalidRequest(format!("{field} must be a non-empty string")))
+}
+
+fn optional_non_empty_json_string(
+    value: Option<&Value>,
+    field: &str,
+) -> Result<Option<String>, ApiError> {
+    match value {
+        None | Some(Value::Null) => Ok(None),
+        Some(_) => required_non_empty_json_string(value, field).map(Some),
+    }
+}
+
+fn parse_required_rfc3339_timestamp(
+    value: Option<&Value>,
+    field: &str,
+) -> Result<DateTime<Utc>, ApiError> {
+    let raw = required_non_empty_json_string(value, field)?;
+    DateTime::parse_from_rfc3339(&raw)
+        .map(|timestamp| timestamp.with_timezone(&Utc))
+        .map_err(|_| ApiError::InvalidRequest(format!("{field} must be an RFC 3339 timestamp")))
+}
+
+fn parse_optional_rfc3339_timestamp(
+    value: Option<&Value>,
+    field: &str,
+) -> Result<Option<DateTime<Utc>>, ApiError> {
+    match value {
+        None | Some(Value::Null) => Ok(None),
+        Some(_) => parse_required_rfc3339_timestamp(value, field).map(Some),
+    }
+}
+
+fn hex_sha256(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 fn validate_policy_simulation_request(request: &PolicySimulationRequest) -> Result<(), ApiError> {
@@ -4773,7 +5411,11 @@ mod tests {
                 self.allow_job_id,
                 self.other_job_id,
             ];
-            let user_ids = [self.admin_user_id, self.developer_user_id, self.other_admin_user_id];
+            let user_ids = [
+                self.admin_user_id,
+                self.developer_user_id,
+                self.other_admin_user_id,
+            ];
             let role_ids = [self.admin_role_id, self.other_admin_role_id];
             let override_ids = [
                 self.pending_override_id,
@@ -4923,7 +5565,10 @@ mod tests {
         let expected_version = aegiscudo_telemetry::app_version();
 
         assert_eq!(body.get("status").and_then(Value::as_str), Some("ok"));
-        assert_eq!(body.get("service").and_then(Value::as_str), Some(SERVICE_NAME));
+        assert_eq!(
+            body.get("service").and_then(Value::as_str),
+            Some(SERVICE_NAME)
+        );
         assert_eq!(
             body.get("version").and_then(Value::as_str),
             Some(expected_version.as_str())
@@ -4933,7 +5578,9 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires migrated postgres contract database"]
     async fn evaluate_decision_route_proxies_to_triage_counter() {
-        let pool = connect(&test_database_url()).await.expect("connect test db");
+        let pool = connect(&test_database_url())
+            .await
+            .expect("connect test db");
         let captured = Arc::new(Mutex::new(Vec::new()));
         let captured_requests = captured.clone();
         let decision_client = DecisionClient::new_test(move |request| {
@@ -5005,7 +5652,9 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires migrated postgres contract database"]
     async fn submit_cli_scan_route_resolves_registry_context_and_returns_decisions() {
-        let pool = connect(&test_database_url()).await.expect("connect test db");
+        let pool = connect(&test_database_url())
+            .await
+            .expect("connect test db");
         let fixture = InvestigationRouteFixture::insert(&pool).await;
         let registry_config_id = Uuid::now_v7();
         let mount_path = format!("/proxy/npm-fixture-{registry_config_id}");
@@ -5087,6 +5736,7 @@ mod tests {
             assert_eq!(body.policy_profile_id, fixture.policy_profile_id);
             assert_eq!(body.findings.len(), 1);
             assert_eq!(body.findings[0].decision, PolicyDecision::AllowWithWarning);
+            assert!(body.findings[0].decision_timestamp.is_some());
             assert_eq!(body.findings[0].trace_id, "cli-trace-1");
 
             let captured = captured.lock().expect("captured requests");
@@ -5115,7 +5765,9 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires migrated postgres contract database"]
     async fn submit_cli_scan_route_rejects_mixed_ecosystems() {
-        let pool = connect(&test_database_url()).await.expect("connect test db");
+        let pool = connect(&test_database_url())
+            .await
+            .expect("connect test db");
 
         let response = app_with_clients(
             pool,
@@ -5166,7 +5818,9 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires migrated postgres contract database"]
     async fn explain_cli_package_route_returns_latest_summary_and_ai_explanation() {
-        let pool = connect(&test_database_url()).await.expect("connect test db");
+        let pool = connect(&test_database_url())
+            .await
+            .expect("connect test db");
         let fixture = InvestigationRouteFixture::insert(&pool).await;
 
         let result = async {
@@ -5222,7 +5876,9 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires migrated postgres contract database"]
     async fn overrides_route_returns_tenant_scoped_pending_and_resolved_items() {
-        let pool = connect(&test_database_url()).await.expect("connect test db");
+        let pool = connect(&test_database_url())
+            .await
+            .expect("connect test db");
         let fixture = InvestigationRouteFixture::insert(&pool).await;
 
         let result = async {
@@ -5242,15 +5898,25 @@ mod tests {
 
             assert_eq!(items[0].id, fixture.pending_override_id);
             assert_eq!(items[0].status, "pending");
-            assert_eq!(items[0].requested_by_display.as_deref(), Some("Fixture Admin"));
+            assert_eq!(
+                items[0].requested_by_display.as_deref(),
+                Some("Fixture Admin")
+            );
 
             assert_eq!(items[1].id, fixture.approved_override_id);
             assert_eq!(items[1].status, "approved");
-            assert_eq!(items[1].approved_by_display.as_deref(), Some("Fixture Admin"));
+            assert_eq!(
+                items[1].approved_by_display.as_deref(),
+                Some("Fixture Admin")
+            );
 
             assert_eq!(items[2].id, fixture.denied_override_id);
             assert_eq!(items[2].status, "denied");
-            assert!(items.iter().all(|item| item.id != fixture.other_override_id));
+            assert!(
+                items
+                    .iter()
+                    .all(|item| item.id != fixture.other_override_id)
+            );
             Ok::<(), anyhow::Error>(())
         }
         .await;
@@ -5262,7 +5928,9 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires migrated postgres contract database"]
     async fn overrides_route_normalizes_expired_overrides() {
-        let pool = connect(&test_database_url()).await.expect("connect test db");
+        let pool = connect(&test_database_url())
+            .await
+            .expect("connect test db");
         let fixture = InvestigationRouteFixture::insert(&pool).await;
 
         let result = async {
@@ -5304,7 +5972,9 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires migrated postgres contract database"]
     async fn approve_override_route_updates_pending_override_and_enforces_tenant_scope() {
-        let pool = connect(&test_database_url()).await.expect("connect test db");
+        let pool = connect(&test_database_url())
+            .await
+            .expect("connect test db");
         let fixture = InvestigationRouteFixture::insert(&pool).await;
 
         let result = async {
@@ -5334,7 +6004,11 @@ mod tests {
             assert_eq!(approved.id, fixture.pending_override_id);
             assert_eq!(approved.status, "approved");
             assert_eq!(approved.approved_by, Some(fixture.admin_user_id));
-            assert!(approved.reason.contains("approval: Approved after validating runtime investigation context"));
+            assert!(
+                approved
+                    .reason
+                    .contains("approval: Approved after validating runtime investigation context")
+            );
 
             let persisted_status: String = sqlx::query_scalar(
                 "SELECT status::text FROM overrides WHERE id = $1 AND tenant_id = $2",
@@ -5378,7 +6052,9 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires migrated postgres contract database"]
     async fn deny_override_route_updates_pending_override() {
-        let pool = connect(&test_database_url()).await.expect("connect test db");
+        let pool = connect(&test_database_url())
+            .await
+            .expect("connect test db");
         let fixture = InvestigationRouteFixture::insert(&pool).await;
 
         let result = async {
@@ -5429,7 +6105,9 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires migrated postgres contract database"]
     async fn request_timeline_route_returns_bucketed_counts_for_the_tenant() {
-        let pool = connect(&test_database_url()).await.expect("connect test db");
+        let pool = connect(&test_database_url())
+            .await
+            .expect("connect test db");
         let fixture = InvestigationRouteFixture::insert(&pool).await;
 
         let result = async {
@@ -5471,17 +6149,16 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires migrated postgres contract database"]
     async fn policy_profiles_route_returns_latest_profiles_for_the_tenant() {
-        let pool = connect(&test_database_url()).await.expect("connect test db");
+        let pool = connect(&test_database_url())
+            .await
+            .expect("connect test db");
         let fixture = InvestigationRouteFixture::insert(&pool).await;
 
         let result = async {
             let response = app(pool.clone())
                 .oneshot(
                     Request::builder()
-                        .uri(format!(
-                            "/v1/tenants/{}/policy-profiles",
-                            fixture.tenant_id
-                        ))
+                        .uri(format!("/v1/tenants/{}/policy-profiles", fixture.tenant_id))
                         .body(Body::empty())
                         .expect("policy profiles request"),
                 )
@@ -5507,7 +6184,9 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires migrated postgres contract database"]
     async fn admin_read_routes_require_control_plane_role() {
-        let pool = connect(&test_database_url()).await.expect("connect test db");
+        let pool = connect(&test_database_url())
+            .await
+            .expect("connect test db");
         let fixture = InvestigationRouteFixture::insert(&pool).await;
 
         let result = async {
@@ -5545,7 +6224,10 @@ mod tests {
             let missing_actor_response = app(pool.clone())
                 .oneshot(
                     Request::builder()
-                        .uri(format!("/v1/tenants/{}/registry-configs", fixture.tenant_id))
+                        .uri(format!(
+                            "/v1/tenants/{}/registry-configs",
+                            fixture.tenant_id
+                        ))
                         .body(Body::empty())
                         .expect("missing actor request"),
                 )
@@ -5564,7 +6246,9 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires migrated postgres contract database"]
     async fn llm_usage_route_requires_admin_or_platform_admin_role() {
-        let pool = connect(&test_database_url()).await.expect("connect test db");
+        let pool = connect(&test_database_url())
+            .await
+            .expect("connect test db");
         let fixture = AuthRouteFixture::insert(&pool).await;
 
         let result = async {
@@ -5611,7 +6295,9 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires migrated postgres contract database"]
     async fn admin_mutation_routes_require_control_plane_role() {
-        let pool = connect(&test_database_url()).await.expect("connect test db");
+        let pool = connect(&test_database_url())
+            .await
+            .expect("connect test db");
         let fixture = InvestigationRouteFixture::insert(&pool).await;
         let credential_id = Uuid::now_v7();
         let registry_name = format!("rbac-fixture-{}", Uuid::now_v7());
@@ -5766,7 +6452,9 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires migrated postgres contract database"]
     async fn auth_session_route_defaults_to_platform_admin_identity_in_mock_mode() {
-        let pool = connect(&test_database_url()).await.expect("connect test db");
+        let pool = connect(&test_database_url())
+            .await
+            .expect("connect test db");
         let fixture = AuthRouteFixture::insert(&pool).await;
 
         let result = async {
@@ -5793,16 +6481,17 @@ mod tests {
             assert_eq!(subject.mock_identity_id.as_deref(), Some("platform-admin"));
             assert_eq!(subject.roles, vec!["admin".to_owned()]);
 
-            let invalid_actor_response = app_with_auth_mode(pool.clone(), AuthMode::MockOidc, fixture.tenant_id)
-                .oneshot(
-                    Request::builder()
-                        .uri("/v1/auth/session")
-                        .header(ACTOR_HEADER, "not-a-uuid")
-                        .body(Body::empty())
-                        .expect("invalid auth session request"),
-                )
-                .await
-                .expect("invalid auth session response");
+            let invalid_actor_response =
+                app_with_auth_mode(pool.clone(), AuthMode::MockOidc, fixture.tenant_id)
+                    .oneshot(
+                        Request::builder()
+                            .uri("/v1/auth/session")
+                            .header(ACTOR_HEADER, "not-a-uuid")
+                            .body(Body::empty())
+                            .expect("invalid auth session request"),
+                    )
+                    .await
+                    .expect("invalid auth session response");
 
             assert_eq!(invalid_actor_response.status(), StatusCode::UNAUTHORIZED);
 
@@ -5817,19 +6506,22 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires migrated postgres contract database"]
     async fn mock_identity_routes_list_select_and_reject_unknown_identities() {
-        let pool = connect(&test_database_url()).await.expect("connect test db");
+        let pool = connect(&test_database_url())
+            .await
+            .expect("connect test db");
         let fixture = AuthRouteFixture::insert(&pool).await;
 
         let result = async {
-            let list_response = app_with_auth_mode(pool.clone(), AuthMode::MockOidc, fixture.tenant_id)
-                .oneshot(
-                    Request::builder()
-                        .uri("/v1/auth/mock-identities")
-                        .body(Body::empty())
-                        .expect("mock identities request"),
-                )
-                .await
-                .expect("mock identities response");
+            let list_response =
+                app_with_auth_mode(pool.clone(), AuthMode::MockOidc, fixture.tenant_id)
+                    .oneshot(
+                        Request::builder()
+                            .uri("/v1/auth/mock-identities")
+                            .body(Body::empty())
+                            .expect("mock identities request"),
+                    )
+                    .await
+                    .expect("mock identities response");
 
             assert_eq!(list_response.status(), StatusCode::OK);
             let identities: MockIdentityListResponse = read_json_body(list_response).await;
@@ -5840,50 +6532,60 @@ mod tests {
                     .iter()
                     .map(|subject| subject.mock_identity_id.as_deref().unwrap_or_default())
                     .collect::<Vec<_>>(),
-                vec!["developer", "security-specialist", "platform-admin", "ciso-auditor"]
+                vec![
+                    "developer",
+                    "security-specialist",
+                    "platform-admin",
+                    "ciso-auditor"
+                ]
             );
 
-            let select_response = app_with_auth_mode(pool.clone(), AuthMode::MockOidc, fixture.tenant_id)
-                .oneshot(
-                    Request::builder()
-                        .method("PUT")
-                        .uri("/v1/auth/session/mock")
-                        .header("content-type", "application/json")
-                        .body(Body::from(
-                            serde_json::to_vec(&SetMockAuthSessionRequest {
-                                identity_id: "developer".to_owned(),
-                            })
-                            .expect("serialize mock selection"),
-                        ))
-                        .expect("mock selection request"),
-                )
-                .await
-                .expect("mock selection response");
+            let select_response =
+                app_with_auth_mode(pool.clone(), AuthMode::MockOidc, fixture.tenant_id)
+                    .oneshot(
+                        Request::builder()
+                            .method("PUT")
+                            .uri("/v1/auth/session/mock")
+                            .header("content-type", "application/json")
+                            .body(Body::from(
+                                serde_json::to_vec(&SetMockAuthSessionRequest {
+                                    identity_id: "developer".to_owned(),
+                                })
+                                .expect("serialize mock selection"),
+                            ))
+                            .expect("mock selection request"),
+                    )
+                    .await
+                    .expect("mock selection response");
 
             assert_eq!(select_response.status(), StatusCode::OK);
             let selected_session: AuthSessionResponse = read_json_body(select_response).await;
             let selected_subject = selected_session.subject.expect("selected subject");
             assert_eq!(selected_subject.user_id, fixture.developer_user_id);
             assert_eq!(selected_subject.display_name, "Developer Persona");
-            assert_eq!(selected_subject.mock_identity_id.as_deref(), Some("developer"));
+            assert_eq!(
+                selected_subject.mock_identity_id.as_deref(),
+                Some("developer")
+            );
             assert_eq!(selected_subject.roles, vec!["developer".to_owned()]);
 
-            let unknown_response = app_with_auth_mode(pool.clone(), AuthMode::MockOidc, fixture.tenant_id)
-                .oneshot(
-                    Request::builder()
-                        .method("PUT")
-                        .uri("/v1/auth/session/mock")
-                        .header("content-type", "application/json")
-                        .body(Body::from(
-                            serde_json::to_vec(&SetMockAuthSessionRequest {
-                                identity_id: "not-a-persona".to_owned(),
-                            })
-                            .expect("serialize unknown selection"),
-                        ))
-                        .expect("unknown mock selection request"),
-                )
-                .await
-                .expect("unknown mock selection response");
+            let unknown_response =
+                app_with_auth_mode(pool.clone(), AuthMode::MockOidc, fixture.tenant_id)
+                    .oneshot(
+                        Request::builder()
+                            .method("PUT")
+                            .uri("/v1/auth/session/mock")
+                            .header("content-type", "application/json")
+                            .body(Body::from(
+                                serde_json::to_vec(&SetMockAuthSessionRequest {
+                                    identity_id: "not-a-persona".to_owned(),
+                                })
+                                .expect("serialize unknown selection"),
+                            ))
+                            .expect("unknown mock selection request"),
+                    )
+                    .await
+                    .expect("unknown mock selection response");
 
             assert_eq!(unknown_response.status(), StatusCode::NOT_FOUND);
             let unknown_error = read_value_body(unknown_response).await;
@@ -5903,7 +6605,9 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires migrated postgres contract database"]
     async fn mock_identity_routes_conflict_when_auth_mode_is_not_mock() {
-        let pool = connect(&test_database_url()).await.expect("connect test db");
+        let pool = connect(&test_database_url())
+            .await
+            .expect("connect test db");
         let fixture = AuthRouteFixture::insert(&pool).await;
 
         let result = async {
@@ -5924,22 +6628,23 @@ mod tests {
                 Some("mock identities are unavailable when auth mode is oidc")
             );
 
-            let select_response = app_with_auth_mode(pool.clone(), AuthMode::Saml, fixture.tenant_id)
-                .oneshot(
-                    Request::builder()
-                        .method("PUT")
-                        .uri("/v1/auth/session/mock")
-                        .header("content-type", "application/json")
-                        .body(Body::from(
-                            serde_json::to_vec(&SetMockAuthSessionRequest {
-                                identity_id: "platform-admin".to_owned(),
-                            })
-                            .expect("serialize saml selection"),
-                        ))
-                        .expect("mock identity select request"),
-                )
-                .await
-                .expect("mock identity select response");
+            let select_response =
+                app_with_auth_mode(pool.clone(), AuthMode::Saml, fixture.tenant_id)
+                    .oneshot(
+                        Request::builder()
+                            .method("PUT")
+                            .uri("/v1/auth/session/mock")
+                            .header("content-type", "application/json")
+                            .body(Body::from(
+                                serde_json::to_vec(&SetMockAuthSessionRequest {
+                                    identity_id: "platform-admin".to_owned(),
+                                })
+                                .expect("serialize saml selection"),
+                            ))
+                            .expect("mock identity select request"),
+                    )
+                    .await
+                    .expect("mock identity select response");
 
             assert_eq!(select_response.status(), StatusCode::CONFLICT);
             let select_error = read_value_body(select_response).await;
@@ -5948,15 +6653,16 @@ mod tests {
                 Some("mock identities are unavailable when auth mode is saml")
             );
 
-            let session_response = app_with_auth_mode(pool.clone(), AuthMode::Oidc, fixture.tenant_id)
-                .oneshot(
-                    Request::builder()
-                        .uri("/v1/auth/session")
-                        .body(Body::empty())
-                        .expect("enterprise session request"),
-                )
-                .await
-                .expect("enterprise session response");
+            let session_response =
+                app_with_auth_mode(pool.clone(), AuthMode::Oidc, fixture.tenant_id)
+                    .oneshot(
+                        Request::builder()
+                            .uri("/v1/auth/session")
+                            .body(Body::empty())
+                            .expect("enterprise session request"),
+                    )
+                    .await
+                    .expect("enterprise session response");
 
             assert_eq!(session_response.status(), StatusCode::OK);
             let session: AuthSessionResponse = read_json_body(session_response).await;
@@ -5976,7 +6682,9 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires migrated postgres contract database"]
     async fn audit_events_route_enriches_actor_display_and_roles() {
-        let pool = connect(&test_database_url()).await.expect("connect test db");
+        let pool = connect(&test_database_url())
+            .await
+            .expect("connect test db");
         let fixture = InvestigationRouteFixture::insert(&pool).await;
         let audit_event_id = Uuid::now_v7();
 
@@ -6001,7 +6709,11 @@ mod tests {
             let response = app(pool.clone())
                 .oneshot(
                     Request::builder()
-                        .uri(format!("/v1/tenants/{}/audit-events?actor={}", fixture.tenant_id, actor_label(fixture.admin_user_id)))
+                        .uri(format!(
+                            "/v1/tenants/{}/audit-events?actor={}",
+                            fixture.tenant_id,
+                            actor_label(fixture.admin_user_id)
+                        ))
                         .header(ACTOR_HEADER, fixture.admin_user_id.to_string())
                         .body(Body::empty())
                         .expect("audit events request"),
@@ -6030,7 +6742,9 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires migrated postgres contract database"]
     async fn audit_events_csv_export_returns_filtered_csv() {
-        let pool = connect(&test_database_url()).await.expect("connect test db");
+        let pool = connect(&test_database_url())
+            .await
+            .expect("connect test db");
         let fixture = InvestigationRouteFixture::insert(&pool).await;
 
         let result = async {
@@ -6083,7 +6797,9 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires migrated postgres contract database"]
     async fn llm_usage_route_returns_aggregates_and_failing_traces() {
-        let pool = connect(&test_database_url()).await.expect("connect test db");
+        let pool = connect(&test_database_url())
+            .await
+            .expect("connect test db");
         let fixture = InvestigationRouteFixture::insert(&pool).await;
 
         let result = async {
@@ -6233,7 +6949,9 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires migrated postgres contract database"]
     async fn policy_simulator_route_replays_recent_requests_against_a_target_profile() {
-        let pool = connect(&test_database_url()).await.expect("connect test db");
+        let pool = connect(&test_database_url())
+            .await
+            .expect("connect test db");
         let fixture = InvestigationRouteFixture::insert(&pool).await;
         let registry_config_id = Uuid::now_v7();
         let package_request_one_id = Uuid::now_v7();
@@ -6335,7 +7053,9 @@ mod tests {
                 ),
                 _ => (
                     PolicyDecision::BlockPolicyViolation,
-                    vec!["static analysis score exceeded the configured policy threshold".to_owned()],
+                    vec![
+                        "static analysis score exceeded the configured policy threshold".to_owned(),
+                    ],
                 ),
             };
             Ok(DecisionResponse {
@@ -6419,7 +7139,9 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires migrated postgres contract database"]
     async fn quarantine_queue_route_returns_only_reviewable_items_for_the_tenant() {
-        let pool = connect(&test_database_url()).await.expect("connect test db");
+        let pool = connect(&test_database_url())
+            .await
+            .expect("connect test db");
         let fixture = InvestigationRouteFixture::insert(&pool).await;
 
         let result = async {
@@ -6468,7 +7190,11 @@ mod tests {
                     audit_events: 2,
                 }
             );
-            assert!(items.iter().all(|item| item.artifact_id != fixture.allow_artifact_id));
+            assert!(
+                items
+                    .iter()
+                    .all(|item| item.artifact_id != fixture.allow_artifact_id)
+            );
             Ok::<(), anyhow::Error>(())
         }
         .await;
@@ -6480,7 +7206,9 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires migrated postgres contract database"]
     async fn artifact_evidence_route_returns_joined_evidence_and_enforces_tenant_scope() {
-        let pool = connect(&test_database_url()).await.expect("connect test db");
+        let pool = connect(&test_database_url())
+            .await
+            .expect("connect test db");
         let fixture = InvestigationRouteFixture::insert(&pool).await;
 
         let result = async {
@@ -6506,7 +7234,10 @@ mod tests {
             assert_eq!(evidence.sandbox_runs.len(), 1);
             assert!(evidence.ai_explanation.is_some());
             assert_eq!(evidence.audit_events.len(), 2);
-            assert_eq!(evidence.audit_events[0].action, "analysis.summary.completed");
+            assert_eq!(
+                evidence.audit_events[0].action,
+                "analysis.summary.completed"
+            );
             assert_eq!(evidence.audit_events[1].trace_id, "trace-quarantine-full");
 
             let degraded_response = app(pool.clone())
@@ -6581,7 +7312,9 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires migrated postgres contract database"]
     async fn dedicated_report_routes_return_tenant_scoped_static_and_sandbox_payloads() {
-        let pool = connect(&test_database_url()).await.expect("connect test db");
+        let pool = connect(&test_database_url())
+            .await
+            .expect("connect test db");
         let fixture = InvestigationRouteFixture::insert(&pool).await;
 
         let result = async {
@@ -6599,7 +7332,8 @@ mod tests {
                 .expect("static report response");
 
             assert_eq!(static_response.status(), StatusCode::OK);
-            let static_reports: ArtifactStaticAnalysisReportsResponse = read_json_body(static_response).await;
+            let static_reports: ArtifactStaticAnalysisReportsResponse =
+                read_json_body(static_response).await;
             assert_eq!(static_reports.analysis_job_id, fixture.full_job_id);
             assert_eq!(static_reports.reports.len(), 1);
 
@@ -6617,7 +7351,8 @@ mod tests {
                 .expect("sandbox report response");
 
             assert_eq!(sandbox_response.status(), StatusCode::OK);
-            let sandbox_reports: ArtifactSandboxExecutionReportsResponse = read_json_body(sandbox_response).await;
+            let sandbox_reports: ArtifactSandboxExecutionReportsResponse =
+                read_json_body(sandbox_response).await;
             assert_eq!(sandbox_reports.analysis_job_id, fixture.full_job_id);
             assert_eq!(sandbox_reports.runs.len(), 1);
 
@@ -6646,7 +7381,9 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires migrated postgres contract database"]
     async fn dashboard_metrics_route_returns_tenant_kpis() {
-        let pool = connect(&test_database_url()).await.expect("connect test db");
+        let pool = connect(&test_database_url())
+            .await
+            .expect("connect test db");
         let fixture = InvestigationRouteFixture::insert(&pool).await;
 
         sqlx::query(
@@ -6697,6 +7434,355 @@ mod tests {
 
         fixture.cleanup(&pool).await;
         result.expect("dashboard metrics assertions");
+    }
+
+    #[test]
+    fn validate_openvex_request_rejects_invalid_context() {
+        let mut request = sample_openvex_import_request();
+        request.document["@context"] = Value::String("https://example.invalid/openvex".to_owned());
+
+        let error = validate_openvex_request(&request).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "invalid request: document.@context must be https://openvex.dev/ns/v0.2.0"
+        );
+    }
+
+    #[test]
+    fn validate_openvex_request_rejects_missing_products() {
+        let mut request = sample_openvex_import_request();
+        request.document["statements"][0]["products"] = json!([]);
+
+        let error = validate_openvex_request(&request).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "invalid request: document.statements[0].products must contain at least one product"
+        );
+    }
+
+    #[test]
+    fn validate_openvex_request_rejects_duplicate_product_ids() {
+        let mut request = sample_openvex_import_request();
+        request.document["statements"][0]["products"] = json!([
+            { "@id": "pkg:npm/left-pad@1.3.0" },
+            { "@id": "pkg:npm/left-pad@1.3.0" }
+        ]);
+
+        let error = validate_openvex_request(&request).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "invalid request: document.statements[0].products[1].@id must be unique within the statement"
+        );
+    }
+
+    #[test]
+    fn validate_openvex_request_requires_not_affected_justification_or_impact_statement() {
+        let mut request = sample_openvex_import_request();
+        request.document["statements"][0]["justification"] = Value::Null;
+
+        let error = validate_openvex_request(&request).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "invalid request: document.statements[0] with status not_affected must include justification or impact_statement"
+        );
+    }
+
+    #[test]
+    fn validate_openvex_request_rejects_unknown_justification() {
+        let mut request = sample_openvex_import_request();
+        request.document["statements"][0]["justification"] =
+            Value::String("custom_reason".to_owned());
+
+        let error = validate_openvex_request(&request).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "invalid request: document.statements[0].justification must be one of component_not_present, vulnerable_code_not_present, vulnerable_code_not_in_execute_path, vulnerable_code_cannot_be_controlled_by_adversary, inline_mitigations_already_exist"
+        );
+    }
+
+    #[test]
+    fn validate_openvex_request_requires_action_statement_for_affected_status() {
+        let mut request = sample_openvex_import_request();
+        request.document["statements"][0]["status"] = Value::String("affected".to_owned());
+        request.document["statements"][0]["justification"] = Value::Null;
+
+        let error = validate_openvex_request(&request).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "invalid request: document.statements[0] with status affected must include action_statement"
+        );
+    }
+
+    #[test]
+    fn validate_openvex_request_rejects_expires_at_policy_without_timestamp() {
+        let request = CreateOpenVexDocumentRequest {
+            source: "fixture-openvex.json".to_owned(),
+            document: sample_openvex_document(),
+            expiry_policy: OpenVexExpiryPolicyRequest {
+                mode: OpenVexExpiryMode::ExpiresAt,
+                expires_at: None,
+            },
+        };
+
+        let error = validate_openvex_request(&request).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "invalid request: expiry_policy.expires_at is required when mode is expires-at"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires migrated postgres contract database"]
+    async fn openvex_document_routes_require_override_manager() {
+        let pool = connect(&test_database_url())
+            .await
+            .expect("connect test db");
+        let fixture = InvestigationRouteFixture::insert(&pool).await;
+
+        let result = async {
+            let request = sample_openvex_import_request();
+            let uri = format!("/v1/tenants/{}/openvex-documents", fixture.tenant_id);
+
+            let missing_actor = app(pool.clone())
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(&uri)
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::to_vec(&request).expect("serialize openvex request"),
+                        ))
+                        .expect("missing actor openvex request"),
+                )
+                .await
+                .expect("missing actor openvex response");
+            assert_eq!(missing_actor.status(), StatusCode::UNAUTHORIZED);
+
+            let developer = app(pool.clone())
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(&uri)
+                        .header(ACTOR_HEADER, fixture.developer_user_id.to_string())
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::to_vec(&request).expect("serialize openvex request"),
+                        ))
+                        .expect("developer openvex request"),
+                )
+                .await
+                .expect("developer openvex response");
+            assert_eq!(developer.status(), StatusCode::FORBIDDEN);
+
+            let admin = app(pool.clone())
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(&uri)
+                        .header(ACTOR_HEADER, fixture.admin_user_id.to_string())
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::to_vec(&request).expect("serialize openvex request"),
+                        ))
+                        .expect("admin openvex request"),
+                )
+                .await
+                .expect("admin openvex response");
+            assert_eq!(admin.status(), StatusCode::OK);
+
+            Ok::<(), anyhow::Error>(())
+        }
+        .await;
+
+        fixture.cleanup(&pool).await;
+        result.expect("openvex route authorization assertions");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires migrated postgres contract database"]
+    async fn create_openvex_document_persists_document_statements_and_audit_event() {
+        let pool = connect(&test_database_url())
+            .await
+            .expect("connect test db");
+        let fixture = InvestigationRouteFixture::insert(&pool).await;
+
+        let result = async {
+            let response = app(pool.clone())
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(format!("/v1/tenants/{}/openvex-documents", fixture.tenant_id))
+                        .header(ACTOR_HEADER, fixture.admin_user_id.to_string())
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::to_vec(&sample_openvex_import_request())
+                                .expect("serialize openvex request"),
+                        ))
+                        .expect("create openvex request"),
+                )
+                .await
+                .expect("create openvex response");
+            assert_eq!(response.status(), StatusCode::OK);
+
+            let created: OpenVexDocumentResponse = read_json_body(response).await;
+            assert_eq!(created.summary.tenant_id, fixture.tenant_id);
+            assert_eq!(created.summary.source, "fixture-openvex.json");
+            assert_eq!(created.summary.statement_count, 2);
+            assert_eq!(created.summary.expiry_policy.mode, OpenVexExpiryMode::ExpiresAt);
+
+            let stored_count: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM openvex_documents WHERE tenant_id = $1 AND id = $2",
+            )
+            .bind(fixture.tenant_id)
+            .bind(created.summary.id)
+            .fetch_one(&pool)
+            .await?;
+            assert_eq!(stored_count, 1);
+
+            let statement_count: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM openvex_statements WHERE tenant_id = $1 AND openvex_document_id = $2",
+            )
+            .bind(fixture.tenant_id)
+            .bind(created.summary.id)
+            .fetch_one(&pool)
+            .await?;
+            assert_eq!(statement_count, 2);
+
+            let audit_count: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM audit_events WHERE tenant_id = $1 AND action = 'openvex.document.imported' AND resource = $2",
+            )
+            .bind(fixture.tenant_id)
+            .bind(format!("openvex-document/{}", created.summary.id))
+            .fetch_one(&pool)
+            .await?;
+            assert_eq!(audit_count, 1);
+
+            let listed = app(pool.clone())
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("/v1/tenants/{}/openvex-documents", fixture.tenant_id))
+                        .header(ACTOR_HEADER, fixture.admin_user_id.to_string())
+                        .body(Body::empty())
+                        .expect("list openvex request"),
+                )
+                .await
+                .expect("list openvex response");
+            assert_eq!(listed.status(), StatusCode::OK);
+            let listed_documents: Vec<OpenVexDocumentSummaryResponse> = read_json_body(listed).await;
+            assert_eq!(listed_documents.len(), 1);
+            assert_eq!(listed_documents[0].id, created.summary.id);
+
+            Ok::<(), anyhow::Error>(())
+        }
+        .await;
+
+        fixture.cleanup(&pool).await;
+        result.expect("openvex persistence assertions");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires migrated postgres contract database"]
+    async fn get_openvex_document_is_tenant_scoped() {
+        let pool = connect(&test_database_url())
+            .await
+            .expect("connect test db");
+        let fixture = InvestigationRouteFixture::insert(&pool).await;
+
+        let result = async {
+            let create_response = app(pool.clone())
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(format!("/v1/tenants/{}/openvex-documents", fixture.tenant_id))
+                        .header(ACTOR_HEADER, fixture.admin_user_id.to_string())
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::to_vec(&sample_openvex_import_request())
+                                .expect("serialize openvex request"),
+                        ))
+                        .expect("create openvex request"),
+                )
+                .await
+                .expect("create openvex response");
+            assert_eq!(create_response.status(), StatusCode::OK);
+            let created: OpenVexDocumentResponse = read_json_body(create_response).await;
+
+            let own_response = app(pool.clone())
+                .oneshot(
+                    Request::builder()
+                        .uri(format!(
+                            "/v1/tenants/{}/openvex-documents/{}",
+                            fixture.tenant_id, created.summary.id
+                        ))
+                        .header(ACTOR_HEADER, fixture.admin_user_id.to_string())
+                        .body(Body::empty())
+                        .expect("own openvex get request"),
+                )
+                .await
+                .expect("own openvex get response");
+            assert_eq!(own_response.status(), StatusCode::OK);
+
+            let cross_tenant_response = app(pool.clone())
+                .oneshot(
+                    Request::builder()
+                        .uri(format!(
+                            "/v1/tenants/{}/openvex-documents/{}",
+                            fixture.other_tenant_id, created.summary.id
+                        ))
+                        .header(ACTOR_HEADER, fixture.other_admin_user_id.to_string())
+                        .body(Body::empty())
+                        .expect("cross-tenant openvex get request"),
+                )
+                .await
+                .expect("cross-tenant openvex get response");
+            assert_eq!(cross_tenant_response.status(), StatusCode::NOT_FOUND);
+
+            Ok::<(), anyhow::Error>(())
+        }
+        .await;
+
+        fixture.cleanup(&pool).await;
+        result.expect("openvex tenant scoping assertions");
+    }
+
+    fn sample_openvex_import_request() -> CreateOpenVexDocumentRequest {
+        CreateOpenVexDocumentRequest {
+            source: "fixture-openvex.json".to_owned(),
+            document: sample_openvex_document(),
+            expiry_policy: OpenVexExpiryPolicyRequest {
+                mode: OpenVexExpiryMode::ExpiresAt,
+                expires_at: Some(ts(2026, 5, 31, 12, 0, 0)),
+            },
+        }
+    }
+
+    fn sample_openvex_document() -> Value {
+        json!({
+            "@context": "https://openvex.dev/ns/v0.2.0",
+            "@id": "https://fixtures.aegiscudo.invalid/openvex/acme-2026-001",
+            "author": "Aegiscudo Fixture Suite",
+            "timestamp": "2026-05-12T08:00:00Z",
+            "version": 1,
+            "statements": [
+                {
+                    "vulnerability": { "name": "CVE-2026-0001" },
+                    "products": [
+                        { "@id": "pkg:npm/left-pad@1.3.0" }
+                    ],
+                    "status": "not_affected",
+                    "justification": "component_not_present"
+                },
+                {
+                    "vulnerability": { "name": "CVE-2026-0002" },
+                    "products": [
+                        { "@id": "pkg:pypi/requests@2.31.0" }
+                    ],
+                    "status": "fixed",
+                    "action_statement": "Patched in upstream release 2.31.0",
+                    "timestamp": "2026-05-12T08:05:00Z"
+                }
+            ]
+        })
     }
 
     async fn read_json_body<T>(response: Response) -> T
@@ -6917,8 +8003,7 @@ mod tests {
                     .uri(format!("/v1/tenants/{tenant_id}/overrides"))
                     .header("content-type", "application/json")
                     .body(Body::from(
-                        json!({ "scope": {}, "expires_at": "2099-01-01T00:00:00Z" })
-                            .to_string(),
+                        json!({ "scope": {}, "expires_at": "2099-01-01T00:00:00Z" }).to_string(),
                     ))
                     .expect("override request"),
             )
@@ -6934,8 +8019,7 @@ mod tests {
                     .uri(format!("/v1/tenants/{tenant_id}/overrides"))
                     .header("content-type", "application/json")
                     .body(Body::from(
-                        json!({ "scope": {}, "reason": "some reason here" })
-                            .to_string(),
+                        json!({ "scope": {}, "reason": "some reason here" }).to_string(),
                     ))
                     .expect("override request"),
             )
@@ -6947,7 +8031,9 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires migrated postgres contract database"]
     async fn create_override_produces_audit_event() {
-        let pool = connect(&test_database_url()).await.expect("connect test db");
+        let pool = connect(&test_database_url())
+            .await
+            .expect("connect test db");
         let fixture = InvestigationRouteFixture::insert(&pool).await;
 
         let result = async {
@@ -7008,7 +8094,9 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires migrated postgres contract database"]
     async fn approve_override_produces_audit_event() {
-        let pool = connect(&test_database_url()).await.expect("connect test db");
+        let pool = connect(&test_database_url())
+            .await
+            .expect("connect test db");
         let fixture = InvestigationRouteFixture::insert(&pool).await;
 
         let result = async {

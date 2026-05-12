@@ -37,6 +37,8 @@ pub enum PackageEcosystem {
     Maven,
     DockerOci,
     GenericHttp,
+    #[serde(rename = "githubactions")]
+    GithubActions,
 }
 
 impl fmt::Display for PackageEcosystem {
@@ -48,6 +50,7 @@ impl fmt::Display for PackageEcosystem {
             Self::Maven => "maven",
             Self::DockerOci => "docker-oci",
             Self::GenericHttp => "generic-http",
+            Self::GithubActions => "githubactions",
         };
         formatter.write_str(value)
     }
@@ -68,6 +71,7 @@ impl FromStr for PackageEcosystem {
             "maven" => Ok(Self::Maven),
             "docker-oci" => Ok(Self::DockerOci),
             "generic-http" => Ok(Self::GenericHttp),
+            "githubactions" => Ok(Self::GithubActions),
             other => Err(ParsePackageEcosystemError(other.to_owned())),
         }
     }

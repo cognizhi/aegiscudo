@@ -548,6 +548,11 @@ export interface components {
             coordinate: components["schemas"]["PackageCoordinateSummary"];
             artifact_sha256?: string;
             decision: components["schemas"]["PolicyDecision"];
+            /**
+             * Format: date-time
+             * @description RFC 3339 timestamp when Aegiscudo evaluated this package decision for the CLI scan request.
+             */
+            decision_timestamp?: string;
             trace_id: string;
             rationale: string[];
             fallback_coordinate?: components["schemas"]["PackageCoordinateSummary"];

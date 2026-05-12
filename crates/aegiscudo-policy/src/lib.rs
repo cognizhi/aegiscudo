@@ -42,6 +42,26 @@ pub struct PolicyInput {
     #[serde(default)]
     pub trusted_publisher_identity_mismatch: bool,
     #[serde(default)]
+    pub scorecard_code_review_risk: bool,
+    #[serde(default)]
+    pub scorecard_branch_protection_risk: bool,
+    #[serde(default)]
+    pub scorecard_ci_cd_risk: bool,
+    #[serde(default)]
+    pub scorecard_maintained_risk: bool,
+    #[serde(default)]
+    pub scorecard_signed_releases_risk: bool,
+    #[serde(default)]
+    pub scorecard_code_review_action: SignalPolicyAction,
+    #[serde(default)]
+    pub scorecard_branch_protection_action: SignalPolicyAction,
+    #[serde(default)]
+    pub scorecard_ci_cd_action: SignalPolicyAction,
+    #[serde(default)]
+    pub scorecard_maintained_action: SignalPolicyAction,
+    #[serde(default)]
+    pub scorecard_signed_releases_action: SignalPolicyAction,
+    #[serde(default)]
     pub provenance_or_signature_verification_failed: bool,
     #[serde(default)]
     pub missing_or_failed_attestation: bool,
@@ -81,6 +101,72 @@ pub enum VulnerabilityPolicyAction {
     #[default]
     Warn,
     Block,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum SignalPolicyAction {
+    Allow,
+    #[default]
+    Warn,
+    Block,
+    Hitl,
+}
+
+fn scorecard_policy_outcome(input: &PolicyInput, rationale: &mut Vec<String>) -> Option<PolicyDecision> {
+    let mut warn = false;
+    let mut hitl = false;
+    let mut block = false;
+
+    for (risk, action, message) in [
+        (
+            input.scorecard_code_review_risk,
+            input.scorecard_code_review_action,
+            "OpenSSF Scorecard code review check indicates incomplete review coverage",
+        ),
+        (
+            input.scorecard_branch_protection_risk,
+            input.scorecard_branch_protection_action,
+            "OpenSSF Scorecard branch protection check indicates incomplete protection",
+        ),
+        (
+            input.scorecard_ci_cd_risk,
+            input.scorecard_ci_cd_action,
+            "OpenSSF Scorecard CI/CD check indicates incomplete CI protections",
+        ),
+        (
+            input.scorecard_maintained_risk,
+            input.scorecard_maintained_action,
+            "OpenSSF Scorecard maintained check indicates weak maintenance posture",
+        ),
+        (
+            input.scorecard_signed_releases_risk,
+            input.scorecard_signed_releases_action,
+            "OpenSSF Scorecard signed releases check indicates unsigned or inconsistently signed releases",
+        ),
+    ] {
+        if !risk || matches!(action, SignalPolicyAction::Allow) {
+            continue;
+        }
+
+        rationale.push(message.to_owned());
+        match action {
+            SignalPolicyAction::Allow => {}
+            SignalPolicyAction::Warn => warn = true,
+            SignalPolicyAction::Block => block = true,
+            SignalPolicyAction::Hitl => hitl = true,
+        }
+    }
+
+    if block {
+        Some(PolicyDecision::BlockPolicyViolation)
+    } else if hitl {
+        Some(PolicyDecision::RequireHitlApproval)
+    } else if warn {
+        Some(PolicyDecision::AllowWithWarning)
+    } else {
+        None
+    }
 }
 
 #[derive(Debug, Default, Clone)]
@@ -179,6 +265,8 @@ impl DecisionEngine {
                     (PolicyDecision::BlockPolicyViolation, None, false)
                 }
             }
+        } else if let Some(scorecard_decision) = scorecard_policy_outcome(&input, &mut rationale) {
+            (scorecard_decision, None, false)
         } else if input.install_script_detected
             || input.trusted_publisher_identity_mismatch
             || input.provenance_or_signature_verification_failed
@@ -255,6 +343,16 @@ mod tests {
             dynamic_sandbox_policy_violation: false,
             github_to_registry_publish_gap_risk: false,
             trusted_publisher_identity_mismatch: false,
+            scorecard_code_review_risk: false,
+            scorecard_branch_protection_risk: false,
+            scorecard_ci_cd_risk: false,
+            scorecard_maintained_risk: false,
+            scorecard_signed_releases_risk: false,
+            scorecard_code_review_action: SignalPolicyAction::Warn,
+            scorecard_branch_protection_action: SignalPolicyAction::Warn,
+            scorecard_ci_cd_action: SignalPolicyAction::Warn,
+            scorecard_maintained_action: SignalPolicyAction::Warn,
+            scorecard_signed_releases_action: SignalPolicyAction::Warn,
             provenance_or_signature_verification_failed: false,
             missing_or_failed_attestation: false,
             ai_agent_injection_indicator: false,
@@ -371,6 +469,37 @@ mod tests {
     }
 
     #[test]
+    fn scorecard_signals_warn() {
+        let mut input = base_input();
+        input.scorecard_branch_protection_risk = true;
+        assert_eq!(evaluate(input), PolicyDecision::AllowWithWarning);
+    }
+
+    #[test]
+    fn scorecard_signals_can_block() {
+        let mut input = base_input();
+        input.scorecard_signed_releases_risk = true;
+        input.scorecard_signed_releases_action = SignalPolicyAction::Block;
+        assert_eq!(evaluate(input), PolicyDecision::BlockPolicyViolation);
+    }
+
+    #[test]
+    fn scorecard_signals_can_require_hitl() {
+        let mut input = base_input();
+        input.scorecard_maintained_risk = true;
+        input.scorecard_maintained_action = SignalPolicyAction::Hitl;
+        assert_eq!(evaluate(input), PolicyDecision::RequireHitlApproval);
+    }
+
+    #[test]
+    fn scorecard_allow_action_keeps_decision_neutral() {
+        let mut input = base_input();
+        input.scorecard_branch_protection_risk = true;
+        input.scorecard_branch_protection_action = SignalPolicyAction::Allow;
+        assert_eq!(evaluate(input), PolicyDecision::Allow);
+    }
+
+    #[test]
     fn vulnerability_signal_can_block_when_policy_requires_it() {
         let mut input = base_input();
         input.vulnerable_above_threshold = true;
@@ -401,5 +530,22 @@ mod tests {
         input.mode = PolicyMode::Shadow;
         let response = DecisionEngine.evaluate(input);
         assert_eq!(response.mode, PolicyMode::Shadow);
+    }
+
+    #[test]
+    fn scorecard_warning_rationale_is_emitted() {
+        let mut input = base_input();
+        input.scorecard_code_review_risk = true;
+        input.scorecard_signed_releases_risk = true;
+
+        let response = DecisionEngine.evaluate(input);
+
+        assert_eq!(response.decision, PolicyDecision::AllowWithWarning);
+        assert!(response.rationale.iter().any(|entry| {
+            entry == "OpenSSF Scorecard code review check indicates incomplete review coverage"
+        }));
+        assert!(response.rationale.iter().any(|entry| {
+            entry == "OpenSSF Scorecard signed releases check indicates unsigned or inconsistently signed releases"
+        }));
     }
 }

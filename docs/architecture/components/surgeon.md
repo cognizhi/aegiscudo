@@ -20,8 +20,8 @@ Surgeon never calls an AI CLI and never sends full package source files to AI An
 
 ## Output Contract
 
-Surgeon produces durable static evidence and package-level SBOM fragments as versioned analysis outputs. Those records are stored with the same artifact identity and analysis job linkage so downstream aggregation can reconstruct tenant-level SBOM views without reprocessing the original package.
+Target Phase 2 contract: Surgeon produces durable static evidence and package-level SBOM fragments as versioned analysis outputs. Today, static-analysis reports and artifact manifests persist with artifact identity and analysis-job linkage, but normalized package-level SBOM fragments are not yet stored, so downstream aggregation must not assume they exist.
 
 ## Current Implementation State
 
-The Rust scanner foundation validates unsafe paths, scans directories with file-count and single-file limits, and detects MVP indicator examples such as JavaScript `eval`, Node child processes, Python `exec`, credential paths, AI-agent injection text, sleeper triggers, cross-package write patterns, and large base64-like payloads. Real archive unpacking, AST parsing, manifest extraction, full indicator coverage, evidence persistence, and adversarial archive tests remain Phase 1B work.
+The Rust scanner foundation validates unsafe paths, scans directories with file-count and single-file limits, and detects MVP indicator examples such as JavaScript `eval`, Node child processes, Python `exec`, credential paths, AI-agent injection text, sleeper triggers, cross-package write patterns, and large base64-like payloads. Static-analysis report and artifact-manifest persistence now exist, but package-level SBOM fragment persistence, full archive unpacking, broader manifest extraction, full indicator coverage, and adversarial archive tests remain follow-up work.

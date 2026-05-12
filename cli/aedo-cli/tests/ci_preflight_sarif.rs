@@ -21,9 +21,7 @@ fn ci_preflight_binary_emits_sarif_and_block_exit_code() {
     let config_path = workspace.path().join("aedo.json");
     fs::write(
         &config_path,
-        format!(
-            "{{\n  \"api_url\": \"http://{address}\",\n  \"token\": \"fixture-token\"\n}}"
-        ),
+        format!("{{\n  \"api_url\": \"http://{address}\",\n  \"token\": \"fixture-token\"\n}}"),
     )
     .expect("write cli config");
 
@@ -64,21 +62,18 @@ fn ci_preflight_binary_emits_sarif_and_block_exit_code() {
     let output = Command::new(env!("CARGO_BIN_EXE_aedo"))
         .current_dir(workspace.path())
         .env("AEDO_CONFIG_HOME", workspace.path())
-        .args([
-            "ci",
-            "preflight",
-            "--format",
-            "sarif",
-            "--fail-on",
-            "block",
-        ])
+        .args(["ci", "preflight", "--format", "sarif", "--fail-on", "block"])
         .output()
         .expect("run aedo ci preflight");
 
     server.join().expect("fixture api server finished");
 
     assert_eq!(output.status.code(), Some(1));
-    assert!(output.stderr.is_empty(), "stderr was not empty: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.stderr.is_empty(),
+        "stderr was not empty: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     let stdout = String::from_utf8(output.stdout).expect("utf8 stdout");
     let sarif: serde_json::Value = serde_json::from_str(&stdout).expect("sarif json output");

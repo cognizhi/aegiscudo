@@ -149,6 +149,14 @@ class KnownVulnerabilityThreshold(StrictModel):
     epss_probability_floor: Annotated[float | None, Field(ge=0, le=1)] = None
 
 
+class ScorecardThresholds(StrictModel):
+    code_review: Annotated[float | None, Field(ge=-1, le=10)] = None
+    branch_protection: Annotated[float | None, Field(ge=-1, le=10)] = None
+    ci_cd: Annotated[float | None, Field(ge=-1, le=10)] = None
+    maintained: Annotated[float | None, Field(ge=-1, le=10)] = None
+    signed_releases: Annotated[float | None, Field(ge=-1, le=10)] = None
+
+
 class PolicyProfile(StrictModel):
     id: UUID
     tenant_id: UUID
@@ -156,6 +164,7 @@ class PolicyProfile(StrictModel):
     mode: PolicyMode
     minimum_release_age_hours: Annotated[int, Field(ge=0, strict=True)]
     known_vulnerability_threshold: KnownVulnerabilityThreshold
+    scorecard_thresholds: ScorecardThresholds | None = None
     fail_closed: Annotated[bool, Field(strict=True)]
     rules: list[PolicyRule]
 

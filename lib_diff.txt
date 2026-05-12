@@ -1,0 +1,463 @@
+diff --git a/services/triage-counter/src/lib.rs b/services/triage-counter/src/lib.rs
+index b3ba898..cb19f38 100644
+--- a/services/triage-counter/src/lib.rs
++++ b/services/triage-counter/src/lib.rs
+@@ -12,7 +12,7 @@ use axum::{
+     routing::{get, post},
+ };
+ use metrics::DecisionMetrics;
+-use repository::{PolicyRepository, PolicyRepositoryError};
++use repository::{BoundDecisionContext, PolicyRepository, PolicyRepositoryError};
+ use std::{
+     collections::HashMap,
+     sync::Arc,
+@@ -55,21 +55,27 @@ impl DecisionCache {
+         }
+     }
+ 
+-    async fn get(&self, cache_key: &str) -> Option<aegiscudo_protocol::DecisionResponse> {
++    async fn get(&self, cache_key: &str) -> Option<CachedDecision> {
+         let now = Instant::now();
+         self.entries
+             .read()
+             .await
+             .get(cache_key)
+             .filter(|entry| entry.expires_at > now)
+-            .map(|entry| entry.response.clone())
++            .cloned()
+     }
+ 
+-    async fn put(&self, cache_key: String, response: &aegiscudo_protocol::DecisionResponse) {
++    async fn put(
++        &self,
++        cache_key: String,
++        response: &aegiscudo_protocol::DecisionResponse,
++        evidence_references: &[String],
++    ) {
+         self.entries.write().await.insert(
+             cache_key,
+             CachedDecision {
+                 response: response.clone(),
++                evidence_references: evidence_references.to_vec(),
+                 expires_at: Instant::now() + self.ttl,
+             },
+         );
+@@ -79,9 +85,16 @@ impl DecisionCache {
+ #[derive(Debug, Clone)]
+ struct CachedDecision {
+     response: aegiscudo_protocol::DecisionResponse,
++    evidence_references: Vec<String>,
+     expires_at: Instant,
+ }
+ 
++#[derive(Debug, Clone)]
++struct EvaluatedDecision {
++    response: aegiscudo_protocol::DecisionResponse,
++    evidence_references: Vec<String>,
++}
++
+ pub fn app(policy_repository: PolicyRepository) -> Router {
+     let state = Arc::new(AppState::new(policy_repository));
+     Router::new()
+@@ -89,7 +102,7 @@ pub fn app(policy_repository: PolicyRepository) -> Router {
+         .route("/readyz", get(|| async { Json(health(SERVICE_NAME)) }))
+         .route("/metrics", get(metrics))
+         .route("/v1/decisions/evaluate", post(evaluate_decision))
+-    .route("/v1/decisions/simulate", post(simulate_decision))
++        .route("/v1/decisions/simulate", post(simulate_decision))
+         .with_state(state)
+ }
+ 
+@@ -141,28 +154,32 @@ async fn evaluate_with_state(
+     request: DecisionRequest,
+ ) -> Result<aegiscudo_protocol::DecisionResponse, PolicyRepositoryError> {
+     let cache_key = decision_cache_key(&request);
+-    if let Some(mut response) = state.decision_cache.get(&cache_key).await {
++    if let Some(cached) = state.decision_cache.get(&cache_key).await {
++        let mut response = cached.response;
+         response.trace_id = request.request.trace_id.clone();
+         state
+             .metrics
+             .observe_cache(request.tenant_id, request.registry_config_id, "hit");
+         state
+             .policy_repository
+-            .persist_decision_record(&request, &response)
++            .persist_evaluated_decision_record(&request, &response, &cached.evidence_references)
+             .await?;
+         return Ok(response);
+     }
+     state
+         .metrics
+         .observe_cache(request.tenant_id, request.registry_config_id, "miss");
+-    let response = evaluate_with_policy_repository(
++    let evaluated = evaluate_with_policy_repository_with_context(
+         &state.policy_repository,
+         &state.decision_engine,
+         request.clone(),
+     )
+     .await?;
+-    state.decision_cache.put(cache_key, &response).await;
+-    Ok(response)
++    state
++        .decision_cache
++        .put(cache_key, &evaluated.response, &evaluated.evidence_references)
++        .await;
++    Ok(evaluated.response)
+ }
+ 
+ async fn simulate_with_state(
+@@ -170,18 +187,22 @@ async fn simulate_with_state(
+     request: DecisionRequest,
+ ) -> Result<aegiscudo_protocol::DecisionResponse, PolicyRepositoryError> {
+     let cache_key = decision_cache_key(&request);
+-    if let Some(mut response) = state.decision_cache.get(&cache_key).await {
++    if let Some(cached) = state.decision_cache.get(&cache_key).await {
++        let mut response = cached.response;
+         response.trace_id = request.request.trace_id.clone();
+         return Ok(response);
+     }
+ 
+-    let bound_input = state
++    let bound_context = state
+         .policy_repository
+-        .bind_simulation_request(request.clone())
++        .bind_simulation_context(request.clone())
+         .await?;
+-    let response = state.decision_engine.evaluate(bound_input);
+-    state.decision_cache.put(cache_key, &response).await;
+-    Ok(response)
++    let evaluated = evaluate_bound_context(&state.decision_engine, bound_context);
++    state
++        .decision_cache
++        .put(cache_key, &evaluated.response, &evaluated.evidence_references)
++        .await;
++    Ok(evaluated.response)
+ }
+ 
+ fn decision_cache_key(request: &DecisionRequest) -> String {
+@@ -203,22 +224,80 @@ fn decision_cache_key(request: &DecisionRequest) -> String {
+     )
+ }
+ 
++#[cfg(test)]
+ async fn evaluate_with_policy_repository(
+     policy_repository: &PolicyRepository,
+     decision_engine: &DecisionEngine,
+     request: DecisionRequest,
+ ) -> Result<aegiscudo_protocol::DecisionResponse, PolicyRepositoryError> {
+-    let bound_input = policy_repository
+-        .bind_decision_request(request.clone())
++    let evaluated = evaluate_with_policy_repository_with_context(
++        policy_repository,
++        decision_engine,
++        request,
++    )
++    .await?;
++    Ok(evaluated.response)
++}
++
++async fn evaluate_with_policy_repository_with_context(
++    policy_repository: &PolicyRepository,
++    decision_engine: &DecisionEngine,
++    request: DecisionRequest,
++) -> Result<EvaluatedDecision, PolicyRepositoryError> {
++    let bound_context = policy_repository
++        .bind_evaluation_context(request.clone())
+         .await?;
+-    let response = decision_engine.evaluate(bound_input);
++    let evaluated = evaluate_bound_context(decision_engine, bound_context);
+     policy_repository
+-        .persist_decision_record(&request, &response)
++        .persist_evaluated_decision_record(
++            &request,
++            &evaluated.response,
++            &evaluated.evidence_references,
++        )
+         .await?;
+     policy_repository
+-        .create_analysis_job_if_needed(&request, &response)
++        .create_analysis_job_if_needed(&request, &evaluated.response)
+         .await?;
+-    Ok(response)
++    Ok(evaluated)
++}
++
++fn evaluate_bound_context(
++    decision_engine: &DecisionEngine,
++    bound_context: BoundDecisionContext,
++) -> EvaluatedDecision {
++    let BoundDecisionContext {
++        policy_input,
++        evidence_references,
++        vulnerability_under_investigation,
++    } = bound_context;
++    let mut response = decision_engine.evaluate(policy_input);
++    append_openvex_rationale(
++        &mut response,
++        &evidence_references,
++        vulnerability_under_investigation,
++    );
++    EvaluatedDecision {
++        response,
++        evidence_references,
++    }
++}
++
++fn append_openvex_rationale(
++    response: &mut aegiscudo_protocol::DecisionResponse,
++    evidence_references: &[String],
++    vulnerability_under_investigation: bool,
++) {
++    if !evidence_references.is_empty() {
++        response.rationale.push(format!(
++            "OpenVEX suppressed matching vulnerability findings via document(s): {}",
++            evidence_references.join(", ")
++        ));
++    }
++    if vulnerability_under_investigation {
++        response
++            .rationale
++            .push("matching OpenVEX statement marks a vulnerability as under investigation".to_owned());
++    }
+ }
+ 
+ struct ApiError(PolicyRepositoryError);
+@@ -274,10 +353,12 @@ mod tests {
+     use aegiscudo_core::{
+         ArtifactDigest, PackageCoordinate, PackageEcosystem, PolicyMode, PolicySnapshot,
+     };
++    use aegiscudo_policy::VulnerabilityPolicyAction;
+     use aegiscudo_protocol::{DecisionRequest, NormalizedPackageRequest, PackageRequestKind};
+     use repository::{
+-        InMemoryPolicyRepository, LoadedPolicyProfile, PolicySignalConfiguration,
+-        RegistryPolicyBinding,
++        InMemoryPolicyRepository, KnownVulnerabilityThreshold, LoadedPolicyProfile,
++        PolicySignalConfiguration, RegistryPolicyBinding, VulnerabilityMatchRecord,
++        VulnerabilitySeverity,
+     };
+     use uuid::Uuid;
+ 
+@@ -354,6 +435,223 @@ mod tests {
+         assert!(repository.analysis_jobs().await.is_empty());
+     }
+ 
++    #[tokio::test]
++    async fn evaluate_persists_openvex_evidence_references_across_cache_hits() {
++        let tenant_id = Uuid::now_v7();
++        let policy_profile_id = Uuid::now_v7();
++        let snapshot_id = Uuid::now_v7();
++        let registry_config_id = Uuid::now_v7();
++        let repository = InMemoryPolicyRepository::new();
++        repository
++            .upsert_profile(LoadedPolicyProfile {
++                id: policy_profile_id,
++                tenant_id,
++                mode: PolicyMode::Warn,
++                latest_snapshot: PolicySnapshot {
++                    id: snapshot_id,
++                    tenant_id,
++                    version: "2026.05.0".to_owned(),
++                    effective_at: chrono::Utc::now(),
++                    immutable_rule_hash: ArtifactDigest::sha256("a".repeat(64)).unwrap(),
++                },
++                signal_configuration: PolicySignalConfiguration {
++                    known_vulnerability_threshold: KnownVulnerabilityThreshold {
++                        severity_floor: VulnerabilitySeverity::High,
++                        kev_override: true,
++                        epss_probability_floor: None,
++                    },
++                    vulnerable_above_threshold_action: VulnerabilityPolicyAction::Block,
++                },
++            })
++            .await;
++        repository
++            .upsert_registry_binding(RegistryPolicyBinding {
++                tenant_id,
++                registry_config_id,
++                policy_profile_id,
++                mode: PolicyMode::Warn,
++            })
++            .await;
++
++        let coordinate = PackageCoordinate::new(
++            PackageEcosystem::Npm,
++            "left-pad",
++            Some("1.3.0"),
++            None::<String>,
++        );
++        repository
++            .remember_vulnerability_match(
++                tenant_id,
++                coordinate.clone(),
++                None,
++                VulnerabilityMatchRecord {
++                    advisory_id: "GHSA-cache-hit".to_owned(),
++                    severity: Some(VulnerabilitySeverity::Critical),
++                    epss_probability: None,
++                    cisa_kev: false,
++                },
++            )
++            .await;
++        repository
++            .remember_openvex_statement(
++                tenant_id,
++                "GHSA-cache-hit",
++                coordinate.purl(),
++                "not_affected",
++                "openvex-doc-cache",
++                None,
++            )
++            .await;
++
++        let state = AppState::new(PolicyRepository::InMemory(repository.clone()));
++        let request = |trace_id: &str| DecisionRequest {
++            tenant_id,
++            registry_config_id,
++            policy_profile_id,
++            request: NormalizedPackageRequest {
++                kind: PackageRequestKind::Metadata,
++                tenant_id,
++                registry_config_id,
++                policy_profile_id,
++                coordinate: coordinate.clone(),
++                trace_id: trace_id.to_owned(),
++                requested_digest: None,
++                source_url: None,
++                explicit_version_or_integrity: false,
++            },
++        };
++
++        let first_response = evaluate_with_state(&state, request("trace-openvex-1"))
++            .await
++            .expect("decision should evaluate");
++        let second_response = evaluate_with_state(&state, request("trace-openvex-2"))
++            .await
++            .expect("cached decision should evaluate");
++
++        assert_eq!(first_response.decision, aegiscudo_core::PolicyDecision::Allow);
++        assert_eq!(second_response.trace_id, "trace-openvex-2");
++        assert!(first_response.rationale.iter().any(|entry| {
++            entry.contains("OpenVEX suppressed matching vulnerability findings")
++        }));
++
++        let persisted = repository.decision_records().await;
++        assert_eq!(persisted.len(), 2);
++        assert_eq!(
++            persisted[0].evidence_references,
++            vec!["openvex-doc-cache".to_owned()]
++        );
++        assert_eq!(
++            persisted[1].evidence_references,
++            vec!["openvex-doc-cache".to_owned()]
++        );
++        assert_eq!(persisted[1].trace_id, "trace-openvex-2");
++    }
++
++    #[tokio::test]
++    async fn evaluate_adds_openvex_under_investigation_rationale() {
++        let tenant_id = Uuid::now_v7();
++        let policy_profile_id = Uuid::now_v7();
++        let snapshot_id = Uuid::now_v7();
++        let registry_config_id = Uuid::now_v7();
++        let repository = InMemoryPolicyRepository::new();
++        repository
++            .upsert_profile(LoadedPolicyProfile {
++                id: policy_profile_id,
++                tenant_id,
++                mode: PolicyMode::Warn,
++                latest_snapshot: PolicySnapshot {
++                    id: snapshot_id,
++                    tenant_id,
++                    version: "2026.05.0".to_owned(),
++                    effective_at: chrono::Utc::now(),
++                    immutable_rule_hash: ArtifactDigest::sha256("a".repeat(64)).unwrap(),
++                },
++                signal_configuration: PolicySignalConfiguration {
++                    known_vulnerability_threshold: KnownVulnerabilityThreshold {
++                        severity_floor: VulnerabilitySeverity::High,
++                        kev_override: true,
++                        epss_probability_floor: None,
++                    },
++                    vulnerable_above_threshold_action: VulnerabilityPolicyAction::Warn,
++                },
++            })
++            .await;
++        repository
++            .upsert_registry_binding(RegistryPolicyBinding {
++                tenant_id,
++                registry_config_id,
++                policy_profile_id,
++                mode: PolicyMode::Warn,
++            })
++            .await;
++
++        let coordinate = PackageCoordinate::new(
++            PackageEcosystem::Npm,
++            "left-pad",
++            Some("1.3.0"),
++            None::<String>,
++        );
++        repository
++            .remember_vulnerability_match(
++                tenant_id,
++                coordinate.clone(),
++                None,
++                VulnerabilityMatchRecord {
++                    advisory_id: "GHSA-investigating".to_owned(),
++                    severity: Some(VulnerabilitySeverity::High),
++                    epss_probability: None,
++                    cisa_kev: false,
++                },
++            )
++            .await;
++        repository
++            .remember_openvex_statement(
++                tenant_id,
++                "GHSA-investigating",
++                coordinate.purl(),
++                "under_investigation",
++                "openvex-doc-investigating",
++                None,
++            )
++            .await;
++
++        let request = DecisionRequest {
++            tenant_id,
++            registry_config_id,
++            policy_profile_id,
++            request: NormalizedPackageRequest {
++                kind: PackageRequestKind::Metadata,
++                tenant_id,
++                registry_config_id,
++                policy_profile_id,
++                coordinate,
++                trace_id: "trace-openvex-investigating".to_owned(),
++                requested_digest: None,
++                source_url: None,
++                explicit_version_or_integrity: false,
++            },
++        };
++
++        let response = evaluate_with_policy_repository(
++            &PolicyRepository::InMemory(repository),
++            &DecisionEngine,
++            request,
++        )
++        .await
++        .expect("decision should evaluate");
++
++        assert_eq!(
++            response.decision,
++            aegiscudo_core::PolicyDecision::AllowWithWarning
++        );
++        assert!(response.rationale.iter().any(|entry| {
++            entry == "known vulnerability exceeded the configured policy threshold"
++        }));
++        assert!(response.rationale.iter().any(|entry| {
++            entry == "matching OpenVEX statement marks a vulnerability as under investigation"
++        }));
++    }
++
+     #[tokio::test]
+     async fn unknown_artifact_digest_creates_analysis_job() {
+         let tenant_id = Uuid::now_v7();

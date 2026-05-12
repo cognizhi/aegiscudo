@@ -9,9 +9,21 @@
     "kev_override": true,
     "epss_probability_floor": 0.7
   },
+  "scorecard_thresholds": {
+    "code_review": 10.0,
+    "branch_protection": 10.0,
+    "ci_cd": 10.0,
+    "maintained": 10.0,
+    "signed_releases": 10.0
+  },
   "fail_closed": true,
   "rules": [
     { "id": "known-vulnerable", "signal": "vulnerable_above_threshold", "action": "warn", "enabled": true },
+    { "id": "scorecard-code-review", "signal": "scorecard_code_review_risk", "action": "warn", "enabled": true },
+    { "id": "scorecard-branch-protection", "signal": "scorecard_branch_protection_risk", "action": "warn", "enabled": true },
+    { "id": "scorecard-ci-cd", "signal": "scorecard_ci_cd_risk", "action": "warn", "enabled": true },
+    { "id": "scorecard-maintained", "signal": "scorecard_maintained_risk", "action": "warn", "enabled": true },
+    { "id": "scorecard-signed-releases", "signal": "scorecard_signed_releases_risk", "action": "warn", "enabled": true },
     { "id": "known-malicious", "signal": "known_malicious", "action": "block", "enabled": true },
     { "id": "missing-attestation", "signal": "missing_or_failed_attestation", "action": "warn", "enabled": true }
   ]

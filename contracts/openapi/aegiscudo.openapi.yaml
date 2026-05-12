@@ -839,6 +839,133 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorBody'
+  /v1/tenants/{tenant_id}/openvex-documents:
+    get:
+      operationId: listOpenVexDocuments
+      parameters:
+        - name: tenant_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - $ref: '#/components/parameters/ActorIdHeader'
+      responses:
+        "200":
+          description: Tenant-scoped imported OpenVEX document metadata.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/OpenVexDocumentSummary'
+        "401":
+          description: Request actor header is missing.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        "403":
+          description: Request actor is not authorized to manage suppression data.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        "404":
+          description: Tenant was not found.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+    post:
+      operationId: importOpenVexDocument
+      parameters:
+        - name: tenant_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - $ref: '#/components/parameters/ActorIdHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OpenVexDocumentImportRequest'
+      responses:
+        "200":
+          description: Imported OpenVEX document with normalized metadata.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OpenVexDocument'
+        "400":
+          description: Request was invalid or the document failed OpenVEX validation.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        "401":
+          description: Request actor header is missing.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        "403":
+          description: Request actor is not authorized to manage suppression data.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        "404":
+          description: Tenant was not found.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+  /v1/tenants/{tenant_id}/openvex-documents/{openvex_document_id}:
+    get:
+      operationId: getOpenVexDocument
+      parameters:
+        - name: tenant_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: openvex_document_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - $ref: '#/components/parameters/ActorIdHeader'
+      responses:
+        "200":
+          description: Imported OpenVEX document with raw JSON payload.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OpenVexDocument'
+        "401":
+          description: Request actor header is missing.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        "403":
+          description: Request actor is not authorized to manage suppression data.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        "404":
+          description: Tenant or document was not found.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
   /v1/tenants/{tenant_id}/ai-providers:
     get:
       operationId: listAiProviders
@@ -944,6 +1071,15 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorBody'
 components:
+  parameters:
+    ActorIdHeader:
+      name: x-aegiscudo-actor-id
+      in: header
+      required: true
+      description: Actor UUID for privileged tenant-scoped suppression administration routes.
+      schema:
+        type: string
+        format: uuid
   schemas:
     AuthMode:
       type: string
@@ -1246,6 +1382,10 @@ components:
           pattern: '^[a-f0-9]{64}$'
         decision:
           $ref: '#/components/schemas/PolicyDecision'
+        decision_timestamp:
+          type: string
+          format: date-time
+          description: RFC 3339 timestamp when Aegiscudo evaluated this package decision for the CLI scan request.
         trace_id:
           type: string
         rationale:
@@ -1440,6 +1580,131 @@ components:
           type: string
           format: date-time
         metadata:
+          type: object
+          additionalProperties: true
+    OpenVexExpiryMode:
+      type: string
+      enum:
+        - never
+        - expires-at
+    OpenVexExpiryPolicy:
+      type: object
+      additionalProperties: false
+      required:
+        - mode
+      properties:
+        mode:
+          $ref: '#/components/schemas/OpenVexExpiryMode'
+        expires_at:
+          type: string
+          format: date-time
+    OpenVexDocumentImportRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - source
+        - document
+      properties:
+        source:
+          type: string
+        document:
+          description: OpenVEX v0.2.0 JSON document.
+          type: object
+          additionalProperties: true
+        expiry_policy:
+          $ref: '#/components/schemas/OpenVexExpiryPolicy'
+    OpenVexDocumentSummary:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - tenant_id
+        - source
+        - document_id
+        - author
+        - context
+        - version
+        - document_timestamp
+        - imported_at
+        - expiry_policy
+        - document_digest
+        - statement_count
+      properties:
+        id:
+          type: string
+          format: uuid
+        tenant_id:
+          type: string
+          format: uuid
+        source:
+          type: string
+        document_id:
+          type: string
+        author:
+          type: string
+        context:
+          type: string
+        version:
+          type: integer
+        document_timestamp:
+          type: string
+          format: date-time
+        imported_at:
+          type: string
+          format: date-time
+        expiry_policy:
+          $ref: '#/components/schemas/OpenVexExpiryPolicy'
+        document_digest:
+          type: string
+        statement_count:
+          type: integer
+    OpenVexDocument:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - tenant_id
+        - source
+        - document_id
+        - author
+        - context
+        - version
+        - document_timestamp
+        - imported_at
+        - expiry_policy
+        - document_digest
+        - statement_count
+        - document
+      properties:
+        id:
+          type: string
+          format: uuid
+        tenant_id:
+          type: string
+          format: uuid
+        source:
+          type: string
+        document_id:
+          type: string
+        author:
+          type: string
+        context:
+          type: string
+        version:
+          type: integer
+        document_timestamp:
+          type: string
+          format: date-time
+        imported_at:
+          type: string
+          format: date-time
+        expiry_policy:
+          $ref: '#/components/schemas/OpenVexExpiryPolicy'
+        document_digest:
+          type: string
+        statement_count:
+          type: integer
+        document:
           type: object
           additionalProperties: true
     OverrideQueueItem:

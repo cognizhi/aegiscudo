@@ -265,11 +265,8 @@ async fn process_claimed_job(
     let scan_future = task::spawn_blocking(move || {
         scan_artifact_package(&scan_input_path_clone, &unpack_dir_path, scan_limits)
     });
-    let scan_result = tokio::time::timeout(
-        Duration::from_secs(config.scan_timeout_secs),
-        scan_future,
-    )
-    .await;
+    let scan_result =
+        tokio::time::timeout(Duration::from_secs(config.scan_timeout_secs), scan_future).await;
 
     let (report, manifest) = match scan_result {
         Ok(Ok(Ok(result))) => result,
@@ -372,10 +369,10 @@ fn upstream_authorization_value(claimed: &ClaimedJob) -> anyhow::Result<Option<H
             let encoded = BASE64_STANDARD.encode(value);
             Ok(Some(HeaderValue::from_str(&format!("Basic {encoded}"))?))
         }
-        RegistryAuthType::Bearer => {
-            Ok(Some(HeaderValue::from_str(&format!("Bearer {value}"))?))
-        }
-        RegistryAuthType::Mtls => Err(anyhow!("mTLS upstream fetch is not yet supported by Surgeon")),
+        RegistryAuthType::Bearer => Ok(Some(HeaderValue::from_str(&format!("Bearer {value}"))?)),
+        RegistryAuthType::Mtls => Err(anyhow!(
+            "mTLS upstream fetch is not yet supported by Surgeon"
+        )),
     }
 }
 
@@ -390,11 +387,8 @@ async fn persist_static_report(
 ) -> anyhow::Result<()> {
     let mut transaction = pool.begin().await?;
     let report_json = validated_static_report_json(&report)?;
-    let externalized_report = maybe_externalize_static_report(
-        artifact_store_dir,
-        claimed.job.tenant_id,
-        &report_json,
-    )?;
+    let externalized_report =
+        maybe_externalize_static_report(artifact_store_dir, claimed.job.tenant_id, &report_json)?;
 
     let artifact_row = sqlx::query(
         r#"
@@ -470,8 +464,16 @@ async fn persist_static_report(
     .bind(artifact_id)
     .bind(claimed.job.policy_snapshot_id)
     .bind(sqlx::types::Json(report_json))
-    .bind(externalized_report.as_ref().map(|report| report.storage_uri.as_str()))
-    .bind(externalized_report.as_ref().map(|report| report.sha256.as_str()))
+    .bind(
+        externalized_report
+            .as_ref()
+            .map(|report| report.storage_uri.as_str()),
+    )
+    .bind(
+        externalized_report
+            .as_ref()
+            .map(|report| report.sha256.as_str()),
+    )
     .bind(
         externalized_report
             .as_ref()
@@ -625,7 +627,8 @@ fn maybe_externalize_static_report(
     tenant_id: Uuid,
     report_json: &Value,
 ) -> anyhow::Result<Option<ExternalizedStaticReport>> {
-    let report_bytes = serde_json::to_vec(report_json).context("serializing static evidence bytes")?;
+    let report_bytes =
+        serde_json::to_vec(report_json).context("serializing static evidence bytes")?;
     if report_bytes.len() <= MAX_INLINE_STATIC_REPORT_BYTES {
         return Ok(None);
     }
@@ -647,10 +650,9 @@ fn maybe_externalize_static_report(
 fn static_evidence_schema() -> &'static JSONSchema {
     static STATIC_EVIDENCE_SCHEMA: OnceLock<JSONSchema> = OnceLock::new();
     STATIC_EVIDENCE_SCHEMA.get_or_init(|| {
-        let schema_json: Value = serde_json::from_str(include_str!(
-            "../../../schemas/evidence.schema.json"
-        ))
-        .expect("evidence schema should parse");
+        let schema_json: Value =
+            serde_json::from_str(include_str!("../../../schemas/evidence.schema.json"))
+                .expect("evidence schema should parse");
         JSONSchema::compile(&schema_json).expect("evidence schema should compile")
     })
 }
@@ -713,9 +715,10 @@ mod tests {
             "aabb",
             "left-pad-1.3.0.tgz",
         );
-        assert!(path.to_string_lossy().ends_with(
-            "00000000-0000-0000-0000-000000000000/aabb.tgz"
-        ));
+        assert!(
+            path.to_string_lossy()
+                .ends_with("00000000-0000-0000-0000-000000000000/aabb.tgz")
+        );
     }
 
     #[test]
@@ -725,9 +728,10 @@ mod tests {
             Uuid::nil(),
             "bbcc",
         );
-        assert!(path.to_string_lossy().ends_with(
-            "00000000-0000-0000-0000-000000000000/static-reports/bbcc.json"
-        ));
+        assert!(
+            path.to_string_lossy()
+                .ends_with("00000000-0000-0000-0000-000000000000/static-reports/bbcc.json")
+        );
     }
 
     #[test]
@@ -749,7 +753,10 @@ mod tests {
         };
 
         let json = validated_static_report_json(&report).unwrap();
-        assert_eq!(json.get("analyzer_version").and_then(Value::as_str), Some("0.1.0"));
+        assert_eq!(
+            json.get("analyzer_version").and_then(Value::as_str),
+            Some("0.1.0")
+        );
     }
 
     #[test]
@@ -811,7 +818,14 @@ mod tests {
                 .unwrap()
                 .unwrap();
 
-        assert_eq!(externalized.size_bytes as usize, serde_json::to_vec(&report_json).unwrap().len());
-        assert!(externalized.storage_uri.ends_with(&format!("/static-reports/{}.json", externalized.sha256)));
+        assert_eq!(
+            externalized.size_bytes as usize,
+            serde_json::to_vec(&report_json).unwrap().len()
+        );
+        assert!(
+            externalized
+                .storage_uri
+                .ends_with(&format!("/static-reports/{}.json", externalized.sha256))
+        );
     }
 }

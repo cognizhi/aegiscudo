@@ -1,0 +1,3963 @@
+diff --git a/cli/aedo-cli/Cargo.toml b/cli/aedo-cli/Cargo.toml
+index 5fb139e..71bee77 100644
+--- a/cli/aedo-cli/Cargo.toml
++++ b/cli/aedo-cli/Cargo.toml
+@@ -1,25 +1,31 @@
+ [package]
+ name = "aedo-cli"
+ version.workspace = true
+ edition.workspace = true
+ rust-version.workspace = true
+ license.workspace = true
+ publish.workspace = true
+ 
+ [[bin]]
+ name = "aedo"
+ path = "src/main.rs"
+ 
+ [dependencies]
+ aegiscudo-core.workspace = true
+ anyhow.workspace = true
++base64.workspace = true
++chrono.workspace = true
+ clap.workspace = true
++glob = "0.3.3"
++hex.workspace = true
+ jsonschema = "0.18.3"
+ reqwest = { workspace = true, features = ["blocking"] }
+ serde.workspace = true
+ serde_json.workspace = true
+ serde_yaml = "0.9.34"
+ thiserror.workspace = true
++toml = "1.1.2"
++uuid.workspace = true
+ 
+ [dev-dependencies]
+ tempfile = "3.25.0"
+\ No newline at end of file
+diff --git a/cli/aedo-cli/src/lib.rs b/cli/aedo-cli/src/lib.rs
+index 355b2dd..40e1987 100644
+--- a/cli/aedo-cli/src/lib.rs
++++ b/cli/aedo-cli/src/lib.rs
+@@ -1,157 +1,182 @@
+-use std::collections::BTreeMap;
++use std::collections::{BTreeMap, BTreeSet};
+ use std::env;
+ use std::ffi::OsString;
+ use std::fs;
+ use std::path::{Path, PathBuf};
+ use std::sync::OnceLock;
+ use std::time::Duration;
+ 
+ use aegiscudo_core::{PackageCoordinate, PackageEcosystem, PolicyDecision};
+ use anyhow::Context;
+ use clap::{Args, Parser, Subcommand, ValueEnum};
+ use jsonschema::JSONSchema;
+ use reqwest::blocking::Client;
+ use serde::{Deserialize, Serialize};
+ 
++mod sbom;
++
++use sbom::{SbomDocument, SbomFormat, SbomResolvedDecision, load_sbom_document, render_sbom};
++
+ const DEFAULT_API_URL: &str = "http://127.0.0.1:8082";
+ const CONFIG_OVERRIDE_ENV: &str = "AEDO_CONFIG_HOME";
+ const HEALTH_TIMEOUT: Duration = Duration::from_millis(1_500);
+ const SCAN_TIMEOUT: Duration = Duration::from_secs(5);
+ 
+ #[derive(Debug, Parser)]
+ #[command(
+     name = "aedo",
+     version,
+     about = "Aegiscudo developer and CI preflight CLI"
+ )]
+ pub struct Cli {
+     #[command(subcommand)]
+     command: Command,
+ }
+ 
+ #[derive(Debug, Subcommand)]
+ enum Command {
+     Auth {
+         #[command(subcommand)]
+         command: AuthCommand,
+     },
+     Scan {
+         #[command(subcommand)]
+         command: ScanCommand,
+     },
++    Sbom {
++        #[command(subcommand)]
++        command: SbomCommand,
++    },
+     Explain(ExplainArgs),
+     Policy {
+         #[command(subcommand)]
+         command: PolicyCommand,
+     },
+     Ci {
+         #[command(subcommand)]
+         command: CiCommand,
+     },
+ }
+ 
+ #[derive(Debug, Subcommand)]
+ enum AuthCommand {
+     Login(AuthLoginArgs),
+     Logout,
+     Status,
+ }
+ 
+ #[derive(Debug, Args)]
+ struct AuthLoginArgs {
+     #[arg(
+         long,
+         env = "AEGISCUDO_API_URL",
+         default_value = DEFAULT_API_URL
+     )]
+     api_url: String,
+     #[arg(long, env = "AEGISCUDO_TOKEN")]
+     token: Option<String>,
+ }
+ 
+ #[derive(Debug, Subcommand)]
+ enum ScanCommand {
+     Npm(NpmScanArgs),
+     Pnpm(PnpmScanArgs),
+     Pypi(PypiScanArgs),
+     Cargo(NotYetSupportedArgs),
+     Maven(NotYetSupportedArgs),
+     Docker(NotYetSupportedArgs),
+ }
+ 
++#[derive(Debug, Subcommand)]
++enum SbomCommand {
++    Generate(SbomGenerateArgs),
++}
++
+ #[derive(Debug, Args)]
+ struct NpmScanArgs {
+     #[arg(long)]
+     lockfile: PathBuf,
+     #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+     output_format: OutputFormat,
+     #[arg(long, value_enum, default_value_t = FailOn::Block)]
+     fail_on: FailOn,
+     #[arg(long, default_value_t = false)]
+     upload_manifest: bool,
+ }
+ 
+ #[derive(Debug, Args)]
+ struct PnpmScanArgs {
+     #[arg(long)]
+     lockfile: PathBuf,
+     #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+     output_format: OutputFormat,
+     #[arg(long, value_enum, default_value_t = FailOn::Block)]
+     fail_on: FailOn,
+     #[arg(long, default_value_t = false)]
+     upload_manifest: bool,
+ }
+ 
+ #[derive(Debug, Args)]
+ struct PypiScanArgs {
+     #[arg(long)]
+     requirements: PathBuf,
+     #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+     output_format: OutputFormat,
+     #[arg(long, value_enum, default_value_t = FailOn::Block)]
+     fail_on: FailOn,
+     #[arg(long, default_value_t = false)]
+     upload_manifest: bool,
+ }
+ 
++#[derive(Debug, Args)]
++struct SbomGenerateArgs {
++    #[arg(long)]
++    lockfile: Option<PathBuf>,
++    #[arg(long)]
++    requirements: Option<PathBuf>,
++    #[arg(long, value_enum, default_value_t = SbomFormat::CyclonedxJson)]
++    format: SbomFormat,
++    #[arg(long)]
++    output: Option<PathBuf>,
++}
++
+ #[derive(Debug, Args)]
+ struct NotYetSupportedArgs {}
+ 
+ #[derive(Debug, Args)]
+ struct ExplainArgs {
+     package: String,
+     #[arg(long, value_enum)]
+     ecosystem: EcosystemArg,
+ }
+ 
+ #[derive(Debug, Subcommand)]
+ enum PolicyCommand {
+     Test(PolicyTestArgs),
+ }
+ 
+ #[derive(Debug, Args)]
+ struct PolicyTestArgs {
+     #[arg(long)]
+     file: PathBuf,
+ }
+ 
+ #[derive(Debug, Subcommand)]
+ enum CiCommand {
+     Preflight(CiPreflightArgs),
+ }
+ 
+ #[derive(Debug, Args)]
+ struct CiPreflightArgs {
+     #[arg(long, value_enum, default_value_t = OutputFormat::Sarif)]
+     format: OutputFormat,
+     #[arg(long, value_enum, default_value_t = FailOn::Block)]
+     fail_on: FailOn,
+ }
+ 
+ #[derive(Debug, Clone, Copy, ValueEnum)]
+ enum EcosystemArg {
+     Npm,
+     Pypi,
+ }
+ 
+@@ -174,173 +199,209 @@ pub struct ScanFinding {
+     #[serde(skip_serializing_if = "Option::is_none")]
+     integrity: Option<String>,
+     decision: PolicyDecision,
+ }
+ 
+ #[derive(Debug, Serialize)]
+ struct ScanReport {
+     source: String,
+     upload_manifest: bool,
+     findings: Vec<ScanFinding>,
+ }
+ 
+ #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+ struct CliConfig {
+     api_url: String,
+     #[serde(default, skip_serializing_if = "Option::is_none")]
+     token: Option<String>,
+ }
+ 
+ #[derive(Debug, Serialize)]
+ struct CliScanSubmission {
+     packages: Vec<CliScanSubmissionPackage>,
+ }
+ 
+ #[derive(Debug, Serialize)]
+ struct CliScanSubmissionPackage {
+     coordinate: PackageCoordinate,
+     #[serde(skip_serializing_if = "Option::is_none")]
+     artifact_sha256: Option<String>,
+ }
+ 
+ #[derive(Debug, Deserialize)]
+ struct CliScanApiResponse {
+     findings: Vec<CliScanApiFinding>,
+ }
+ 
+ #[derive(Debug, Deserialize)]
+ struct CliScanApiFinding {
+     coordinate: PackageCoordinate,
+     decision: PolicyDecision,
++    #[serde(default)]
++    decision_timestamp: Option<String>,
+ }
+ 
+ #[derive(Debug, Serialize)]
+ struct CliExplainSubmission {
+     coordinate: PackageCoordinate,
+ }
+ 
+ #[derive(Debug, Deserialize)]
+ struct CliExplainApiResponse {
+     coordinate: PackageCoordinate,
+     trace_id: String,
+     recommended_action: String,
+     confidence: String,
+     summary: serde_json::Value,
+     ai_explanation: Option<serde_json::Value>,
+ }
+ 
+ pub fn run(args: impl IntoIterator<Item = OsString>) -> anyhow::Result<i32> {
+     match Cli::parse_from(args).command {
+         Command::Auth { command } => run_auth(command),
+         Command::Scan { command } => run_scan(command),
++        Command::Sbom { command } => run_sbom(command),
+         Command::Explain(args) => run_explain(args),
+         Command::Policy { command } => match command {
+             PolicyCommand::Test(args) => run_policy_test(args),
+         },
+         Command::Ci { command } => match command {
+             CiCommand::Preflight(args) => run_ci_preflight(args),
+         },
+     }
+ }
+ 
++fn run_sbom(command: SbomCommand) -> anyhow::Result<i32> {
++    match command {
++        SbomCommand::Generate(args) => {
++            let mut document =
++                load_sbom_document(args.lockfile.as_deref(), args.requirements.as_deref())?;
++            if let Some(config) = load_sbom_enrichment_config(&document)? {
++                enrich_sbom_with_decisions(&mut document, &config)?;
++            } else if !document.supports_remote_decision_ecosystem() {
++                eprintln!(
++                    "skipping Aegiscudo decision enrichment for this SBOM because /v1/cli/scans currently supports only npm and pypi packages"
++                );
++            }
++            let rendered = render_sbom(&document, args.format)?;
++            if let Some(output) = args.output {
++                fs::write(&output, rendered)
++                    .with_context(|| format!("writing SBOM to {}", output.display()))?;
++                println!("wrote {} to {}", args.format.label(), output.display());
++            } else {
++                println!("{rendered}");
++            }
++            Ok(0)
++        }
++    }
++}
++
+ fn run_policy_test(args: PolicyTestArgs) -> anyhow::Result<i32> {
+     validate_policy_file(&args.file)?;
+     println!(
+         "policy file is schema-valid for dry-run submission: {}",
+         args.file.display()
+     );
+     Ok(0)
+ }
+ 
+ fn validate_policy_file(path: &Path) -> anyhow::Result<()> {
+     let contents = fs::read_to_string(path)
+         .with_context(|| format!("reading policy file {}", path.display()))?;
+     let policy: serde_json::Value = serde_yaml::from_str(&contents)
+         .with_context(|| format!("parsing policy file {} as YAML or JSON", path.display()))?;
+ 
+     if let Err(validation_errors) = policy_schema().validate(&policy) {
+         let collected = validation_errors
+             .map(|error| error.to_string())
+             .collect::<Vec<_>>();
+         anyhow::bail!(
+             "policy file {} failed schema validation: {}",
+             path.display(),
+             collected.join("; ")
+         );
+     }
+ 
+     Ok(())
+ }
+ 
+ fn policy_schema() -> &'static JSONSchema {
+     static POLICY_SCHEMA: OnceLock<JSONSchema> = OnceLock::new();
+     POLICY_SCHEMA.get_or_init(|| {
+-        let schema_json: serde_json::Value = serde_json::from_str(include_str!(
+-            "../../../schemas/policy.schema.json"
+-        ))
+-        .expect("policy schema should parse");
++        let schema_json: serde_json::Value =
++            serde_json::from_str(include_str!("../../../schemas/policy.schema.json"))
++                .expect("policy schema should parse");
+         JSONSchema::compile(&schema_json).expect("policy schema should compile")
+     })
+ }
+ 
+ fn run_ci_preflight(args: CiPreflightArgs) -> anyhow::Result<i32> {
+     let cwd = env::current_dir().context("reading current working directory for ci preflight")?;
+     let discovered = discover_ci_preflight_inputs(&cwd)?;
+     let source = format!(
+         "ci-preflight: {}",
+         discovered
+             .iter()
+             .map(|(source, _)| source.as_str())
+             .collect::<Vec<_>>()
+             .join(", ")
+     );
+     let findings = aggregate_ci_preflight_findings(discovered)?;
+     let report = submit_scan_report(source, false, findings)?;
+     print_report(&report, args.format)?;
+     Ok(exit_code(&report.findings, args.fail_on))
+ }
+ 
+ fn discover_ci_preflight_inputs(cwd: &Path) -> anyhow::Result<Vec<(String, Vec<ScanFinding>)>> {
+     let supported_files = [
+-        ("package-lock.json", parse_package_lock as fn(&PathBuf) -> anyhow::Result<Vec<ScanFinding>>),
+-        ("pnpm-lock.yaml", parse_pnpm_lock as fn(&PathBuf) -> anyhow::Result<Vec<ScanFinding>>),
+-        ("requirements.txt", parse_requirements as fn(&PathBuf) -> anyhow::Result<Vec<ScanFinding>>),
++        (
++            "package-lock.json",
++            parse_package_lock as fn(&PathBuf) -> anyhow::Result<Vec<ScanFinding>>,
++        ),
++        (
++            "pnpm-lock.yaml",
++            parse_pnpm_lock as fn(&PathBuf) -> anyhow::Result<Vec<ScanFinding>>,
++        ),
++        (
++            "requirements.txt",
++            parse_requirements as fn(&PathBuf) -> anyhow::Result<Vec<ScanFinding>>,
++        ),
+         (
+             "requirements-dev.txt",
+             parse_requirements as fn(&PathBuf) -> anyhow::Result<Vec<ScanFinding>>,
+         ),
+     ];
+     let mut discovered = Vec::new();
+ 
+     for (file_name, parser) in supported_files {
+         let path = cwd.join(file_name);
+         if !path.exists() {
+             continue;
+         }
+         discovered.push((file_name.to_owned(), parser(&path)?));
+     }
+ 
+     if discovered.is_empty() {
+         let yarn_lock = cwd.join("yarn.lock");
+         if yarn_lock.exists() {
+             anyhow::bail!(
+                 "ci preflight currently supports package-lock.json, pnpm-lock.yaml, requirements.txt, and requirements-dev.txt in the current directory; yarn.lock is not yet supported"
+             );
+         }
+ 
+         anyhow::bail!(
+             "ci preflight found no supported dependency files in {}; supported files: package-lock.json, pnpm-lock.yaml, requirements.txt, requirements-dev.txt",
+             cwd.display()
+         );
+     }
+ 
+     Ok(discovered)
+ }
+ 
+ fn aggregate_ci_preflight_findings(
+     discovered: Vec<(String, Vec<ScanFinding>)>,
+ ) -> anyhow::Result<Vec<ScanFinding>> {
+     let mut merged: BTreeMap<String, (ScanFinding, String)> = BTreeMap::new();
+ 
+     for (source, findings) in discovered {
+         for finding in findings {
+             let key = finding.coordinate.purl();
+@@ -359,153 +420,153 @@ fn aggregate_ci_preflight_findings(
+                 }
+                 continue;
+             }
+ 
+             merged.insert(key, (finding, source.clone()));
+         }
+     }
+ 
+     Ok(merged
+         .into_values()
+         .map(|(finding, _)| finding)
+         .collect::<Vec<_>>())
+ }
+ 
+ fn run_auth(command: AuthCommand) -> anyhow::Result<i32> {
+     match command {
+         AuthCommand::Login(args) => {
+             let existing = load_cli_config()?;
+             let config = CliConfig {
+                 api_url: normalize_api_url(&args.api_url),
+                 token: args.token.or(existing.and_then(|entry| entry.token)),
+             };
+             probe_api_health(&config.api_url)?;
+             let config_path = save_cli_config(&config)?;
+             let token_status = if config.token.is_some() {
+                 "token configured"
+             } else {
+                 "token not configured"
+             };
+             println!(
+                 "saved CLI config at {} for {} ({token_status})",
+                 config_path.display(),
+                 config.api_url,
+             );
+         }
+         AuthCommand::Logout => {
+             let config_path = cli_config_path()?;
+             if clear_cli_config()? {
+                 println!("local auth state cleared at {}", config_path.display());
+             } else {
+-                println!("local auth state already empty at {}", config_path.display());
++                println!(
++                    "local auth state already empty at {}",
++                    config_path.display()
++                );
+             }
+         }
+         AuthCommand::Status => match load_cli_config()? {
+             Some(config) => {
+                 let health = if probe_api_health(&config.api_url).is_ok() {
+                     "reachable"
+                 } else {
+                     "unreachable"
+                 };
+                 let token_status = if config.token.is_some() {
+                     "configured"
+                 } else {
+                     "not configured"
+                 };
+                 println!(
+                     "auth status: configured for {} (token: {token_status}, api: {health})",
+                     config.api_url,
+                 );
+             }
+             None => println!("auth status: not configured"),
+         },
+     }
+     Ok(0)
+ }
+ 
+ fn cli_config_path() -> anyhow::Result<PathBuf> {
+     let base_dir = if let Ok(path) = env::var(CONFIG_OVERRIDE_ENV) {
+         PathBuf::from(path)
+     } else if let Ok(path) = env::var("XDG_CONFIG_HOME") {
+         PathBuf::from(path).join("aegiscudo")
+     } else if let Ok(path) = env::var("HOME") {
+         PathBuf::from(path).join(".config").join("aegiscudo")
+     } else {
+-        anyhow::bail!(
+-            "HOME or XDG_CONFIG_HOME must be set to persist CLI configuration"
+-        );
++        anyhow::bail!("HOME or XDG_CONFIG_HOME must be set to persist CLI configuration");
+     };
+ 
+     Ok(base_dir.join("aedo.json"))
+ }
+ 
+ fn load_cli_config() -> anyhow::Result<Option<CliConfig>> {
+     let path = cli_config_path()?;
+     if !path.exists() {
+         return Ok(None);
+     }
+ 
+     let contents = fs::read_to_string(&path)
+         .with_context(|| format!("reading CLI config {}", path.display()))?;
+     let config = serde_json::from_str(&contents)
+         .with_context(|| format!("parsing CLI config {}", path.display()))?;
+     Ok(Some(config))
+ }
+ 
+ fn save_cli_config(config: &CliConfig) -> anyhow::Result<PathBuf> {
+     let path = cli_config_path()?;
+     if let Some(parent) = path.parent() {
+         fs::create_dir_all(parent)
+             .with_context(|| format!("creating CLI config directory {}", parent.display()))?;
+     }
+     fs::write(&path, serde_json::to_vec_pretty(config)?)
+         .with_context(|| format!("writing CLI config {}", path.display()))?;
+     Ok(path)
+ }
+ 
+ fn clear_cli_config() -> anyhow::Result<bool> {
+     let path = cli_config_path()?;
+     if !path.exists() {
+         return Ok(false);
+     }
+-    fs::remove_file(&path)
+-        .with_context(|| format!("removing CLI config {}", path.display()))?;
++    fs::remove_file(&path).with_context(|| format!("removing CLI config {}", path.display()))?;
+     Ok(true)
+ }
+ 
+ fn normalize_api_url(api_url: &str) -> String {
+     api_url.trim_end_matches('/').to_owned()
+ }
+ 
+ fn probe_api_health(api_url: &str) -> anyhow::Result<()> {
+     let client = Client::builder().timeout(HEALTH_TIMEOUT).build()?;
+     client
+         .get(format!("{}/healthz", normalize_api_url(api_url)))
+         .send()
+         .and_then(reqwest::blocking::Response::error_for_status)
+         .with_context(|| format!("probing Aegiscudo API health at {api_url}/healthz"))?;
+     Ok(())
+ }
+ 
+ fn run_scan(command: ScanCommand) -> anyhow::Result<i32> {
+     match command {
+         ScanCommand::Npm(args) => {
+             ensure_manifest_upload_supported(args.upload_manifest)?;
+             let findings = parse_package_lock(&args.lockfile)?;
+             let report = submit_scan_report(
+                 args.lockfile.display().to_string(),
+                 args.upload_manifest,
+                 findings,
+             )?;
+             print_report(&report, args.output_format)?;
+             Ok(exit_code(&report.findings, args.fail_on))
+         }
+         ScanCommand::Pnpm(args) => {
+             ensure_manifest_upload_supported(args.upload_manifest)?;
+             let findings = parse_pnpm_lock(&args.lockfile)?;
+             let report = submit_scan_report(
+                 args.lockfile.display().to_string(),
+                 args.upload_manifest,
+                 findings,
+             )?;
+             print_report(&report, args.output_format)?;
+             Ok(exit_code(&report.findings, args.fail_on))
+@@ -520,417 +581,735 @@ fn run_scan(command: ScanCommand) -> anyhow::Result<i32> {
+             )?;
+             print_report(&report, args.output_format)?;
+             Ok(exit_code(&report.findings, args.fail_on))
+         }
+         ScanCommand::Cargo(_) | ScanCommand::Maven(_) | ScanCommand::Docker(_) => {
+             println!("not-yet-supported: this ecosystem is phase-gated after the npm/PyPI MVP");
+             Ok(3)
+         }
+     }
+ }
+ 
+ fn ensure_manifest_upload_supported(upload_manifest: bool) -> anyhow::Result<()> {
+     if upload_manifest {
+         anyhow::bail!(
+             "--upload-manifest is not yet supported in Phase 1; aedo currently submits package coordinates and artifact digests only"
+         );
+     }
+ 
+     Ok(())
+ }
+ 
+ fn run_explain(args: ExplainArgs) -> anyhow::Result<i32> {
+     let config = load_api_config()?;
+     let coordinate = parse_explain_coordinate(&args.package, args.ecosystem)?;
+     let response = submit_explain_request(&config, &coordinate)?;
+ 
+     println!("coordinate: {}", response.coordinate.purl());
+     println!("decision: {}", response.recommended_action);
+     println!("confidence: {}", response.confidence);
+     println!("trace_id: {}", response.trace_id);
+     println!("summary:");
+     println!("{}", serde_json::to_string_pretty(&response.summary)?);
+     if let Some(ai_explanation) = response.ai_explanation {
+         println!("ai_explanation:");
+         println!("{}", serde_json::to_string_pretty(&ai_explanation)?);
+     }
+ 
+     Ok(0)
+ }
+ 
++fn enrich_sbom_with_decisions(
++    document: &mut SbomDocument,
++    config: &CliConfig,
++) -> anyhow::Result<()> {
++    let findings = document
++        .decision_inputs()
++        .into_iter()
++        .map(|input| ScanFinding {
++            coordinate: input.coordinate,
++            integrity: input.integrity,
++            decision: PolicyDecision::Allow,
++        })
++        .collect::<Vec<_>>();
++
++    if findings.is_empty() {
++        return Ok(());
++    }
++
++    let remote_findings = match submit_scan_findings(config, &findings) {
++        Ok(findings) => findings,
++        Err(error) => {
++            eprintln!(
++                "skipping Aegiscudo decision enrichment because remote decision lookup failed: {error}"
++            );
++            return Ok(());
++        }
++    };
++    let resolved_decisions = remote_findings
++        .into_iter()
++        .map(|finding| SbomResolvedDecision {
++            coordinate: finding.coordinate,
++            decision: finding.decision,
++            decision_timestamp: finding.decision_timestamp,
++        })
++        .collect::<Vec<_>>();
++
++    if let Err(error) = document.apply_resolved_decisions(&resolved_decisions) {
++        eprintln!(
++            "skipping Aegiscudo decision enrichment because remote decision response was invalid: {error}"
++        );
++    }
++
++    Ok(())
++}
++
+ fn parse_pnpm_lock(path: &PathBuf) -> anyhow::Result<Vec<ScanFinding>> {
+     let contents =
+         fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+ 
+     let mut findings = Vec::new();
+     let mut in_packages = false;
+     let mut current_key: Option<String> = None;
++    let mut current_integrity: Option<String> = None;
++    let mut in_resolution = false;
+ 
+     for line in contents.lines() {
+         // Top-level YAML section header (no leading whitespace)
+         if !line.starts_with(' ') {
++            flush_pnpm_package(&mut findings, &mut current_key, &mut current_integrity);
+             if !line.is_empty() {
+                 in_packages = line == "packages:";
+-                current_key = None;
+             }
++            in_resolution = false;
+             continue;
+         }
+ 
+         if !in_packages {
+             continue;
+         }
+ 
+         // 2-space-indented package key: "  'name@version':" or "  name@version:"
+         if let Some(rest) = line.strip_prefix("  ") {
+             if !rest.starts_with(' ') && rest.ends_with(':') {
++                flush_pnpm_package(&mut findings, &mut current_key, &mut current_integrity);
+                 let key = rest.trim_end_matches(':').trim_matches('\'');
+                 current_key = Some(key.to_owned());
++                in_resolution = false;
+                 continue;
+             }
+         }
+ 
+-        // 4-space-indented resolution line: "    resolution: {integrity: sha512-...}"
+         if current_key.is_some() {
+-            if let Some(rest) = line.strip_prefix("    resolution: {integrity: ") {
+-                let integrity = rest
+-                    .split_once([',', '}'])
+-                    .map(|(v, _)| v)
+-                    .unwrap_or_else(|| rest.trim_end_matches('}'));
+-                let key = current_key.take().unwrap();
+-                let (name, version) = split_pnpm_key(&key);
+-                if !name.is_empty() && !version.is_empty() {
+-                    findings.push(finding(
+-                        PackageEcosystem::Npm,
+-                        name,
+-                        Some(version),
+-                        Some(integrity.to_owned()),
+-                    ));
++            if let Some(rest) = line.strip_prefix("    resolution: {") {
++                current_integrity = parse_pnpm_inline_integrity(rest);
++                in_resolution = false;
++                continue;
++            }
++
++            if line.trim() == "resolution:" {
++                in_resolution = true;
++                continue;
++            }
++
++            if in_resolution {
++                if let Some(rest) = line.strip_prefix("      integrity: ") {
++                    current_integrity = Some(parse_pnpm_yaml_scalar(rest));
++                    continue;
++                }
++
++                if !line.starts_with("      ") {
++                    in_resolution = false;
+                 }
+             }
+         }
+     }
+ 
++    flush_pnpm_package(&mut findings, &mut current_key, &mut current_integrity);
++
+     Ok(findings)
+ }
+ 
++fn flush_pnpm_package(
++    findings: &mut Vec<ScanFinding>,
++    current_key: &mut Option<String>,
++    current_integrity: &mut Option<String>,
++) {
++    let Some(key) = current_key.take() else {
++        current_integrity.take();
++        return;
++    };
++
++    let (name, version) = split_pnpm_key(&key);
++    if !name.is_empty() && !version.is_empty() {
++        findings.push(finding(
++            PackageEcosystem::Npm,
++            name,
++            Some(version),
++            current_integrity.take(),
++        ));
++    } else {
++        current_integrity.take();
++    }
++}
++
++fn parse_pnpm_inline_integrity(value: &str) -> Option<String> {
++    value
++        .trim_end_matches('}')
++        .split(',')
++        .find_map(|entry| entry.trim().strip_prefix("integrity: "))
++        .map(parse_pnpm_yaml_scalar)
++}
++
++fn parse_pnpm_yaml_scalar(value: &str) -> String {
++    value
++        .trim()
++        .trim_end_matches(',')
++        .trim_matches('\'')
++        .trim_matches('"')
++        .to_owned()
++}
++
+ /// Split a pnpm lockfile package key into (name, version).
+ /// Keys follow the format `name@version` for unscoped packages and
+ /// `@scope/name@version` for scoped packages.
+ fn split_pnpm_key(key: &str) -> (String, String) {
+-    if key.starts_with('@') {
+-        // Scoped: find the '@' that comes after the first '/'
+-        if let Some(slash) = key.find('/') {
+-            if let Some(at) = key[slash + 1..].find('@') {
++    let normalized = key.trim_matches('/');
++    let base = normalized.split('(').next().unwrap_or(normalized);
++
++    if base.starts_with('@') {
++        if let Some(slash) = base.find('/') {
++            if let Some(at) = base[slash + 1..].rfind('@') {
+                 let sep = slash + 1 + at;
+-                return (key[..sep].to_owned(), key[sep + 1..].to_owned());
++                return (base[..sep].to_owned(), base[sep + 1..].to_owned());
++            }
++        }
++    } else if let Some(at) = base.rfind('@') {
++        return (base[..at].to_owned(), base[at + 1..].to_owned());
++    }
++    (base.to_owned(), String::new())
++}
++
++fn normalize_requirements_name(name: &str) -> Option<String> {
++    let normalized = name.split('[').next().unwrap_or(name).trim();
++    (!normalized.is_empty()).then(|| normalized.to_owned())
++}
++
++fn parse_requirements_hash_spec(value: &str) -> Option<String> {
++    let (algorithm, digest) = value.split_once(':')?;
++    match algorithm {
++        "sha256" | "sha512" if !digest.trim().is_empty() => {
++            Some(format!("{}:{}", algorithm, digest.trim()))
++        }
++        _ => None,
++    }
++}
++
++fn extract_requirements_integrity(tokens: &[&str]) -> Option<String> {
++    let mut hashes = BTreeSet::new();
++
++    for (index, token) in tokens.iter().enumerate() {
++        if let Some(value) = token.strip_prefix("--hash=") {
++            if let Some(hash) = parse_requirements_hash_spec(value) {
++                hashes.insert(hash);
++            }
++            continue;
++        }
++        if *token == "--hash" {
++            if let Some(next) = tokens.get(index + 1) {
++                if let Some(hash) = parse_requirements_hash_spec(next) {
++                    hashes.insert(hash);
++                }
+             }
+         }
+-    } else if let Some(at) = key.find('@') {
+-        return (key[..at].to_owned(), key[at + 1..].to_owned());
+     }
+-    (key.to_owned(), String::new())
++
++    (hashes.len() == 1)
++        .then(|| hashes.into_iter().next())
++        .flatten()
++}
++
++fn parse_requirements_scan_line(line: &str) -> Option<(String, Option<String>, Option<String>)> {
++    let content = line.split('#').next().unwrap_or(line).trim();
++    if content.is_empty() || content.starts_with('-') {
++        return None;
++    }
++
++    let content = content.split(';').next().unwrap_or(content).trim();
++    if content.is_empty() {
++        return None;
++    }
++
++    let tokens = content.split_whitespace().collect::<Vec<_>>();
++    let package = *tokens.first()?;
++    let integrity = extract_requirements_integrity(&tokens[1..]);
++    let (raw_name, version) = if tokens.get(1) == Some(&"@") {
++        (package.to_owned(), None)
++    } else {
++        package
++            .split_once("==")
++            .map(|(name, version)| (name.trim().to_owned(), Some(version.trim().to_owned())))
++            .unwrap_or_else(|| {
++                (
++                    package
++                        .split(['<', '>', '~', '='])
++                        .next()
++                        .unwrap_or(package)
++                        .trim()
++                        .to_owned(),
++                    None,
++                )
++            })
++    };
++    let name = normalize_requirements_name(&raw_name)?;
++
++    Some((name, version, integrity))
++}
++
++fn package_lock_name_from_path(path: &str) -> Option<&str> {
++    let trimmed = path.trim_matches('/');
++    let name = trimmed
++        .rsplit("/node_modules/")
++        .next()
++        .unwrap_or(trimmed)
++        .trim_start_matches("node_modules/")
++        .trim();
++    (!name.is_empty()).then_some(name)
+ }
+ 
+ fn parse_package_lock(path: &PathBuf) -> anyhow::Result<Vec<ScanFinding>> {
+     if let Some(file_name) = path.file_name().and_then(|value| value.to_str()) {
+         match file_name {
+             "yarn.lock" => anyhow::bail!(
+                 "npm scan currently supports package-lock.json only; yarn.lock is not yet supported"
+             ),
+             "pnpm-lock.yaml" => anyhow::bail!(
+                 "npm scan currently supports package-lock.json only; use `aedo scan pnpm --lockfile pnpm-lock.yaml` for pnpm lockfiles"
+             ),
+             _ => {}
+         }
+     }
+ 
+     #[derive(Deserialize)]
+     struct PackageLock {
+         #[serde(default)]
+         packages: BTreeMap<String, PackageEntry>,
+         #[serde(default)]
+         dependencies: BTreeMap<String, PackageEntry>,
+     }
+     #[derive(Deserialize)]
+     struct PackageEntry {
+         version: Option<String>,
+         integrity: Option<String>,
++        #[serde(default)]
++        dependencies: BTreeMap<String, PackageEntry>,
++    }
++
++    fn collect_legacy_package_lock_findings(
++        raw_name: &str,
++        entry: &PackageEntry,
++        findings: &mut Vec<ScanFinding>,
++    ) {
++        findings.push(finding(
++            PackageEcosystem::Npm,
++            raw_name.to_owned(),
++            entry.version.clone(),
++            entry.integrity.clone(),
++        ));
++
++        for (child_name, child_entry) in &entry.dependencies {
++            collect_legacy_package_lock_findings(child_name, child_entry, findings);
++        }
+     }
+ 
+     let lockfile: PackageLock = serde_json::from_str(
+         &fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?,
+     )
+     .with_context(|| format!("parsing npm lockfile {}", path.display()))?;
+ 
+     let mut findings = Vec::new();
+     for (package_path, entry) in lockfile.packages {
+-        if package_path.is_empty() || !package_path.starts_with("node_modules/") {
++        if package_path.is_empty() || !package_path.contains("node_modules/") {
+             continue;
+         }
+-        let name = package_path.trim_start_matches("node_modules/").to_owned();
++        let Some(name) = package_lock_name_from_path(&package_path).map(str::to_owned) else {
++            continue;
++        };
+         findings.push(finding(
+             PackageEcosystem::Npm,
+             name,
+             entry.version,
+             entry.integrity,
+         ));
+     }
+     if findings.is_empty() {
+         for (name, entry) in lockfile.dependencies {
+-            findings.push(finding(
+-                PackageEcosystem::Npm,
+-                name,
+-                entry.version,
+-                entry.integrity,
+-            ));
++            collect_legacy_package_lock_findings(&name, &entry, &mut findings);
+         }
+     }
+     Ok(findings)
+ }
+ 
+ fn parse_requirements(path: &PathBuf) -> anyhow::Result<Vec<ScanFinding>> {
+-    let contents =
+-        fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
++    collect_requirements_findings(path, &mut BTreeSet::new())
++}
++
++fn collect_requirements_findings(
++    path: &Path,
++    visited: &mut BTreeSet<PathBuf>,
++) -> anyhow::Result<Vec<ScanFinding>> {
++    let visit_key = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
++    if !visited.insert(visit_key) {
++        return Ok(Vec::new());
++    }
++
+     let mut findings = Vec::new();
+-    for line in contents.lines() {
++    for line in read_requirements_logical_lines(path)? {
+         let trimmed = line.trim();
+-        if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with('-') {
++        if trimmed.is_empty() || trimmed.starts_with('#') {
+             continue;
+         }
+-        let package = trimmed.split('#').next().unwrap_or(trimmed).trim();
+-        let (name, version) = package
+-            .split_once("==")
+-            .map(|(name, version)| (name.trim().to_owned(), Some(version.trim().to_owned())))
+-            .unwrap_or_else(|| {
+-                (
+-                    package
+-                        .split(['<', '>', '~', '='])
+-                        .next()
+-                        .unwrap_or(package)
+-                        .trim()
+-                        .to_owned(),
+-                    None,
+-                )
+-            });
+-        findings.push(finding(PackageEcosystem::Pypi, name, version, None));
++        if let Some(include_path) = parse_requirements_include(trimmed) {
++            let nested_path = path
++                .parent()
++                .unwrap_or_else(|| Path::new("."))
++                .join(include_path);
++            findings.extend(
++                collect_requirements_findings(&nested_path, visited).with_context(|| {
++                    format!(
++                        "reading included requirements {} from {}",
++                        nested_path.display(),
++                        path.display()
++                    )
++                })?,
++            );
++            continue;
++        }
++        if trimmed.starts_with('-') {
++            continue;
++        }
++        let Some((name, version, integrity)) = parse_requirements_scan_line(trimmed) else {
++            continue;
++        };
++        findings.push(finding(PackageEcosystem::Pypi, name, version, integrity));
+     }
+     Ok(findings)
+ }
+ 
++fn read_requirements_logical_lines(path: &Path) -> anyhow::Result<Vec<String>> {
++    let contents =
++        fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
++    let mut logical_lines = Vec::new();
++    let mut current = String::new();
++
++    for raw_line in contents.lines() {
++        let trimmed = raw_line.trim();
++        if !current.is_empty() && trimmed.is_empty() {
++            continue;
++        }
++        if current.is_empty() {
++            current.push_str(trimmed);
++        } else {
++            current.push(' ');
++            current.push_str(trimmed);
++        }
++
++        if current.ends_with('\\') {
++            current.pop();
++            current = current.trim_end().to_owned();
++            continue;
++        }
++
++        if !current.trim().is_empty() {
++            logical_lines.push(current.trim().to_owned());
++        }
++        current.clear();
++    }
++
++    if !current.trim().is_empty() {
++        logical_lines.push(current.trim().to_owned());
++    }
++
++    Ok(logical_lines)
++}
++
++fn parse_requirements_include(line: &str) -> Option<&str> {
++    let include = if let Some(value) = line.strip_prefix("-r") {
++        value
++    } else if let Some(value) = line.strip_prefix("--requirement") {
++        value
++    } else {
++        return None;
++    };
++
++    let include = include.trim_start_matches('=').trim();
++    let include = include.split('#').next().unwrap_or(include).trim();
++    (!include.is_empty()).then_some(include)
++}
++
+ fn finding(
+     ecosystem: PackageEcosystem,
+     raw_name: String,
+     version: Option<String>,
+     integrity: Option<String>,
+ ) -> ScanFinding {
+     let (namespace, name) = if ecosystem == PackageEcosystem::Npm && raw_name.starts_with('@') {
+         match raw_name.split_once('/') {
+             Some((scope, name)) => (
+                 Some(scope.trim_start_matches('@').to_owned()),
+                 name.to_owned(),
+             ),
+             None => (None, raw_name),
+         }
+     } else {
+         (None, raw_name)
+     };
+     ScanFinding {
+         coordinate: PackageCoordinate::new(ecosystem, name, version, namespace),
+         integrity,
+         decision: PolicyDecision::Allow,
+     }
+ }
+ 
+ fn submit_scan_report(
+     source: String,
+     upload_manifest: bool,
+     findings: Vec<ScanFinding>,
+ ) -> anyhow::Result<ScanReport> {
+     if findings.is_empty() {
+         return Ok(ScanReport {
+             source,
+             upload_manifest,
+             findings,
+         });
+     }
+ 
+     let config = load_api_config()?;
+     let remote_findings = submit_scan_findings(&config, &findings)?;
+     Ok(ScanReport {
+         source,
+         upload_manifest,
+         findings: merge_scan_findings(findings, remote_findings)?,
+     })
+ }
+ 
+ fn load_api_config() -> anyhow::Result<CliConfig> {
+     Ok(load_cli_config()?.unwrap_or_else(|| CliConfig {
+         api_url: normalize_api_url(DEFAULT_API_URL),
+         token: None,
+     }))
+ }
+ 
++fn sbom_enrichment_config_is_usable(config: &CliConfig) -> bool {
++    let api_url = normalize_api_url(&config.api_url);
++    if api_url.is_empty() {
++        return false;
++    }
++
++    let Ok(parsed) = reqwest::Url::parse(&api_url) else {
++        return false;
++    };
++
++    matches!(parsed.scheme(), "http" | "https")
++}
++
++fn load_sbom_enrichment_config(document: &SbomDocument) -> anyhow::Result<Option<CliConfig>> {
++    if document.supports_remote_decision_enrichment() {
++        return match load_cli_config() {
++            Ok(Some(mut config)) if sbom_enrichment_config_is_usable(&config) => {
++                config.api_url = normalize_api_url(&config.api_url);
++                Ok(Some(config))
++            }
++            Ok(Some(config)) => {
++                eprintln!(
++                    "skipping Aegiscudo decision enrichment because CLI config API URL is unusable: {}",
++                    config.api_url
++                );
++                Ok(None)
++            }
++            Ok(None) => Ok(None),
++            Err(error) => {
++                eprintln!(
++                    "skipping Aegiscudo decision enrichment because CLI config could not be loaded: {error}"
++                );
++                Ok(None)
++            }
++        };
++    }
++
++    Ok(None)
++}
++
+ fn submit_scan_findings(
+     config: &CliConfig,
+     findings: &[ScanFinding],
+ ) -> anyhow::Result<Vec<CliScanApiFinding>> {
+     let client = Client::builder().timeout(SCAN_TIMEOUT).build()?;
+     let submission = CliScanSubmission {
+         packages: findings
+             .iter()
+             .map(|finding| CliScanSubmissionPackage {
+                 coordinate: finding.coordinate.clone(),
+                 artifact_sha256: artifact_sha256_from_finding(finding),
+             })
+             .collect(),
+     };
+ 
+     let mut request = client
+         .post(format!("{}/v1/cli/scans", config.api_url))
+         .json(&submission);
+     if let Some(token) = config.token.as_deref() {
+         request = request.bearer_auth(token);
+     }
+ 
+     let response = request
+         .send()
+         .and_then(reqwest::blocking::Response::error_for_status)
+         .with_context(|| format!("submitting CLI scan to {}/v1/cli/scans", config.api_url))?;
+     let body: CliScanApiResponse = response
+         .json()
+         .with_context(|| format!("parsing CLI scan response from {}", config.api_url))?;
+     Ok(body.findings)
+ }
+ 
+ fn submit_explain_request(
+     config: &CliConfig,
+     coordinate: &PackageCoordinate,
+ ) -> anyhow::Result<CliExplainApiResponse> {
+     let client = Client::builder().timeout(SCAN_TIMEOUT).build()?;
+     let mut request = client
+         .post(format!("{}/v1/cli/explain", config.api_url))
+         .json(&CliExplainSubmission {
+             coordinate: coordinate.clone(),
+         });
+     if let Some(token) = config.token.as_deref() {
+         request = request.bearer_auth(token);
+     }
+ 
+     request
+         .send()
+         .and_then(reqwest::blocking::Response::error_for_status)
+-        .with_context(|| format!("submitting explain lookup to {}/v1/cli/explain", config.api_url))?
++        .with_context(|| {
++            format!(
++                "submitting explain lookup to {}/v1/cli/explain",
++                config.api_url
++            )
++        })?
+         .json()
+         .with_context(|| format!("parsing explain response from {}", config.api_url))
+ }
+ 
+ fn parse_explain_coordinate(
+     spec: &str,
+     ecosystem: EcosystemArg,
+ ) -> anyhow::Result<PackageCoordinate> {
+     match ecosystem {
+         EcosystemArg::Npm => parse_npm_explain_coordinate(spec),
+         EcosystemArg::Pypi => parse_pypi_explain_coordinate(spec),
+     }
+ }
+ 
+ fn parse_npm_explain_coordinate(spec: &str) -> anyhow::Result<PackageCoordinate> {
+     let trimmed = spec.trim();
+     let separator = trimmed
+         .rfind('@')
+         .filter(|index| *index > 0)
+         .ok_or_else(|| anyhow::anyhow!("npm explain expects <package>@<version>"))?;
+     let name = &trimmed[..separator];
+     let version = &trimmed[separator + 1..];
+     if name.is_empty() || version.trim().is_empty() {
+         anyhow::bail!("npm explain expects <package>@<version>");
+     }
+ 
+     if let Some(scoped_name) = name.strip_prefix('@') {
+-        let (scope, package_name) = scoped_name
+-            .split_once('/')
+-            .ok_or_else(|| anyhow::anyhow!("scoped npm packages must be formatted as @scope/name@version"))?;
++        let (scope, package_name) = scoped_name.split_once('/').ok_or_else(|| {
++            anyhow::anyhow!("scoped npm packages must be formatted as @scope/name@version")
++        })?;
+         if scope.is_empty() || package_name.is_empty() || package_name.contains('/') {
+             anyhow::bail!("scoped npm packages must be formatted as @scope/name@version");
+         }
+         Ok(PackageCoordinate::new(
+             PackageEcosystem::Npm,
+             package_name,
+             Some(version),
+             Some(scope),
+         ))
+     } else {
+         if name.contains('/') {
+             anyhow::bail!("unscoped npm packages must be formatted as name@version");
+         }
+         Ok(PackageCoordinate::new(
+             PackageEcosystem::Npm,
+             name,
+             Some(version),
+             None::<String>,
+         ))
+     }
+ }
+ 
+ fn parse_pypi_explain_coordinate(spec: &str) -> anyhow::Result<PackageCoordinate> {
+     let trimmed = spec.trim();
+     let (name, version) = trimmed
+         .rsplit_once('@')
+         .ok_or_else(|| anyhow::anyhow!("pypi explain expects <package>@<version>"))?;
+     if name.trim().is_empty() || version.trim().is_empty() {
+         anyhow::bail!("pypi explain expects <package>@<version>");
+     }
+     Ok(PackageCoordinate::new(
+         PackageEcosystem::Pypi,
+         name.trim(),
+         Some(version.trim()),
+         None::<String>,
+     ))
+ }
+ 
+ fn artifact_sha256_from_finding(finding: &ScanFinding) -> Option<String> {
+     let raw = finding.integrity.as_deref()?.trim();
+     let candidate = raw
+         .strip_prefix("sha256-")
+         .or_else(|| raw.strip_prefix("sha256:"))
+         .unwrap_or(raw);
+-    if candidate.len() == 64 && candidate.chars().all(|character| character.is_ascii_hexdigit()) {
++    if candidate.len() == 64
++        && candidate
++            .chars()
++            .all(|character| character.is_ascii_hexdigit())
++    {
+         Some(candidate.to_ascii_lowercase())
+     } else {
+         None
+     }
+ }
+ 
+ fn merge_scan_findings(
+     mut local_findings: Vec<ScanFinding>,
+     remote_findings: Vec<CliScanApiFinding>,
+ ) -> anyhow::Result<Vec<ScanFinding>> {
+     if local_findings.len() != remote_findings.len() {
+         anyhow::bail!(
+             "scan response count {} did not match request count {}",
+             remote_findings.len(),
+             local_findings.len()
+         );
+     }
+ 
+     for (local, remote) in local_findings.iter_mut().zip(remote_findings.into_iter()) {
+         if local.coordinate != remote.coordinate {
+             anyhow::bail!(
+                 "scan response did not align with request order for {}",
+                 local.coordinate.purl()
+             );
+         }
+         local.decision = remote.decision;
+     }
+ 
+     Ok(local_findings)
+ }
+ 
+ fn print_report(report: &ScanReport, format: OutputFormat) -> anyhow::Result<()> {
+     match format {
+         OutputFormat::Text => {
+             for finding in &report.findings {
+                 println!(
+                     "{} {}",
+                     finding.coordinate.purl(),
+                     serde_json::to_string(&finding.decision)?
+                 );
+@@ -956,141 +1335,339 @@ fn sarif(report: &ScanReport) -> serde_json::Value {
+                 "level": match finding.decision { PolicyDecision::Allow => "note", PolicyDecision::AllowWithWarning => "warning", _ => "error" },
+                 "message": { "text": format!("{} -> {:?}", finding.coordinate.purl(), finding.decision) }
+             })).collect::<Vec<_>>()
+         }]
+     })
+ }
+ 
+ fn exit_code(findings: &[ScanFinding], fail_on: FailOn) -> i32 {
+     let failed = findings.iter().any(|finding| match fail_on {
+         FailOn::Warn => finding.decision != PolicyDecision::Allow,
+         FailOn::Block => finding.decision.is_blocking(),
+     });
+     if failed { 1 } else { 0 }
+ }
+ 
+ #[cfg(test)]
+ mod tests {
+     use super::*;
+     use std::io::{Read, Write};
+     use std::net::TcpListener;
+     use std::sync::Mutex;
+     use std::thread;
+     use tempfile::tempdir;
+ 
+     fn env_lock() -> &'static Mutex<()> {
+         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+         LOCK.get_or_init(|| Mutex::new(()))
+     }
+ 
+     #[test]
+     fn parses_package_lock_without_uploading_source() {
+         let dir = tempdir().unwrap();
+         let path = dir.path().join("package-lock.json");
+         fs::write(&path, r#"{"packages":{"node_modules/@scope/pkg":{"version":"1.0.0","integrity":"sha512-x"}}}"#).unwrap();
+         let findings = parse_package_lock(&path).unwrap();
+         assert_eq!(findings[0].coordinate.purl(), "pkg:npm/scope/pkg@1.0.0");
+         assert_eq!(findings[0].integrity.as_deref(), Some("sha512-x"));
+     }
+ 
+     #[test]
+-    fn parses_pnpm_lock() {
++    fn parses_nested_package_lock_names() {
+         let dir = tempdir().unwrap();
+-        let path = dir.path().join("pnpm-lock.yaml");
++        let path = dir.path().join("package-lock.json");
+         fs::write(
+             &path,
+-            "lockfileVersion: '9.0'\n\npackages:\n\n  ajv@8.20.0:\n    resolution: {integrity: sha512-abc==}\n    engines: {node: '>=12.0.0'}\n\n  '@babel/core@7.29.0':\n    resolution: {integrity: sha512-xyz==}\n    engines: {node: '>=6.9.0'}\n\nsnapshots:\n",
++            r#"{"packages":{"node_modules/a/node_modules/b":{"version":"2.0.0"}}}"#,
+         )
+         .unwrap();
+-        let findings = parse_pnpm_lock(&path).unwrap();
+-        assert_eq!(findings.len(), 2);
+-        assert_eq!(findings[0].coordinate.purl(), "pkg:npm/ajv@8.20.0");
+-        assert_eq!(findings[0].integrity.as_deref(), Some("sha512-abc=="));
+-        assert_eq!(findings[1].coordinate.purl(), "pkg:npm/babel/core@7.29.0");
+-        assert_eq!(findings[1].integrity.as_deref(), Some("sha512-xyz=="));
+-    }
+ 
+-    #[test]
+-    fn split_pnpm_key_unscoped() {
+-        assert_eq!(
+-            split_pnpm_key("ajv@8.20.0"),
+-            ("ajv".to_owned(), "8.20.0".to_owned())
+-        );
+-    }
++        let findings = parse_package_lock(&path).unwrap();
+ 
+-    #[test]
+-    fn split_pnpm_key_scoped() {
+-        assert_eq!(
+-            split_pnpm_key("@babel/core@7.29.0"),
+-            ("@babel/core".to_owned(), "7.29.0".to_owned())
+-        );
++        assert_eq!(findings.len(), 1);
++        assert_eq!(findings[0].coordinate.purl(), "pkg:npm/b@2.0.0");
+     }
+ 
+     #[test]
+-    fn parses_requirements() {
++    fn parses_workspace_package_lock_names() {
+         let dir = tempdir().unwrap();
+-        let path = dir.path().join("requirements.txt");
+-        fs::write(&path, "requests==2.32.0\n# comment\nuvicorn>=0.30\n").unwrap();
+-        let findings = parse_requirements(&path).unwrap();
+-        assert_eq!(findings.len(), 2);
+-        assert_eq!(findings[0].coordinate.purl(), "pkg:pypi/requests@2.32.0");
++        let path = dir.path().join("package-lock.json");
++        fs::write(
++            &path,
++            r#"{"packages":{"packages/web/node_modules/react":{"version":"19.1.0"}}}"#,
++        )
++        .unwrap();
++
++        let findings = parse_package_lock(&path).unwrap();
++
++        assert_eq!(findings.len(), 1);
++        assert_eq!(findings[0].coordinate.purl(), "pkg:npm/react@19.1.0");
+     }
+ 
+     #[test]
+-    fn npm_scan_reports_clear_error_for_yarn_lock() {
++    fn parses_legacy_package_lock_transitives() {
+         let dir = tempdir().unwrap();
+-        let path = dir.path().join("yarn.lock");
+-        fs::write(&path, "# yarn lockfile v1\nleft-pad@1.3.0:\n  version \"1.3.0\"\n").unwrap();
++        let path = dir.path().join("package-lock.json");
++        fs::write(
++            &path,
++            r#"{
++    "dependencies": {
++        "a": {
++            "version": "1.0.0",
++            "dependencies": {
++                "b": {
++                    "version": "2.0.0"
++                }
++            }
++        }
++    }
++}"#,
++        )
++        .unwrap();
+ 
+-        let error = parse_package_lock(&path).unwrap_err();
+-        assert!(
+-            error
+-                .to_string()
+-                .contains("yarn.lock is not yet supported")
+-        );
++        let findings = parse_package_lock(&path).unwrap();
++        let purls = findings
++            .into_iter()
++            .map(|finding| finding.coordinate.purl())
++            .collect::<Vec<_>>();
++
++        assert_eq!(purls, vec!["pkg:npm/a@1.0.0", "pkg:npm/b@2.0.0"]);
+     }
+ 
+     #[test]
+-    fn npm_scan_reports_clear_error_for_pnpm_lock() {
++    fn parses_pnpm_lock() {
+         let dir = tempdir().unwrap();
+         let path = dir.path().join("pnpm-lock.yaml");
+-        fs::write(&path, "lockfileVersion: '9.0'\npackages:\n").unwrap();
++        fs::write(
++            &path,
++            "lockfileVersion: '9.0'\n\npackages:\n\n  ajv@8.20.0:\n    resolution: {integrity: sha512-abc==}\n    engines: {node: '>=12.0.0'}\n\n  '@babel/core@7.29.0':\n    resolution: {integrity: sha512-xyz==}\n    engines: {node: '>=6.9.0'}\n\nsnapshots:\n",
++        )
++        .unwrap();
++        let findings = parse_pnpm_lock(&path).unwrap();
++        assert_eq!(findings.len(), 2);
++        assert_eq!(findings[0].coordinate.purl(), "pkg:npm/ajv@8.20.0");
++        assert_eq!(findings[0].integrity.as_deref(), Some("sha512-abc=="));
++        assert_eq!(findings[1].coordinate.purl(), "pkg:npm/babel/core@7.29.0");
++        assert_eq!(findings[1].integrity.as_deref(), Some("sha512-xyz=="));
++    }
++
++    #[test]
++    fn parses_pnpm_lock_multiline_resolution_and_missing_integrity() {
++        let dir = tempdir().unwrap();
++        let path = dir.path().join("pnpm-lock.yaml");
++        fs::write(
++            &path,
++            "lockfileVersion: '9.0'\n\npackages:\n\n  react@19.1.0:\n    resolution:\n      integrity: 'sha512-react=='\n      tarball: https://example.invalid/react.tgz\n\n  left-pad@1.3.0:\n    resolution:\n      tarball: https://example.invalid/left-pad.tgz\n\nsnapshots:\n",
++        )
++        .unwrap();
++
++        let findings = parse_pnpm_lock(&path).unwrap();
++
++        assert_eq!(findings.len(), 2);
++        assert_eq!(findings[0].coordinate.purl(), "pkg:npm/react@19.1.0");
++        assert_eq!(findings[0].integrity.as_deref(), Some("sha512-react=="));
++        assert_eq!(findings[1].coordinate.purl(), "pkg:npm/left-pad@1.3.0");
++        assert_eq!(findings[1].integrity, None);
++    }
++
++    #[test]
++    fn parses_pnpm_lock_slash_prefixed_keys() {
++        let dir = tempdir().unwrap();
++        let path = dir.path().join("pnpm-lock.yaml");
++        fs::write(
++            &path,
++            "lockfileVersion: '6.0'\n\npackages:\n  /ajv@8.20.0:\n    resolution: {integrity: sha512-abc==}\n\nsnapshots:\n",
++        )
++        .unwrap();
++
++        let findings = parse_pnpm_lock(&path).unwrap();
++
++        assert_eq!(findings.len(), 1);
++        assert_eq!(findings[0].coordinate.purl(), "pkg:npm/ajv@8.20.0");
++    }
++
++    #[test]
++    fn split_pnpm_key_unscoped() {
++        assert_eq!(
++            split_pnpm_key("ajv@8.20.0"),
++            ("ajv".to_owned(), "8.20.0".to_owned())
++        );
++    }
++
++    #[test]
++    fn split_pnpm_key_scoped() {
++        assert_eq!(
++            split_pnpm_key("@babel/core@7.29.0"),
++            ("@babel/core".to_owned(), "7.29.0".to_owned())
++        );
++    }
++
++    #[test]
++    fn split_pnpm_key_strips_peer_suffixes() {
++        assert_eq!(
++            split_pnpm_key("react-dom@19.1.0(react@19.1.0)"),
++            ("react-dom".to_owned(), "19.1.0".to_owned())
++        );
++        assert_eq!(
++            split_pnpm_key("@scope/pkg@1.2.3(peer@4.5.6)"),
++            ("@scope/pkg".to_owned(), "1.2.3".to_owned())
++        );
++    }
++
++    #[test]
++    fn parses_requirements() {
++        let dir = tempdir().unwrap();
++        let path = dir.path().join("requirements.txt");
++        fs::write(&path, "requests==2.32.0\n# comment\nuvicorn>=0.30\n").unwrap();
++        let findings = parse_requirements(&path).unwrap();
++        assert_eq!(findings.len(), 2);
++        assert_eq!(findings[0].coordinate.purl(), "pkg:pypi/requests@2.32.0");
++    }
++
++    #[test]
++    fn parses_recursive_requirements_includes() {
++        let dir = tempdir().unwrap();
++        let path = dir.path().join("requirements.txt");
++        let dev = dir.path().join("requirements-dev.txt");
++        let extra = dir.path().join("requirements-extra.txt");
++
++        fs::write(
++            &path,
++            "--requirement=requirements-dev.txt\nrequests==2.32.0\n",
++        )
++        .unwrap();
++        fs::write(&dev, "-r requirements-extra.txt\npytest==8.3.3\n").unwrap();
++        fs::write(&extra, "urllib3==2.2.2\n").unwrap();
++
++        let findings = parse_requirements(&path).unwrap();
++        let purls = findings
++            .into_iter()
++            .map(|finding| finding.coordinate.purl())
++            .collect::<Vec<_>>();
++
++        assert_eq!(
++            purls,
++            vec![
++                "pkg:pypi/urllib3@2.2.2",
++                "pkg:pypi/pytest@8.3.3",
++                "pkg:pypi/requests@2.32.0",
++            ]
++        );
++    }
++
++    #[test]
++    fn ignores_non_package_requirements_directives() {
++        let dir = tempdir().unwrap();
++        let path = dir.path().join("requirements.txt");
++        fs::write(
++            &path,
++            "--index-url https://example.invalid/simple\n--extra-index-url=https://mirror.invalid/simple\nrequests==2.32.0\n",
++        )
++        .unwrap();
++
++        let findings = parse_requirements(&path).unwrap();
++
++        assert_eq!(findings.len(), 1);
++        assert_eq!(findings[0].coordinate.purl(), "pkg:pypi/requests@2.32.0");
++    }
++
++    #[test]
++    fn normalizes_requirements_pep_508_syntax() {
++        let dir = tempdir().unwrap();
++        let path = dir.path().join("requirements.txt");
++        fs::write(
++            &path,
++            "requests[socks]==2.32.0\nurllib3==2.2.2; python_version < \"3.13\"\n",
++        )
++        .unwrap();
++
++        let findings = parse_requirements(&path).unwrap();
++        let purls = findings
++            .into_iter()
++            .map(|finding| finding.coordinate.purl())
++            .collect::<Vec<_>>();
++
++        assert_eq!(
++            purls,
++            vec!["pkg:pypi/requests@2.32.0", "pkg:pypi/urllib3@2.2.2"]
++        );
++    }
++
++    #[test]
++    fn parses_requirements_direct_references_and_hashes() {
++        let dir = tempdir().unwrap();
++        let path = dir.path().join("requirements.txt");
++        fs::write(
++            &path,
++            "demo @ https://example.invalid/demo-1.0.0.tar.gz --hash=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n",
++        )
++        .unwrap();
++
++        let findings = parse_requirements(&path).unwrap();
++
++        assert_eq!(findings.len(), 1);
++        assert_eq!(findings[0].coordinate.purl(), "pkg:pypi/demo");
++        assert_eq!(
++            findings[0].integrity.as_deref(),
++            Some("sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
++        );
++    }
++
++    #[test]
++    fn npm_scan_reports_clear_error_for_yarn_lock() {
++        let dir = tempdir().unwrap();
++        let path = dir.path().join("yarn.lock");
++        fs::write(
++            &path,
++            "# yarn lockfile v1\nleft-pad@1.3.0:\n  version \"1.3.0\"\n",
++        )
++        .unwrap();
++
++        let error = parse_package_lock(&path).unwrap_err();
++        assert!(error.to_string().contains("yarn.lock is not yet supported"));
++    }
++
++    #[test]
++    fn npm_scan_reports_clear_error_for_pnpm_lock() {
++        let dir = tempdir().unwrap();
++        let path = dir.path().join("pnpm-lock.yaml");
++        fs::write(&path, "lockfileVersion: '9.0'\npackages:\n").unwrap();
+ 
+         let error = parse_package_lock(&path).unwrap_err();
+         assert!(
+             error
+                 .to_string()
+                 .contains("use `aedo scan pnpm --lockfile pnpm-lock.yaml`")
+         );
+     }
+ 
+     #[test]
+     fn sarif_output_uses_expected_levels() {
+         let report = ScanReport {
+             source: "fixture-lockfile".to_owned(),
+             upload_manifest: false,
+             findings: vec![
+                 finding(
+                     PackageEcosystem::Npm,
+                     "safe-package".to_owned(),
+                     Some("1.0.0".to_owned()),
+                     None::<String>,
+                 ),
+                 ScanFinding {
+                     coordinate: PackageCoordinate::new(
+                         PackageEcosystem::Pypi,
+                         "warn-package".to_owned(),
+                         Some("2.0.0".to_owned()),
+                         None::<String>,
+                     ),
+                     integrity: None::<String>,
+                     decision: PolicyDecision::AllowWithWarning,
+                 },
+                 ScanFinding {
+                     coordinate: PackageCoordinate::new(
+                         PackageEcosystem::Pypi,
+                         "blocked-package".to_owned(),
+                         Some("3.0.0".to_owned()),
+                         None::<String>,
+                     ),
+                     integrity: None::<String>,
+                     decision: PolicyDecision::BlockPolicyViolation,
+@@ -1100,713 +1677,1812 @@ mod tests {
+ 
+         let sarif = sarif(&report);
+         let results = sarif["runs"][0]["results"].as_array().unwrap();
+ 
+         assert_eq!(sarif["version"], "2.1.0");
+         assert_eq!(results.len(), 3);
+         assert_eq!(results[0]["level"], "note");
+         assert_eq!(results[1]["level"], "warning");
+         assert_eq!(results[2]["level"], "error");
+     }
+ 
+     #[test]
+     fn exit_code_respects_warn_and_block_thresholds() {
+         let allow = finding(
+             PackageEcosystem::Npm,
+             "safe-package".to_owned(),
+             Some("1.0.0".to_owned()),
+             None::<String>,
+         );
+         let warning = ScanFinding {
+             coordinate: PackageCoordinate::new(
+                 PackageEcosystem::Pypi,
+                 "warn-package".to_owned(),
+                 Some("2.0.0".to_owned()),
+                 None::<String>,
+             ),
+             integrity: None::<String>,
+             decision: PolicyDecision::AllowWithWarning,
+         };
+         let block = ScanFinding {
+             coordinate: PackageCoordinate::new(
+                 PackageEcosystem::Pypi,
+                 "blocked-package".to_owned(),
+                 Some("3.0.0".to_owned()),
+                 None::<String>,
+             ),
+             integrity: None::<String>,
+             decision: PolicyDecision::BlockPolicyViolation,
+         };
+ 
+-        assert_eq!(exit_code(&[allow.clone()], FailOn::Warn), 0);
+-        assert_eq!(exit_code(&[warning.clone()], FailOn::Block), 0);
+-        assert_eq!(exit_code(&[warning, allow], FailOn::Warn), 1);
+-        assert_eq!(exit_code(&[block], FailOn::Block), 1);
++        assert_eq!(exit_code(&[allow.clone()], FailOn::Warn), 0);
++        assert_eq!(exit_code(&[warning.clone()], FailOn::Block), 0);
++        assert_eq!(exit_code(&[warning, allow], FailOn::Warn), 1);
++        assert_eq!(exit_code(&[block], FailOn::Block), 1);
++    }
++
++    #[test]
++    fn phase_gated_scan_targets_return_not_yet_supported_exit_code() {
++        let exit_code = run([
++            OsString::from("aedo"),
++            OsString::from("scan"),
++            OsString::from("cargo"),
++        ])
++        .unwrap();
++
++        assert_eq!(exit_code, 3);
++    }
++
++    #[test]
++    fn scan_rejects_upload_manifest_until_supported() {
++        let dir = tempdir().unwrap();
++        let lockfile = dir.path().join("package-lock.json");
++        fs::write(
++            &lockfile,
++            r#"{"packages":{"node_modules/left-pad":{"version":"1.3.0","integrity":"sha512-x"}}}"#,
++        )
++        .unwrap();
++
++        let error = run([
++            OsString::from("aedo"),
++            OsString::from("scan"),
++            OsString::from("npm"),
++            OsString::from("--lockfile"),
++            lockfile.into_os_string(),
++            OsString::from("--upload-manifest"),
++        ])
++        .unwrap_err();
++
++        assert!(
++            error
++                .to_string()
++                .contains("--upload-manifest is not yet supported")
++        );
++    }
++
++    #[test]
++    fn cli_config_round_trips_through_override_directory() {
++        let _guard = env_lock().lock().unwrap();
++        let dir = tempdir().unwrap();
++        unsafe {
++            env::set_var(CONFIG_OVERRIDE_ENV, dir.path());
++        }
++
++        let config = CliConfig {
++            api_url: "http://127.0.0.1:18002".to_owned(),
++            token: Some("fixture-token".to_owned()),
++        };
++        let path = save_cli_config(&config).unwrap();
++        assert!(path.exists());
++        assert_eq!(load_cli_config().unwrap(), Some(config));
++        assert!(clear_cli_config().unwrap());
++        assert_eq!(load_cli_config().unwrap(), None);
++
++        unsafe {
++            env::remove_var(CONFIG_OVERRIDE_ENV);
++        }
++    }
++
++    #[test]
++    fn auth_login_persists_config_after_health_probe() {
++        let _guard = env_lock().lock().unwrap();
++        let dir = tempdir().unwrap();
++        unsafe {
++            env::set_var(CONFIG_OVERRIDE_ENV, dir.path());
++        }
++
++        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
++        let address = listener.local_addr().unwrap();
++        let server = thread::spawn(move || {
++            if let Ok((mut stream, _)) = listener.accept() {
++                let mut buffer = [0_u8; 1024];
++                let _ = stream.read(&mut buffer);
++                stream
++                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
++                    .unwrap();
++            }
++        });
++
++        let exit_code = run([
++            OsString::from("aedo"),
++            OsString::from("auth"),
++            OsString::from("login"),
++            OsString::from("--api-url"),
++            OsString::from(format!("http://{address}")),
++            OsString::from("--token"),
++            OsString::from("fixture-token"),
++        ])
++        .unwrap();
++
++        assert_eq!(exit_code, 0);
++        assert_eq!(
++            load_cli_config().unwrap(),
++            Some(CliConfig {
++                api_url: format!("http://{address}"),
++                token: Some("fixture-token".to_owned()),
++            })
++        );
++
++        server.join().unwrap();
++        unsafe {
++            env::remove_var(CONFIG_OVERRIDE_ENV);
++        }
++    }
++
++    #[test]
++    fn policy_test_accepts_schema_valid_yaml() {
++        let dir = tempdir().unwrap();
++        let policy_file = dir.path().join("aegiscudo-policy.yaml");
++        fs::write(
++            &policy_file,
++            "id: 00000000-0000-0000-0000-000000000101\ntenant_id: 00000000-0000-0000-0000-000000000001\nversion: 2026.05.0\nmode: enforce\nminimum_release_age_hours: 24\nknown_vulnerability_threshold:\n  severity_floor: high\n  kev_override: true\n  epss_probability_floor: 0.7\nfail_closed: true\nrules:\n  - id: known-vulnerable\n    signal: vulnerable_above_threshold\n    action: warn\n    enabled: true\n",
++        )
++        .unwrap();
++
++        let exit_code = run([
++            OsString::from("aedo"),
++            OsString::from("policy"),
++            OsString::from("test"),
++            OsString::from("--file"),
++            policy_file.into_os_string(),
++        ])
++        .unwrap();
++
++        assert_eq!(exit_code, 0);
++    }
++
++    #[test]
++    fn policy_test_rejects_schema_invalid_yaml() {
++        let dir = tempdir().unwrap();
++        let policy_file = dir.path().join("aegiscudo-policy.yaml");
++        fs::write(
++            &policy_file,
++            "tenant_id: 00000000-0000-0000-0000-000000000001\nversion: 2026.05.0\nmode: enforce\nminimum_release_age_hours: 24\nknown_vulnerability_threshold:\n  severity_floor: high\n  kev_override: true\nfail_closed: true\nrules: []\n",
++        )
++        .unwrap();
++
++        let error = run([
++            OsString::from("aedo"),
++            OsString::from("policy"),
++            OsString::from("test"),
++            OsString::from("--file"),
++            policy_file.into_os_string(),
++        ])
++        .unwrap_err();
++
++        assert!(error.to_string().contains("failed schema validation"));
++    }
++
++    #[test]
++    fn npm_scan_uses_remote_decisions_from_api() {
++        let _guard = env_lock().lock().unwrap();
++        let dir = tempdir().unwrap();
++        unsafe {
++            env::set_var(CONFIG_OVERRIDE_ENV, dir.path());
++        }
++
++        let lockfile = dir.path().join("package-lock.json");
++        fs::write(
++            &lockfile,
++            r#"{"packages":{"node_modules/@scope/pkg":{"version":"1.0.0","integrity":"sha512-x"}}}"#,
++        )
++        .unwrap();
++
++        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
++        let address = listener.local_addr().unwrap();
++        save_cli_config(&CliConfig {
++            api_url: format!("http://{address}"),
++            token: Some("fixture-token".to_owned()),
++        })
++        .unwrap();
++
++        let server = thread::spawn(move || {
++            if let Ok((mut stream, _)) = listener.accept() {
++                let mut buffer = [0_u8; 4096];
++                let bytes_read = stream.read(&mut buffer).unwrap();
++                let request = String::from_utf8_lossy(&buffer[..bytes_read]);
++                assert!(request.contains("POST /v1/cli/scans HTTP/1.1"));
++                assert!(request.contains("\"name\":\"pkg\""));
++                assert!(request.contains("\"namespace\":\"scope\""));
++                assert!(request.contains("authorization: Bearer fixture-token"));
++
++                let response = serde_json::json!({
++                    "tenant_id": "018f4a6f-55d0-7000-8000-000000000001",
++                    "registry_config_id": "018f4a6f-55d0-7000-8000-000000000301",
++                    "policy_profile_id": "018f4a6f-55d0-7000-8000-000000000101",
++                    "findings": [{
++                        "coordinate": {
++                            "ecosystem": "npm",
++                            "name": "pkg",
++                            "version": "1.0.0",
++                            "namespace": "scope"
++                        },
++                        "decision": "BLOCK_POLICY_VIOLATION",
++                        "trace_id": "cli-trace-1",
++                        "rationale": ["fixture block"],
++                        "create_analysis_job": false
++                    }]
++                });
++                let body = serde_json::to_vec(&response).unwrap();
++                stream
++                    .write_all(
++                        format!(
++                            "HTTP/1.1 202 Accepted\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
++                            body.len()
++                        )
++                        .as_bytes(),
++                    )
++                    .unwrap();
++                stream.write_all(&body).unwrap();
++            }
++        });
++
++        let exit_code = run([
++            OsString::from("aedo"),
++            OsString::from("scan"),
++            OsString::from("npm"),
++            OsString::from("--lockfile"),
++            lockfile.into_os_string(),
++            OsString::from("--fail-on"),
++            OsString::from("block"),
++        ])
++        .unwrap();
++
++        assert_eq!(exit_code, 1);
++
++        server.join().unwrap();
++        unsafe {
++            env::remove_var(CONFIG_OVERRIDE_ENV);
++        }
++    }
++
++    #[test]
++    fn sbom_generate_writes_cargo_lock_output() {
++        let dir = tempdir().unwrap();
++        let manifest = dir.path().join("Cargo.toml");
++        let member_dir = dir.path().join("crates").join("demo-app");
++        let member_manifest = member_dir.join("Cargo.toml");
++        let lockfile = dir.path().join("Cargo.lock");
++        let output = dir.path().join("sbom.cdx.json");
++        fs::create_dir_all(&member_dir).unwrap();
++        fs::write(
++            &manifest,
++            r#"[workspace]
++members = ["crates/demo-app"]
++default-members = ["crates/demo-app"]
++
++[workspace.package]
++version = "0.1.0"
++edition = "2024"
++"#,
++        )
++        .unwrap();
++        fs::write(
++            &member_manifest,
++            r#"[package]
++name = "demo-app"
++version.workspace = true
++edition.workspace = true
++"#,
++        )
++        .unwrap();
++        fs::write(
++            &lockfile,
++            r#"version = 4
++
++[[package]]
++name = "demo-app"
++version = "0.1.0"
++dependencies = ["serde 1.0.228 (registry+https://github.com/rust-lang/crates.io-index)"]
++
++[[package]]
++name = "serde"
++version = "1.0.228"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
++"#,
++        )
++        .unwrap();
++
++        let exit_code = run([
++            OsString::from("aedo"),
++            OsString::from("sbom"),
++            OsString::from("generate"),
++            OsString::from("--lockfile"),
++            lockfile.into_os_string(),
++            OsString::from("--format"),
++            OsString::from("cyclonedx-json"),
++            OsString::from("--output"),
++            output.clone().into_os_string(),
++        ])
++        .unwrap();
++
++        assert_eq!(exit_code, 0);
++
++        let rendered: serde_json::Value =
++            serde_json::from_str(&fs::read_to_string(output).unwrap()).unwrap();
++        assert_eq!(
++            rendered["metadata"]["component"]["purl"],
++            "pkg:cargo/demo-app@0.1.0"
++        );
++        assert!(
++            rendered["components"]
++                .as_array()
++                .unwrap()
++                .iter()
++                .any(|component| component["purl"] == "pkg:cargo/serde@1.0.228")
++        );
++    }
++
++    #[test]
++    fn sbom_generate_skips_remote_decisions_for_cargo_lock_when_configured() {
++        let _guard = env_lock().lock().unwrap();
++        let dir = tempdir().unwrap();
++        unsafe {
++            env::set_var(CONFIG_OVERRIDE_ENV, dir.path());
++        }
++
++        let manifest = dir.path().join("Cargo.toml");
++        let lockfile = dir.path().join("Cargo.lock");
++        let output = dir.path().join("sbom.cdx.json");
++        fs::write(
++            &manifest,
++            r#"[package]
++name = "demo-app"
++version.workspace = true
++edition.workspace = true
++
++[workspace]
++
++[workspace.package]
++version = "0.1.0"
++edition = "2024"
++"#,
++        )
++        .unwrap();
++        fs::write(
++            &lockfile,
++            r#"version = 4
++
++[[package]]
++name = "demo-app"
++version = "0.1.0"
++dependencies = ["serde 1.0.228 (registry+https://github.com/rust-lang/crates.io-index)"]
++
++[[package]]
++name = "serde"
++version = "1.0.228"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
++"#,
++        )
++        .unwrap();
++        save_cli_config(&CliConfig {
++            api_url: "http://127.0.0.1:9".to_owned(),
++            token: Some("fixture-token".to_owned()),
++        })
++        .unwrap();
++
++        let exit_code = run([
++            OsString::from("aedo"),
++            OsString::from("sbom"),
++            OsString::from("generate"),
++            OsString::from("--lockfile"),
++            lockfile.into_os_string(),
++            OsString::from("--format"),
++            OsString::from("cyclonedx-json"),
++            OsString::from("--output"),
++            output.clone().into_os_string(),
++        ])
++        .unwrap();
++
++        assert_eq!(exit_code, 0);
++
++        let rendered: serde_json::Value =
++            serde_json::from_str(&fs::read_to_string(output).unwrap()).unwrap();
++        let component = rendered["components"]
++            .as_array()
++            .unwrap()
++            .iter()
++            .find(|component| component["purl"] == "pkg:cargo/serde@1.0.228")
++            .unwrap();
++        let properties = component["properties"].as_array().unwrap();
++
++        assert!(properties.iter().any(|property| {
++            property["name"] == "aegiscudo:decision_status" && property["value"] == "unresolved"
++        }));
++
++        unsafe {
++            env::remove_var(CONFIG_OVERRIDE_ENV);
++        }
++    }
++
++    #[test]
++    fn sbom_generate_writes_unresolved_requirements_output_without_saved_cli_config() {
++        let _guard = env_lock().lock().unwrap();
++        let dir = tempdir().unwrap();
++        let requirements = dir.path().join("requirements.txt");
++        let output = dir.path().join("sbom.cdx.json");
++        fs::write(&requirements, "requests==2.32.0\n").unwrap();
++
++        unsafe {
++            env::set_var(CONFIG_OVERRIDE_ENV, dir.path());
++        }
++
++        let exit_code = run([
++            OsString::from("aedo"),
++            OsString::from("sbom"),
++            OsString::from("generate"),
++            OsString::from("--requirements"),
++            requirements.into_os_string(),
++            OsString::from("--output"),
++            output.clone().into_os_string(),
++        ])
++        .unwrap();
++
++        assert_eq!(exit_code, 0);
++
++        let rendered: serde_json::Value =
++            serde_json::from_str(&fs::read_to_string(output).unwrap()).unwrap();
++        let component = rendered["components"]
++            .as_array()
++            .unwrap()
++            .iter()
++            .find(|component| component["purl"] == "pkg:pypi/requests@2.32.0")
++            .unwrap();
++        let properties = component["properties"].as_array().unwrap();
++
++        assert!(properties.iter().any(|property| {
++            property["name"] == "aegiscudo:decision_status" && property["value"] == "unresolved"
++        }));
++
++        unsafe {
++            env::remove_var(CONFIG_OVERRIDE_ENV);
++        }
++    }
++
++    #[test]
++    fn sbom_generate_uses_remote_decisions_for_requirements_when_configured() {
++        let _guard = env_lock().lock().unwrap();
++        let dir = tempdir().unwrap();
++        let requirements = dir.path().join("requirements.txt");
++        let output = dir.path().join("sbom.cdx.json");
++        fs::write(&requirements, "requests==2.32.0\n").unwrap();
++
++        unsafe {
++            env::set_var(CONFIG_OVERRIDE_ENV, dir.path());
++        }
++
++        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
++        let address = listener.local_addr().unwrap();
++        save_cli_config(&CliConfig {
++            api_url: format!("http://{address}"),
++            token: Some("fixture-token".to_owned()),
++        })
++        .unwrap();
++
++        let server = thread::spawn(move || {
++            if let Ok((mut stream, _)) = listener.accept() {
++                let mut buffer = [0_u8; 4096];
++                let bytes_read = stream.read(&mut buffer).unwrap();
++                let request = String::from_utf8_lossy(&buffer[..bytes_read]);
++                assert!(request.contains("POST /v1/cli/scans HTTP/1.1"));
++                assert!(request.contains("\"ecosystem\":\"pypi\""));
++                assert!(request.contains("\"name\":\"requests\""));
++                assert!(request.contains("authorization: Bearer fixture-token"));
++
++                let response = serde_json::json!({
++                    "findings": [{
++                        "coordinate": {
++                            "ecosystem": "pypi",
++                            "name": "requests",
++                            "version": "2.32.0"
++                        },
++                        "decision": "ALLOW_WITH_WARNING",
++                        "decision_timestamp": "2026-05-11T12:00:00Z"
++                    }]
++                });
++                let body = serde_json::to_vec(&response).unwrap();
++                stream
++                    .write_all(
++                        format!(
++                            "HTTP/1.1 202 Accepted\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
++                            body.len()
++                        )
++                        .as_bytes(),
++                    )
++                    .unwrap();
++                stream.write_all(&body).unwrap();
++            }
++        });
++
++        let exit_code = run([
++            OsString::from("aedo"),
++            OsString::from("sbom"),
++            OsString::from("generate"),
++            OsString::from("--requirements"),
++            requirements.into_os_string(),
++            OsString::from("--output"),
++            output.clone().into_os_string(),
++        ])
++        .unwrap();
++
++        assert_eq!(exit_code, 0);
++
++        let rendered: serde_json::Value =
++            serde_json::from_str(&fs::read_to_string(output).unwrap()).unwrap();
++        let component = rendered["components"]
++            .as_array()
++            .unwrap()
++            .iter()
++            .find(|component| component["purl"] == "pkg:pypi/requests@2.32.0")
++            .unwrap();
++        let properties = component["properties"].as_array().unwrap();
++
++        assert!(properties.iter().any(|property| {
++            property["name"] == "aegiscudo:decision" && property["value"] == "ALLOW_WITH_WARNING"
++        }));
++        assert!(properties.iter().any(|property| {
++            property["name"] == "aegiscudo:decision_timestamp"
++                && property["value"] == "2026-05-11T12:00:00Z"
++        }));
++
++        server.join().unwrap();
++        unsafe {
++            env::remove_var(CONFIG_OVERRIDE_ENV);
++        }
++    }
++
++    #[test]
++    fn sbom_generate_ignores_invalid_remote_decision_payload_when_configured() {
++        let _guard = env_lock().lock().unwrap();
++        let dir = tempdir().unwrap();
++        let requirements = dir.path().join("requirements.txt");
++        let output = dir.path().join("sbom.cdx.json");
++        fs::write(&requirements, "requests==2.32.0\n").unwrap();
++
++        unsafe {
++            env::set_var(CONFIG_OVERRIDE_ENV, dir.path());
++        }
++
++        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
++        let address = listener.local_addr().unwrap();
++        save_cli_config(&CliConfig {
++            api_url: format!("http://{address}"),
++            token: Some("fixture-token".to_owned()),
++        })
++        .unwrap();
++
++        let server = thread::spawn(move || {
++            if let Ok((mut stream, _)) = listener.accept() {
++                let mut buffer = [0_u8; 4096];
++                let bytes_read = stream.read(&mut buffer).unwrap();
++                let request = String::from_utf8_lossy(&buffer[..bytes_read]);
++                assert!(request.contains("POST /v1/cli/scans HTTP/1.1"));
++
++                let response = serde_json::json!({
++                    "findings": [{
++                        "coordinate": {
++                            "ecosystem": "pypi",
++                            "name": "urllib3",
++                            "version": "2.32.0"
++                        },
++                        "decision": "ALLOW_WITH_WARNING",
++                        "decision_timestamp": "2026-05-11T12:00:00Z"
++                    }]
++                });
++                let body = serde_json::to_vec(&response).unwrap();
++                stream
++                    .write_all(
++                        format!(
++                            "HTTP/1.1 202 Accepted\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
++                            body.len()
++                        )
++                        .as_bytes(),
++                    )
++                    .unwrap();
++                stream.write_all(&body).unwrap();
++            }
++        });
++
++        let exit_code = run([
++            OsString::from("aedo"),
++            OsString::from("sbom"),
++            OsString::from("generate"),
++            OsString::from("--requirements"),
++            requirements.into_os_string(),
++            OsString::from("--output"),
++            output.clone().into_os_string(),
++        ])
++        .unwrap();
++
++        assert_eq!(exit_code, 0);
++
++        let rendered: serde_json::Value =
++            serde_json::from_str(&fs::read_to_string(output).unwrap()).unwrap();
++        let component = rendered["components"]
++            .as_array()
++            .unwrap()
++            .iter()
++            .find(|component| component["purl"] == "pkg:pypi/requests@2.32.0")
++            .unwrap();
++        let properties = component["properties"].as_array().unwrap();
++
++        assert!(properties.iter().any(|property| {
++            property["name"] == "aegiscudo:decision_status" && property["value"] == "unresolved"
++        }));
++
++        server.join().unwrap();
++        unsafe {
++            env::remove_var(CONFIG_OVERRIDE_ENV);
++        }
++    }
++
++    #[test]
++    fn sbom_generate_does_not_partially_apply_invalid_remote_decisions() {
++        let _guard = env_lock().lock().unwrap();
++        let dir = tempdir().unwrap();
++        let requirements = dir.path().join("requirements.txt");
++        let output = dir.path().join("sbom.cdx.json");
++        fs::write(&requirements, "requests==2.32.0\nurllib3==2.2.2\n").unwrap();
++
++        unsafe {
++            env::set_var(CONFIG_OVERRIDE_ENV, dir.path());
++        }
++
++        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
++        let address = listener.local_addr().unwrap();
++        save_cli_config(&CliConfig {
++            api_url: format!("http://{address}"),
++            token: Some("fixture-token".to_owned()),
++        })
++        .unwrap();
++
++        let server = thread::spawn(move || {
++            if let Ok((mut stream, _)) = listener.accept() {
++                let mut buffer = [0_u8; 4096];
++                let bytes_read = stream.read(&mut buffer).unwrap();
++                let request = String::from_utf8_lossy(&buffer[..bytes_read]);
++                assert!(request.contains("POST /v1/cli/scans HTTP/1.1"));
++
++                let response = serde_json::json!({
++                    "findings": [
++                        {
++                            "coordinate": {
++                                "ecosystem": "pypi",
++                                "name": "requests",
++                                "version": "2.32.0"
++                            },
++                            "decision": "ALLOW_WITH_WARNING",
++                            "decision_timestamp": "2026-05-11T12:00:00Z"
++                        },
++                        {
++                            "coordinate": {
++                                "ecosystem": "pypi",
++                                "name": "different-package",
++                                "version": "2.2.2"
++                            },
++                            "decision": "BLOCK_POLICY_VIOLATION",
++                            "decision_timestamp": "2026-05-11T12:05:00Z"
++                        }
++                    ]
++                });
++                let body = serde_json::to_vec(&response).unwrap();
++                stream
++                    .write_all(
++                        format!(
++                            "HTTP/1.1 202 Accepted\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
++                            body.len()
++                        )
++                        .as_bytes(),
++                    )
++                    .unwrap();
++                stream.write_all(&body).unwrap();
++            }
++        });
++
++        let exit_code = run([
++            OsString::from("aedo"),
++            OsString::from("sbom"),
++            OsString::from("generate"),
++            OsString::from("--requirements"),
++            requirements.into_os_string(),
++            OsString::from("--output"),
++            output.clone().into_os_string(),
++        ])
++        .unwrap();
++
++        assert_eq!(exit_code, 0);
++
++        let rendered: serde_json::Value =
++            serde_json::from_str(&fs::read_to_string(output).unwrap()).unwrap();
++        for purl in ["pkg:pypi/requests@2.32.0", "pkg:pypi/urllib3@2.2.2"] {
++            let component = rendered["components"]
++                .as_array()
++                .unwrap()
++                .iter()
++                .find(|component| component["purl"] == purl)
++                .unwrap();
++            let properties = component["properties"].as_array().unwrap();
++
++            assert!(properties.iter().any(|property| {
++                property["name"] == "aegiscudo:decision_status" && property["value"] == "unresolved"
++            }));
++        }
++
++        server.join().unwrap();
++        unsafe {
++            env::remove_var(CONFIG_OVERRIDE_ENV);
++        }
++    }
++
++    #[test]
++    fn sbom_generate_uses_remote_decisions_for_package_lock_when_configured() {
++        let _guard = env_lock().lock().unwrap();
++        let dir = tempdir().unwrap();
++        let lockfile = dir.path().join("package-lock.json");
++        let output = dir.path().join("sbom.cdx.json");
++        fs::write(
++            &lockfile,
++            r#"{
++  "name": "demo-app",
++  "version": "1.0.0",
++  "lockfileVersion": 3,
++  "packages": {
++    "": {
++      "name": "demo-app",
++      "version": "1.0.0",
++      "dependencies": {
++        "@scope/pkg": "1.0.0"
++      }
++    },
++    "node_modules/@scope/pkg": {
++      "version": "1.0.0",
++      "integrity": "sha512-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
++    }
++  }
++}"#,
++        )
++        .unwrap();
++
++        unsafe {
++            env::set_var(CONFIG_OVERRIDE_ENV, dir.path());
++        }
++
++        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
++        let address = listener.local_addr().unwrap();
++        save_cli_config(&CliConfig {
++            api_url: format!("http://{address}"),
++            token: Some("fixture-token".to_owned()),
++        })
++        .unwrap();
++
++        let server = thread::spawn(move || {
++            if let Ok((mut stream, _)) = listener.accept() {
++                let mut buffer = [0_u8; 4096];
++                let bytes_read = stream.read(&mut buffer).unwrap();
++                let request = String::from_utf8_lossy(&buffer[..bytes_read]);
++                assert!(request.contains("POST /v1/cli/scans HTTP/1.1"));
++                assert!(request.contains("\"ecosystem\":\"npm\""));
++                assert!(request.contains("\"name\":\"pkg\""));
++                assert!(request.contains("\"namespace\":\"scope\""));
++                assert!(request.contains("authorization: Bearer fixture-token"));
++
++                let response = serde_json::json!({
++                    "findings": [{
++                        "coordinate": {
++                            "ecosystem": "npm",
++                            "name": "pkg",
++                            "version": "1.0.0",
++                            "namespace": "scope"
++                        },
++                        "decision": "BLOCK_POLICY_VIOLATION",
++                        "decision_timestamp": "2026-05-11T12:30:00Z"
++                    }]
++                });
++                let body = serde_json::to_vec(&response).unwrap();
++                stream
++                    .write_all(
++                        format!(
++                            "HTTP/1.1 202 Accepted\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
++                            body.len()
++                        )
++                        .as_bytes(),
++                    )
++                    .unwrap();
++                stream.write_all(&body).unwrap();
++            }
++        });
++
++        let exit_code = run([
++            OsString::from("aedo"),
++            OsString::from("sbom"),
++            OsString::from("generate"),
++            OsString::from("--lockfile"),
++            lockfile.into_os_string(),
++            OsString::from("--output"),
++            output.clone().into_os_string(),
++        ])
++        .unwrap();
++
++        assert_eq!(exit_code, 0);
++
++        let rendered: serde_json::Value =
++            serde_json::from_str(&fs::read_to_string(output).unwrap()).unwrap();
++        let component = rendered["components"]
++            .as_array()
++            .unwrap()
++            .iter()
++            .find(|component| component["purl"] == "pkg:npm/scope/pkg@1.0.0")
++            .unwrap();
++        let properties = component["properties"].as_array().unwrap();
++
++        assert!(properties.iter().any(|property| {
++            property["name"] == "aegiscudo:decision"
++                && property["value"] == "BLOCK_POLICY_VIOLATION"
++        }));
++        assert!(properties.iter().any(|property| {
++            property["name"] == "aegiscudo:decision_timestamp"
++                && property["value"] == "2026-05-11T12:30:00Z"
++        }));
++
++        server.join().unwrap();
++        unsafe {
++            env::remove_var(CONFIG_OVERRIDE_ENV);
++        }
++    }
++
++    #[test]
++    fn sbom_generate_writes_unresolved_pnpm_output_without_saved_cli_config() {
++        let _guard = env_lock().lock().unwrap();
++        let dir = tempdir().unwrap();
++        let lockfile = dir.path().join("pnpm-lock.yaml");
++        let output = dir.path().join("sbom.cdx.json");
++        fs::write(
++            &lockfile,
++            r#"lockfileVersion: '9.0'
++importers:
++  .:
++    dependencies:
++      left-pad:
++        version: 1.3.0
++packages:
++  left-pad@1.3.0:
++    resolution:
++      integrity: sha256-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
++snapshots:
++  left-pad@1.3.0: {}
++"#,
++        )
++        .unwrap();
++
++        unsafe {
++            env::set_var(CONFIG_OVERRIDE_ENV, dir.path());
++        }
++
++        let exit_code = run([
++            OsString::from("aedo"),
++            OsString::from("sbom"),
++            OsString::from("generate"),
++            OsString::from("--lockfile"),
++            lockfile.into_os_string(),
++            OsString::from("--output"),
++            output.clone().into_os_string(),
++        ])
++        .unwrap();
++
++        assert_eq!(exit_code, 0);
++
++        let rendered: serde_json::Value =
++            serde_json::from_str(&fs::read_to_string(output).unwrap()).unwrap();
++        let component = rendered["components"]
++            .as_array()
++            .unwrap()
++            .iter()
++            .find(|component| component["purl"] == "pkg:npm/left-pad@1.3.0")
++            .unwrap();
++        let properties = component["properties"].as_array().unwrap();
++
++        assert!(properties.iter().any(|property| {
++            property["name"] == "aegiscudo:decision_status" && property["value"] == "unresolved"
++        }));
++
++        unsafe {
++            env::remove_var(CONFIG_OVERRIDE_ENV);
++        }
++    }
++
++    #[test]
++    fn sbom_generate_ignores_unreachable_config_for_package_lock() {
++        let _guard = env_lock().lock().unwrap();
++        let dir = tempdir().unwrap();
++        let lockfile = dir.path().join("package-lock.json");
++        let output = dir.path().join("sbom.cdx.json");
++        fs::write(
++            &lockfile,
++            r#"{
++  "name": "demo-app",
++  "version": "1.0.0",
++  "lockfileVersion": 3,
++  "packages": {
++    "": {
++      "name": "demo-app",
++      "version": "1.0.0",
++      "dependencies": {
++        "@scope/pkg": "1.0.0"
++      }
++    },
++    "node_modules/@scope/pkg": {
++      "version": "1.0.0",
++      "integrity": "sha512-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
++    }
++  }
++}"#,
++        )
++        .unwrap();
++
++        unsafe {
++            env::set_var(CONFIG_OVERRIDE_ENV, dir.path());
++        }
++        save_cli_config(&CliConfig {
++            api_url: "http://127.0.0.1:9/".to_owned(),
++            token: Some("fixture-token".to_owned()),
++        })
++        .unwrap();
++
++        let exit_code = run([
++            OsString::from("aedo"),
++            OsString::from("sbom"),
++            OsString::from("generate"),
++            OsString::from("--lockfile"),
++            lockfile.into_os_string(),
++            OsString::from("--output"),
++            output.clone().into_os_string(),
++        ])
++        .unwrap();
++
++        assert_eq!(exit_code, 0);
++
++        let rendered: serde_json::Value =
++            serde_json::from_str(&fs::read_to_string(output).unwrap()).unwrap();
++        let component = rendered["components"]
++            .as_array()
++            .unwrap()
++            .iter()
++            .find(|component| component["purl"] == "pkg:npm/scope/pkg@1.0.0")
++            .unwrap();
++        let properties = component["properties"].as_array().unwrap();
++
++        assert!(properties.iter().any(|property| {
++            property["name"] == "aegiscudo:decision_status" && property["value"] == "unresolved"
++        }));
++
++        unsafe {
++            env::remove_var(CONFIG_OVERRIDE_ENV);
++        }
++    }
++
++    #[test]
++    fn sbom_generate_writes_requested_cyclonedx_compatibility_format() {
++        let _guard = env_lock().lock().unwrap();
++        let dir = tempdir().unwrap();
++        let requirements = dir.path().join("requirements.txt");
++        let output = dir.path().join("sbom.cdx16.json");
++        fs::write(&requirements, "requests==2.32.0\n").unwrap();
++
++        unsafe {
++            env::set_var(CONFIG_OVERRIDE_ENV, dir.path());
++        }
++
++        let exit_code = run([
++            OsString::from("aedo"),
++            OsString::from("sbom"),
++            OsString::from("generate"),
++            OsString::from("--requirements"),
++            requirements.into_os_string(),
++            OsString::from("--format"),
++            OsString::from("cyclonedx-1.6-json"),
++            OsString::from("--output"),
++            output.clone().into_os_string(),
++        ])
++        .unwrap();
++
++        assert_eq!(exit_code, 0);
++
++        let rendered: serde_json::Value =
++            serde_json::from_str(&fs::read_to_string(output).unwrap()).unwrap();
++        assert_eq!(rendered["specVersion"], "1.6");
++
++        unsafe {
++            env::remove_var(CONFIG_OVERRIDE_ENV);
++        }
+     }
+ 
+     #[test]
+-    fn phase_gated_scan_targets_return_not_yet_supported_exit_code() {
++    fn sbom_generate_accepts_spdx_alias_format() {
++        let _guard = env_lock().lock().unwrap();
++        let dir = tempdir().unwrap();
++        let requirements = dir.path().join("requirements.txt");
++        let output = dir.path().join("sbom.spdx.json");
++        fs::write(&requirements, "requests==2.32.0\n").unwrap();
++
++        unsafe {
++            env::set_var(CONFIG_OVERRIDE_ENV, dir.path());
++        }
++
+         let exit_code = run([
+             OsString::from("aedo"),
+-            OsString::from("scan"),
+-            OsString::from("cargo"),
++            OsString::from("sbom"),
++            OsString::from("generate"),
++            OsString::from("--requirements"),
++            requirements.into_os_string(),
++            OsString::from("--format"),
++            OsString::from("spdx-json"),
++            OsString::from("--output"),
++            output.clone().into_os_string(),
+         ])
+         .unwrap();
+ 
+-        assert_eq!(exit_code, 3);
++        assert_eq!(exit_code, 0);
++
++        let rendered: serde_json::Value =
++            serde_json::from_str(&fs::read_to_string(output).unwrap()).unwrap();
++        assert_eq!(rendered["spdxVersion"], "SPDX-2.3");
++
++        unsafe {
++            env::remove_var(CONFIG_OVERRIDE_ENV);
++        }
+     }
+ 
+     #[test]
+-    fn scan_rejects_upload_manifest_until_supported() {
++    fn sbom_generate_ignores_malformed_config_for_unsupported_cargo_lock() {
++        let _guard = env_lock().lock().unwrap();
+         let dir = tempdir().unwrap();
+-        let lockfile = dir.path().join("package-lock.json");
++        let manifest = dir.path().join("Cargo.toml");
++        let lockfile = dir.path().join("Cargo.lock");
++        let output = dir.path().join("sbom.cdx.json");
++        unsafe {
++            env::set_var(CONFIG_OVERRIDE_ENV, dir.path());
++        }
++
++        fs::write(dir.path().join("aedo.json"), "{ definitely-not-valid-json").unwrap();
++        fs::write(
++            &manifest,
++            r#"[package]
++name = "demo-app"
++version.workspace = true
++edition.workspace = true
++
++[workspace]
++
++[workspace.package]
++version = "0.1.0"
++edition = "2024"
++"#,
++        )
++        .unwrap();
+         fs::write(
+             &lockfile,
+-            r#"{"packages":{"node_modules/left-pad":{"version":"1.3.0","integrity":"sha512-x"}}}"#,
++            r#"version = 4
++
++[[package]]
++name = "demo-app"
++version = "0.1.0"
++"#,
+         )
+         .unwrap();
+ 
+-        let error = run([
++        let exit_code = run([
+             OsString::from("aedo"),
+-            OsString::from("scan"),
+-            OsString::from("npm"),
++            OsString::from("sbom"),
++            OsString::from("generate"),
+             OsString::from("--lockfile"),
+             lockfile.into_os_string(),
+-            OsString::from("--upload-manifest"),
++            OsString::from("--output"),
++            output.clone().into_os_string(),
+         ])
+-        .unwrap_err();
+-
+-        assert!(error.to_string().contains("--upload-manifest is not yet supported"));
+-    }
++        .unwrap();
+ 
+-    #[test]
+-    fn cli_config_round_trips_through_override_directory() {
+-        let _guard = env_lock().lock().unwrap();
+-        let dir = tempdir().unwrap();
+-        unsafe { env::set_var(CONFIG_OVERRIDE_ENV, dir.path()); }
++        assert_eq!(exit_code, 0);
+ 
+-        let config = CliConfig {
+-            api_url: "http://127.0.0.1:18002".to_owned(),
+-            token: Some("fixture-token".to_owned()),
+-        };
+-        let path = save_cli_config(&config).unwrap();
+-        assert!(path.exists());
+-        assert_eq!(load_cli_config().unwrap(), Some(config));
+-        assert!(clear_cli_config().unwrap());
+-        assert_eq!(load_cli_config().unwrap(), None);
++        let rendered: serde_json::Value =
++            serde_json::from_str(&fs::read_to_string(output).unwrap()).unwrap();
++        assert_eq!(
++            rendered["metadata"]["component"]["purl"],
++            "pkg:cargo/demo-app@0.1.0"
++        );
+ 
+-        unsafe { env::remove_var(CONFIG_OVERRIDE_ENV); }
++        unsafe {
++            env::remove_var(CONFIG_OVERRIDE_ENV);
++        }
+     }
+ 
+     #[test]
+-    fn auth_login_persists_config_after_health_probe() {
++    fn sbom_generate_ignores_malformed_config_for_supported_requirements() {
+         let _guard = env_lock().lock().unwrap();
+         let dir = tempdir().unwrap();
+-        unsafe { env::set_var(CONFIG_OVERRIDE_ENV, dir.path()); }
++        let requirements = dir.path().join("requirements.txt");
++        let output = dir.path().join("sbom.cdx.json");
++        unsafe {
++            env::set_var(CONFIG_OVERRIDE_ENV, dir.path());
++        }
+ 
+-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+-        let address = listener.local_addr().unwrap();
+-        let server = thread::spawn(move || {
+-            if let Ok((mut stream, _)) = listener.accept() {
+-                let mut buffer = [0_u8; 1024];
+-                let _ = stream.read(&mut buffer);
+-                stream
+-                    .write_all(
+-                        b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+-                    )
+-                    .unwrap();
+-            }
+-        });
++        fs::write(dir.path().join("aedo.json"), "{ definitely-not-valid-json").unwrap();
++        fs::write(&requirements, "requests==2.32.0\n").unwrap();
+ 
+         let exit_code = run([
+             OsString::from("aedo"),
+-            OsString::from("auth"),
+-            OsString::from("login"),
+-            OsString::from("--api-url"),
+-            OsString::from(format!("http://{address}")),
+-            OsString::from("--token"),
+-            OsString::from("fixture-token"),
++            OsString::from("sbom"),
++            OsString::from("generate"),
++            OsString::from("--requirements"),
++            requirements.into_os_string(),
++            OsString::from("--output"),
++            output.clone().into_os_string(),
+         ])
+         .unwrap();
+ 
+         assert_eq!(exit_code, 0);
+-        assert_eq!(
+-            load_cli_config().unwrap(),
+-            Some(CliConfig {
+-                api_url: format!("http://{address}"),
+-                token: Some("fixture-token".to_owned()),
+-            })
+-        );
+ 
+-        server.join().unwrap();
+-        unsafe { env::remove_var(CONFIG_OVERRIDE_ENV); }
++        let rendered: serde_json::Value =
++            serde_json::from_str(&fs::read_to_string(output).unwrap()).unwrap();
++        let component = rendered["components"]
++            .as_array()
++            .unwrap()
++            .iter()
++            .find(|component| component["purl"] == "pkg:pypi/requests@2.32.0")
++            .unwrap();
++        let properties = component["properties"].as_array().unwrap();
++
++        assert!(properties.iter().any(|property| {
++            property["name"] == "aegiscudo:decision_status" && property["value"] == "unresolved"
++        }));
++
++        unsafe {
++            env::remove_var(CONFIG_OVERRIDE_ENV);
++        }
+     }
+ 
+     #[test]
+-    fn policy_test_accepts_schema_valid_yaml() {
++    fn sbom_generate_ignores_unusable_config_for_supported_requirements() {
++        let _guard = env_lock().lock().unwrap();
+         let dir = tempdir().unwrap();
+-        let policy_file = dir.path().join("aegiscudo-policy.yaml");
+-        fs::write(
+-            &policy_file,
+-            "id: 00000000-0000-0000-0000-000000000101\ntenant_id: 00000000-0000-0000-0000-000000000001\nversion: 2026.05.0\nmode: enforce\nminimum_release_age_hours: 24\nknown_vulnerability_threshold:\n  severity_floor: high\n  kev_override: true\n  epss_probability_floor: 0.7\nfail_closed: true\nrules:\n  - id: known-vulnerable\n    signal: vulnerable_above_threshold\n    action: warn\n    enabled: true\n",
+-        )
++        let requirements = dir.path().join("requirements.txt");
++        let output = dir.path().join("sbom.cdx.json");
++        unsafe {
++            env::set_var(CONFIG_OVERRIDE_ENV, dir.path());
++        }
++
++        fs::write(&requirements, "requests==2.32.0\n").unwrap();
++        save_cli_config(&CliConfig {
++            api_url: "not a url".to_owned(),
++            token: Some("fixture-token".to_owned()),
++        })
+         .unwrap();
+ 
+         let exit_code = run([
+             OsString::from("aedo"),
+-            OsString::from("policy"),
+-            OsString::from("test"),
+-            OsString::from("--file"),
+-            policy_file.into_os_string(),
++            OsString::from("sbom"),
++            OsString::from("generate"),
++            OsString::from("--requirements"),
++            requirements.into_os_string(),
++            OsString::from("--output"),
++            output.clone().into_os_string(),
+         ])
+         .unwrap();
+ 
+         assert_eq!(exit_code, 0);
++
++        let rendered: serde_json::Value =
++            serde_json::from_str(&fs::read_to_string(output).unwrap()).unwrap();
++        let component = rendered["components"]
++            .as_array()
++            .unwrap()
++            .iter()
++            .find(|component| component["purl"] == "pkg:pypi/requests@2.32.0")
++            .unwrap();
++        let properties = component["properties"].as_array().unwrap();
++
++        assert!(properties.iter().any(|property| {
++            property["name"] == "aegiscudo:decision_status" && property["value"] == "unresolved"
++        }));
++
++        unsafe {
++            env::remove_var(CONFIG_OVERRIDE_ENV);
++        }
+     }
+ 
+     #[test]
+-    fn policy_test_rejects_schema_invalid_yaml() {
++    fn sbom_generate_ignores_unreachable_config_for_supported_requirements() {
++        let _guard = env_lock().lock().unwrap();
+         let dir = tempdir().unwrap();
+-        let policy_file = dir.path().join("aegiscudo-policy.yaml");
+-        fs::write(
+-            &policy_file,
+-            "tenant_id: 00000000-0000-0000-0000-000000000001\nversion: 2026.05.0\nmode: enforce\nminimum_release_age_hours: 24\nknown_vulnerability_threshold:\n  severity_floor: high\n  kev_override: true\nfail_closed: true\nrules: []\n",
+-        )
++        let requirements = dir.path().join("requirements.txt");
++        let output = dir.path().join("sbom.cdx.json");
++        unsafe {
++            env::set_var(CONFIG_OVERRIDE_ENV, dir.path());
++        }
++
++        fs::write(&requirements, "requests==2.32.0\n").unwrap();
++        save_cli_config(&CliConfig {
++            api_url: "http://127.0.0.1:9/".to_owned(),
++            token: Some("fixture-token".to_owned()),
++        })
+         .unwrap();
+ 
+-        let error = run([
++        let exit_code = run([
+             OsString::from("aedo"),
+-            OsString::from("policy"),
+-            OsString::from("test"),
+-            OsString::from("--file"),
+-            policy_file.into_os_string(),
++            OsString::from("sbom"),
++            OsString::from("generate"),
++            OsString::from("--requirements"),
++            requirements.into_os_string(),
++            OsString::from("--output"),
++            output.clone().into_os_string(),
+         ])
+-        .unwrap_err();
++        .unwrap();
+ 
+-        assert!(error.to_string().contains("failed schema validation"));
++        assert_eq!(exit_code, 0);
++
++        let rendered: serde_json::Value =
++            serde_json::from_str(&fs::read_to_string(output).unwrap()).unwrap();
++        let component = rendered["components"]
++            .as_array()
++            .unwrap()
++            .iter()
++            .find(|component| component["purl"] == "pkg:pypi/requests@2.32.0")
++            .unwrap();
++        let properties = component["properties"].as_array().unwrap();
++
++        assert!(properties.iter().any(|property| {
++            property["name"] == "aegiscudo:decision_status" && property["value"] == "unresolved"
++        }));
++
++        unsafe {
++            env::remove_var(CONFIG_OVERRIDE_ENV);
++        }
+     }
+ 
+     #[test]
+-    fn npm_scan_uses_remote_decisions_from_api() {
+-        let _guard = env_lock().lock().unwrap();
++    fn empty_cargo_sbom_documents_do_not_attempt_remote_enrichment() {
+         let dir = tempdir().unwrap();
+-        unsafe { env::set_var(CONFIG_OVERRIDE_ENV, dir.path()); }
+-
+-        let lockfile = dir.path().join("package-lock.json");
++        let manifest = dir.path().join("Cargo.toml");
++        let lockfile = dir.path().join("Cargo.lock");
+         fs::write(
+-            &lockfile,
+-            r#"{"packages":{"node_modules/@scope/pkg":{"version":"1.0.0","integrity":"sha512-x"}}}"#,
++            &manifest,
++            r#"[package]
++name = "demo-app"
++version = "0.1.0"
++edition = "2024"
++"#,
+         )
+         .unwrap();
++        fs::write(
++            &lockfile,
++            r#"version = 4
+ 
+-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+-        let address = listener.local_addr().unwrap();
+-        save_cli_config(&CliConfig {
+-            api_url: format!("http://{address}"),
+-            token: Some("fixture-token".to_owned()),
+-        })
++[[package]]
++name = "demo-app"
++version = "0.1.0"
++"#,
++        )
+         .unwrap();
+ 
+-        let server = thread::spawn(move || {
+-            if let Ok((mut stream, _)) = listener.accept() {
+-                let mut buffer = [0_u8; 4096];
+-                let bytes_read = stream.read(&mut buffer).unwrap();
+-                let request = String::from_utf8_lossy(&buffer[..bytes_read]);
+-                assert!(request.contains("POST /v1/cli/scans HTTP/1.1"));
+-                assert!(request.contains("\"name\":\"pkg\""));
+-                assert!(request.contains("\"namespace\":\"scope\""));
+-                assert!(request.contains("authorization: Bearer fixture-token"));
++        let document = load_sbom_document(Some(&lockfile), None).unwrap();
+ 
+-                let response = serde_json::json!({
+-                    "tenant_id": "018f4a6f-55d0-7000-8000-000000000001",
+-                    "registry_config_id": "018f4a6f-55d0-7000-8000-000000000301",
+-                    "policy_profile_id": "018f4a6f-55d0-7000-8000-000000000101",
+-                    "findings": [{
+-                        "coordinate": {
+-                            "ecosystem": "npm",
+-                            "name": "pkg",
+-                            "version": "1.0.0",
+-                            "namespace": "scope"
+-                        },
+-                        "decision": "BLOCK_POLICY_VIOLATION",
+-                        "trace_id": "cli-trace-1",
+-                        "rationale": ["fixture block"],
+-                        "create_analysis_job": false
+-                    }]
+-                });
+-                let body = serde_json::to_vec(&response).unwrap();
+-                stream
+-                    .write_all(
+-                        format!(
+-                            "HTTP/1.1 202 Accepted\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+-                            body.len()
+-                        )
+-                        .as_bytes(),
+-                    )
+-                    .unwrap();
+-                stream.write_all(&body).unwrap();
+-            }
+-        });
++        assert!(!document.supports_remote_decision_enrichment());
++        assert!(load_sbom_enrichment_config(&document).unwrap().is_none());
++    }
+ 
+-        let exit_code = run([
+-            OsString::from("aedo"),
+-            OsString::from("scan"),
+-            OsString::from("npm"),
+-            OsString::from("--lockfile"),
+-            lockfile.into_os_string(),
+-            OsString::from("--fail-on"),
+-            OsString::from("block"),
+-        ])
+-        .unwrap();
++    #[test]
++    fn empty_requirements_sbom_documents_do_not_attempt_remote_enrichment() {
++        let dir = tempdir().unwrap();
++        let requirements = dir.path().join("requirements.txt");
++        fs::write(&requirements, "\n# no packages\n").unwrap();
+ 
+-        assert_eq!(exit_code, 1);
++        let document = load_sbom_document(None, Some(&requirements)).unwrap();
+ 
+-        server.join().unwrap();
+-        unsafe { env::remove_var(CONFIG_OVERRIDE_ENV); }
++        assert!(document.supports_remote_decision_ecosystem());
++        assert!(!document.supports_remote_decision_enrichment());
++        assert!(load_sbom_enrichment_config(&document).unwrap().is_none());
+     }
+ 
+     #[test]
+     fn explain_parses_scoped_npm_coordinate() {
+         let coordinate = parse_explain_coordinate("@scope/pkg@1.2.3", EcosystemArg::Npm).unwrap();
+ 
+         assert_eq!(coordinate.purl(), "pkg:npm/scope/pkg@1.2.3");
+     }
+ 
+     #[test]
+     fn explain_rejects_missing_version() {
+         let error = parse_explain_coordinate("left-pad", EcosystemArg::Npm).unwrap_err();
+ 
+         assert!(error.to_string().contains("expects <package>@<version>"));
+     }
+ 
+     #[test]
+     fn explain_uses_remote_summary_from_api() {
+         let _guard = env_lock().lock().unwrap();
+         let dir = tempdir().unwrap();
+-        unsafe { env::set_var(CONFIG_OVERRIDE_ENV, dir.path()); }
++        unsafe {
++            env::set_var(CONFIG_OVERRIDE_ENV, dir.path());
++        }
+ 
+         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+         let address = listener.local_addr().unwrap();
+         save_cli_config(&CliConfig {
+             api_url: format!("http://{address}"),
+             token: Some("fixture-token".to_owned()),
+         })
+         .unwrap();
+ 
+         let server = thread::spawn(move || {
+             if let Ok((mut stream, _)) = listener.accept() {
+                 let mut buffer = [0_u8; 4096];
+                 let bytes_read = stream.read(&mut buffer).unwrap();
+                 let request = String::from_utf8_lossy(&buffer[..bytes_read]);
+                 assert!(request.contains("POST /v1/cli/explain HTTP/1.1"));
+                 assert!(request.contains("\"name\":\"pkg\""));
+                 assert!(request.contains("\"namespace\":\"scope\""));
+                 assert!(request.contains("authorization: Bearer fixture-token"));
+ 
+                 let response = serde_json::json!({
+                     "tenant_id": "018f4a6f-55d0-7000-8000-000000000001",
+                     "analysis_job_id": "018f4a6f-55d0-7000-8000-000000000501",
+                     "artifact_id": "018f4a6f-55d0-7000-8000-000000000601",
+                     "trace_id": "trace-explain-1",
+                     "coordinate": {
+                         "ecosystem": "npm",
+                         "name": "pkg",
+                         "version": "1.2.3",
+                         "namespace": "scope"
+                     },
+                     "artifact_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                     "recommended_action": "QUARANTINE_PENDING_ANALYSIS",
+                     "confidence": "medium",
+                     "summary": {"limitations": ["fixture limitation"]},
+                     "ai_explanation": {"inference": ["fixture inference"]},
+                     "created_at": "2026-05-10T10:00:00Z"
+                 });
+                 let body = serde_json::to_vec(&response).unwrap();
+                 stream
+                     .write_all(
+                         format!(
+                             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                             body.len()
+                         )
+                         .as_bytes(),
+                     )
+                     .unwrap();
+                 stream.write_all(&body).unwrap();
+             }
+         });
+ 
+         let exit_code = run([
+             OsString::from("aedo"),
+             OsString::from("explain"),
+             OsString::from("@scope/pkg@1.2.3"),
+             OsString::from("--ecosystem"),
+             OsString::from("npm"),
+         ])
+         .unwrap();
+ 
+         assert_eq!(exit_code, 0);
+ 
+         server.join().unwrap();
+-        unsafe { env::remove_var(CONFIG_OVERRIDE_ENV); }
++        unsafe {
++            env::remove_var(CONFIG_OVERRIDE_ENV);
++        }
+     }
+ 
+     #[test]
+     fn ci_preflight_discovers_package_lock_in_current_dir() {
+         let _guard = env_lock().lock().unwrap();
+         let dir = tempdir().unwrap();
+         let original_dir = env::current_dir().unwrap();
+-        unsafe { env::set_var(CONFIG_OVERRIDE_ENV, dir.path()); }
++        unsafe {
++            env::set_var(CONFIG_OVERRIDE_ENV, dir.path());
++        }
+ 
+         let lockfile = dir.path().join("package-lock.json");
+         fs::write(
+             &lockfile,
+             r#"{"packages":{"node_modules/@scope/pkg":{"version":"1.0.0","integrity":"sha512-x"}}}"#,
+         )
+         .unwrap();
+ 
+         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+         let address = listener.local_addr().unwrap();
+         save_cli_config(&CliConfig {
+             api_url: format!("http://{address}"),
+             token: Some("fixture-token".to_owned()),
+         })
+         .unwrap();
+ 
+         let server = thread::spawn(move || {
+             if let Ok((mut stream, _)) = listener.accept() {
+                 let mut buffer = [0_u8; 4096];
+                 let bytes_read = stream.read(&mut buffer).unwrap();
+                 let request = String::from_utf8_lossy(&buffer[..bytes_read]);
+                 assert!(request.contains("POST /v1/cli/scans HTTP/1.1"));
+                 assert!(request.contains("\"name\":\"pkg\""));
+                 assert!(request.contains("\"namespace\":\"scope\""));
+ 
+                 let response = serde_json::json!({
+                     "findings": [{
+                         "coordinate": {
+                             "ecosystem": "npm",
+                             "name": "pkg",
+                             "version": "1.0.0",
+                             "namespace": "scope"
+                         },
+                         "decision": "ALLOW"
+                     }]
+                 });
+                 let body = serde_json::to_vec(&response).unwrap();
+                 stream
+                     .write_all(
+                         format!(
+                             "HTTP/1.1 202 Accepted\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                             body.len()
+                         )
+                         .as_bytes(),
+                     )
+                     .unwrap();
+                 stream.write_all(&body).unwrap();
+             }
+         });
+ 
+         env::set_current_dir(dir.path()).unwrap();
+         let exit_code = run([
+             OsString::from("aedo"),
+             OsString::from("ci"),
+             OsString::from("preflight"),
+             OsString::from("--format"),
+             OsString::from("json"),
+             OsString::from("--fail-on"),
+             OsString::from("block"),
+         ])
+         .unwrap();
+ 
+         env::set_current_dir(original_dir).unwrap();
+         assert_eq!(exit_code, 0);
+ 
+         server.join().unwrap();
+-        unsafe { env::remove_var(CONFIG_OVERRIDE_ENV); }
++        unsafe {
++            env::remove_var(CONFIG_OVERRIDE_ENV);
++        }
+     }
+ 
+     #[test]
+     fn ci_preflight_aggregates_supported_files_across_ecosystems() {
+         let dir = tempdir().unwrap();
+         fs::write(
+             dir.path().join("package-lock.json"),
+             r#"{"packages":{"node_modules/left-pad":{"version":"1.3.0","integrity":"sha512-x"}}}"#,
+         )
+         .unwrap();
+-        fs::write(
+-            dir.path().join("requirements.txt"),
+-            "requests==2.32.0\n",
+-        )
+-        .unwrap();
+-        fs::write(
+-            dir.path().join("requirements-dev.txt"),
+-            "pytest==8.3.3\n",
+-        )
+-        .unwrap();
++        fs::write(dir.path().join("requirements.txt"), "requests==2.32.0\n").unwrap();
++        fs::write(dir.path().join("requirements-dev.txt"), "pytest==8.3.3\n").unwrap();
+ 
+-        let aggregated = aggregate_ci_preflight_findings(discover_ci_preflight_inputs(dir.path()).unwrap()).unwrap();
++        let aggregated =
++            aggregate_ci_preflight_findings(discover_ci_preflight_inputs(dir.path()).unwrap())
++                .unwrap();
+ 
+         assert_eq!(
+             aggregated
+                 .iter()
+                 .map(|finding| finding.coordinate.purl())
+                 .collect::<Vec<_>>(),
+             vec![
+                 "pkg:npm/left-pad@1.3.0".to_owned(),
+                 "pkg:pypi/pytest@8.3.3".to_owned(),
+                 "pkg:pypi/requests@2.32.0".to_owned(),
+             ]
+         );
+     }
+ 
+     #[test]
+     fn ci_preflight_rejects_conflicting_duplicate_integrity() {
+         let error = aggregate_ci_preflight_findings(vec![
+             (
+                 "package-lock.json".to_owned(),
+                 vec![finding(
+                     PackageEcosystem::Npm,
+                     "left-pad".to_owned(),
+                     Some("1.3.0".to_owned()),
+-                    Some("sha256-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned()),
++                    Some(
++                        "sha256-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
++                            .to_owned(),
++                    ),
+                 )],
+             ),
+             (
+                 "pnpm-lock.yaml".to_owned(),
+                 vec![finding(
+                     PackageEcosystem::Npm,
+                     "left-pad".to_owned(),
+                     Some("1.3.0".to_owned()),
+-                    Some("sha256-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_owned()),
++                    Some(
++                        "sha256-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
++                            .to_owned(),
++                    ),
+                 )],
+             ),
+         ])
+         .unwrap_err();
+ 
+         assert!(error.to_string().contains("conflicting integrity values"));
+     }
+ 
+     #[test]
+     fn ci_preflight_reports_missing_supported_files() {
+         let dir = tempdir().unwrap();
+ 
+         let error = discover_ci_preflight_inputs(dir.path()).unwrap_err();
+ 
+-        assert!(error.to_string().contains("found no supported dependency files"));
++        assert!(
++            error
++                .to_string()
++                .contains("found no supported dependency files")
++        );
+     }
+ 
+     #[test]
+     fn ci_preflight_reports_yarn_lock_as_unsupported() {
+         let dir = tempdir().unwrap();
+         fs::write(dir.path().join("yarn.lock"), "# yarn lockfile v1\n").unwrap();
+ 
+         let error = discover_ci_preflight_inputs(dir.path()).unwrap_err();
+ 
+         assert!(error.to_string().contains("yarn.lock is not yet supported"));
+     }
+ 
+     #[test]
+     fn ci_preflight_discovers_current_directory_only() {
+         let dir = tempdir().unwrap();
+         let nested = dir.path().join("nested");
+         fs::create_dir_all(&nested).unwrap();
+-        fs::write(
+-            nested.join("requirements.txt"),
+-            "requests==2.32.0\n",
+-        )
+-        .unwrap();
++        fs::write(nested.join("requirements.txt"), "requests==2.32.0\n").unwrap();
+ 
+         let error = discover_ci_preflight_inputs(dir.path()).unwrap_err();
+ 
+-        assert!(error.to_string().contains("found no supported dependency files"));
++        assert!(
++            error
++                .to_string()
++                .contains("found no supported dependency files")
++        );
+     }
+ 
+     #[test]
+     fn merge_scan_findings_rejects_misaligned_response_order() {
+         let error = merge_scan_findings(
+             vec![finding(
+                 PackageEcosystem::Npm,
+                 "left-pad".to_owned(),
+                 Some("1.3.0".to_owned()),
+                 None::<String>,
+             )],
+             vec![CliScanApiFinding {
+                 coordinate: PackageCoordinate::new(
+                     PackageEcosystem::Npm,
+                     "different-package",
+                     Some("1.3.0"),
+                     None::<String>,
+                 ),
+                 decision: PolicyDecision::AllowWithWarning,
++                decision_timestamp: None,
+             }],
+         )
+         .unwrap_err();
+ 
+-        assert!(error.to_string().contains("did not align with request order"));
++        assert!(
++            error
++                .to_string()
++                .contains("did not align with request order")
++        );
+     }
+ 
+     #[test]
+     #[ignore = "requires live local aegiscudo-api process"]
+     fn auth_login_works_against_live_local_api() {
+         let _guard = env_lock().lock().unwrap();
+         let dir = tempdir().unwrap();
+-        unsafe { env::set_var(CONFIG_OVERRIDE_ENV, dir.path()); }
++        unsafe {
++            env::set_var(CONFIG_OVERRIDE_ENV, dir.path());
++        }
+ 
+         let api_url = env::var("AEGISCUDO_API_URL_FOR_TEST")
+             .unwrap_or_else(|_| "http://127.0.0.1:18002".to_owned());
+ 
+         let exit_code = run([
+             OsString::from("aedo"),
+             OsString::from("auth"),
+             OsString::from("login"),
+             OsString::from("--api-url"),
+             OsString::from(api_url.clone()),
+             OsString::from("--token"),
+             OsString::from("fixture-token"),
+         ])
+         .unwrap();
+ 
+         assert_eq!(exit_code, 0);
+         assert_eq!(
+             load_cli_config().unwrap(),
+             Some(CliConfig {
+                 api_url,
+                 token: Some("fixture-token".to_owned()),
+             })
+         );
+ 
+-        unsafe { env::remove_var(CONFIG_OVERRIDE_ENV); }
++        unsafe {
++            env::remove_var(CONFIG_OVERRIDE_ENV);
++        }
+     }
+ 
+     #[test]
+     #[ignore = "requires live local aegiscudo-api and triage-counter processes"]
+     fn npm_scan_works_against_live_local_api() {
+         let _guard = env_lock().lock().unwrap();
+         let dir = tempdir().unwrap();
+-        unsafe { env::set_var(CONFIG_OVERRIDE_ENV, dir.path()); }
++        unsafe {
++            env::set_var(CONFIG_OVERRIDE_ENV, dir.path());
++        }
+ 
+         let api_url = env::var("AEGISCUDO_API_URL_FOR_TEST")
+             .unwrap_or_else(|_| "http://127.0.0.1:18002".to_owned());
+         save_cli_config(&CliConfig {
+             api_url,
+             token: Some("fixture-token".to_owned()),
+         })
+         .unwrap();
+ 
+         let lockfile = dir.path().join("package-lock.json");
+         fs::write(
+             &lockfile,
+             r#"{"packages":{"node_modules/aegiscudo-benign-npm-fixture":{"version":"1.0.0","integrity":"sha512-x"}}}"#,
+         )
+         .unwrap();
+ 
+         let exit_code = run([
+             OsString::from("aedo"),
+             OsString::from("scan"),
+             OsString::from("npm"),
+             OsString::from("--lockfile"),
+             lockfile.into_os_string(),
+         ])
+         .unwrap();
+ 
+         assert_eq!(exit_code, 0);
+-        unsafe { env::remove_var(CONFIG_OVERRIDE_ENV); }
++        unsafe {
++            env::remove_var(CONFIG_OVERRIDE_ENV);
++        }
+     }
+ 
+     #[test]
+     #[ignore = "requires live local aegiscudo-api and triage-counter processes"]
+     fn pypi_scan_works_against_live_local_api() {
+         let _guard = env_lock().lock().unwrap();
+         let dir = tempdir().unwrap();
+-        unsafe { env::set_var(CONFIG_OVERRIDE_ENV, dir.path()); }
++        unsafe {
++            env::set_var(CONFIG_OVERRIDE_ENV, dir.path());
++        }
+ 
+         let api_url = env::var("AEGISCUDO_API_URL_FOR_TEST")
+             .unwrap_or_else(|_| "http://127.0.0.1:18002".to_owned());
+         save_cli_config(&CliConfig {
+             api_url,
+             token: Some("fixture-token".to_owned()),
+         })
+         .unwrap();
+ 
+         let requirements = dir.path().join("requirements.txt");
+         fs::write(&requirements, "aegiscudo-benign-pypi-fixture==1.0.0\n").unwrap();
+ 
+         let exit_code = run([
+             OsString::from("aedo"),
+             OsString::from("scan"),
+             OsString::from("pypi"),
+             OsString::from("--requirements"),
+             requirements.into_os_string(),
+         ])
+         .unwrap();
+ 
+         assert_eq!(exit_code, 0);
+-        unsafe { env::remove_var(CONFIG_OVERRIDE_ENV); }
++        unsafe {
++            env::remove_var(CONFIG_OVERRIDE_ENV);
++        }
+     }
+ 
+     #[test]
+     #[ignore = "requires live local aegiscudo-api process with seeded analysis data"]
+     fn explain_works_against_live_local_api() {
+         let _guard = env_lock().lock().unwrap();
+         let dir = tempdir().unwrap();
+-        unsafe { env::set_var(CONFIG_OVERRIDE_ENV, dir.path()); }
++        unsafe {
++            env::set_var(CONFIG_OVERRIDE_ENV, dir.path());
++        }
+ 
+         let api_url = env::var("AEGISCUDO_API_URL_FOR_TEST")
+             .unwrap_or_else(|_| "http://127.0.0.1:18002".to_owned());
+         save_cli_config(&CliConfig {
+             api_url,
+             token: Some("fixture-token".to_owned()),
+         })
+         .unwrap();
+ 
+         let exit_code = run([
+             OsString::from("aedo"),
+             OsString::from("explain"),
+             OsString::from("fresh-postinstall@0.1.0"),
+             OsString::from("--ecosystem"),
+             OsString::from("npm"),
+         ])
+         .unwrap();
+ 
+         assert_eq!(exit_code, 0);
+-        unsafe { env::remove_var(CONFIG_OVERRIDE_ENV); }
++        unsafe {
++            env::remove_var(CONFIG_OVERRIDE_ENV);
++        }
+     }
+ 
+     #[test]
+     #[ignore = "requires live local aegiscudo-api and triage-counter processes"]
+     fn ci_preflight_works_against_live_local_api() {
+         let _guard = env_lock().lock().unwrap();
+         let dir = tempdir().unwrap();
+         let original_dir = env::current_dir().unwrap();
+-        unsafe { env::set_var(CONFIG_OVERRIDE_ENV, dir.path()); }
++        unsafe {
++            env::set_var(CONFIG_OVERRIDE_ENV, dir.path());
++        }
+ 
+         let api_url = env::var("AEGISCUDO_API_URL_FOR_TEST")
+             .unwrap_or_else(|_| "http://127.0.0.1:18002".to_owned());
+         save_cli_config(&CliConfig {
+             api_url,
+             token: Some("fixture-token".to_owned()),
+         })
+         .unwrap();
+ 
+         fs::write(
+             dir.path().join("package-lock.json"),
+             r#"{"packages":{"node_modules/aegiscudo-benign-npm-fixture":{"version":"1.0.0","integrity":"sha512-x"}}}"#,
+         )
+         .unwrap();
+ 
+         env::set_current_dir(dir.path()).unwrap();
+         let exit_code = run([
+             OsString::from("aedo"),
+             OsString::from("ci"),
+             OsString::from("preflight"),
+             OsString::from("--format"),
+             OsString::from("json"),
+             OsString::from("--fail-on"),
+             OsString::from("block"),
+         ])
+         .unwrap();
+         env::set_current_dir(original_dir).unwrap();
+ 
+         assert_eq!(exit_code, 0);
+-        unsafe { env::remove_var(CONFIG_OVERRIDE_ENV); }
++        unsafe {
++            env::remove_var(CONFIG_OVERRIDE_ENV);
++        }
+     }
+ }
+diff --git a/docs/plan/006-phase-2-expansion.md b/docs/plan/006-phase-2-expansion.md
+index 77da790..078cd2d 100644
+--- a/docs/plan/006-phase-2-expansion.md
++++ b/docs/plan/006-phase-2-expansion.md
+@@ -1,80 +1,81 @@
+ # Phase 2 Ecosystem And Compliance Expansion Plan
+ 
+ Source PRD sections: Phase 2 ecosystem integrations, Feature 4.4, Feature 4.5, Feature 6 Phase 2, 4.10, 4.11, deferred gaps in Revision History.
+ 
+ Goal: expand beyond npm/PyPI MVP into SBOM/VEX, Cargo, Maven, richer intelligence feeds, GitHub Actions integrity scanning, and deeper compliance workflows while preserving the MVP control-plane safety model.
+ 
+ ## Phase Status
+ 
+ - [x] Phase 2 has an owner: `Aegiscudo Tech Lead`.
+ - [ ] MVP alpha readiness gates are complete or approved for parallel Phase 2 work.
+ - [ ] Phase 2 scope is confirmed against the latest PRD.
+ - [ ] Phase 2 exit review is complete.
+ 
+ ## Exit Criteria
+ 
+ - [ ] SBOM Service generates current CycloneDX JSON plus CycloneDX 1.6 and SPDX 2.3 compatibility exports.
+ - [ ] OpenVEX v0.2.0 documents can suppress vulnerability matches with audit evidence and expiry.
+ - [ ] deps.dev and OpenSSF Scorecard are integrated as policy signals.
+ - [ ] Cross-ecosystem IOC correlation exists in Feed Harvester.
+ - [ ] Cargo sparse registry proxy and `cargo-build-profile` are implemented.
+ - [ ] Maven repository proxy and `jvm-binary-profile` are implemented.
+ - [ ] `aedo-cli` supports SBOM generation, attestation verification, Cargo/Maven scans, Rush scans, and GitHub Actions workflow scans.
+ - [ ] Dashboard exposes SBOM/VEX state and Phase 2 ecosystem evidence.
+ 
+ ## SBOM Service
+ 
+ - [ ] Finalize service language and architecture.
+ - [ ] Aggregate per-package SBOM fragments from Surgeon evidence.
+-- [ ] Generate CycloneDX JSON using CycloneDX 1.7 as the current supported default profile (PRD §4.10; CycloneDX 1.7 is current as of May 2026).
+-- [ ] Generate CycloneDX 1.6 JSON compatibility export.
+-- [ ] Generate SPDX 2.3 JSON compatibility export.
++- [x] Generate CycloneDX JSON using CycloneDX 1.7 as the current supported default profile (PRD §4.10; CycloneDX 1.7 is current as of May 2026).
++- [x] Generate CycloneDX 1.6 JSON compatibility export.
++- [x] Generate SPDX 2.3 JSON compatibility export.
+ - [ ] Track SPDX 3.0 as compatibility target without blocking Phase 2.
+ - [ ] Include purl, name, version, SHA-256 digest, ecosystem, Aegiscudo decision, and decision timestamp per component.
+ - [ ] Preserve dependency relationship graph.
+ - [ ] Store SBOMs in object storage with versioned key per tenant and scan.
+ - [ ] Serve SBOM documents through API.
+ - [ ] Support dashboard export.
+-- [ ] Support CLI export.
++- [x] Support CLI export.
+ - [ ] Validate NTIA minimum SBOM elements.
+-- [ ] Add schema tests for CycloneDX and SPDX output.
++- [x] Add schema tests for CycloneDX and SPDX output.
++- Progress 2026-05-11: schema-backed export coverage now exercises npm package-lock, pnpm lockfile, requirements.txt, single-package Cargo.lock, and default-member virtual-workspace Cargo.lock inputs. Cargo root discovery also covers common globbed-member virtual workspaces, including exclude-filtered members, and Cargo dependency specs without a disambiguating source retain all matching same-name same-version targets; Maven graph coverage remains open.
+ - [ ] Add integration tests from resolved npm, PyPI, Cargo, and Maven dependency graphs.
+ 
+ ## OpenVEX Support
+ 
+ - [ ] Accept tenant-provided OpenVEX v0.2.0 documents through API.
+ - [ ] Accept OpenVEX documents through CLI.
+ - [ ] Store OpenVEX documents with tenant, source, digest, import time, and expiry policy.
+ - [ ] Match VEX statements against affected components.
+ - [ ] Suppress vulnerability matches for `fixed` status where applicable.
+ - [ ] Suppress vulnerability matches for `not_affected` status where applicable.
+ - [ ] Track `under_investigation` status distinctly from fixed/not affected.
+ - [ ] Record VEX-suppressed vulnerabilities in audit log with VEX document reference.
+ - [ ] Display VEX suppression state in dashboard vulnerability views.
+ - [ ] Include VEX suppression in policy simulator replay.
+ - [ ] Re-evaluate suppressed vulnerabilities after configurable period.
+ - [ ] Add tests for expired VEX, malformed VEX, tenant isolation, and conflicting statements.
+ 
+ ## Expanded Feed Intelligence
+ 
+ - [ ] Implement deps.dev package metadata ingestion.
+ - [ ] Implement deps.dev versioned dependency graph ingestion.
+ - [ ] Implement deps.dev license metadata ingestion.
+ - [ ] Implement OpenSSF Scorecard ingestion.
+ - [ ] Persist Scorecard score and individual checks.
+ - [ ] Integrate Scorecard code review, branch protection, CI/CD, maintained, and signed releases signals into policy.
+ - [ ] Implement OpenSSF Package Analysis (GCS public bucket) ingestion for behavioral pre-classification signals.
+ - [ ] Implement cross-ecosystem IOC schema for identities, domains, IPs, URLs, package names, and behavioral fingerprints.
+ - [ ] Correlate malicious maintainer identity across ecosystems.
+ - [ ] Correlate destination domain/IP across sandbox reports.
+ - [ ] Correlate behavioral fingerprint across static and dynamic evidence.
+ - [ ] Add Feed Harvester freshness alerts for every Phase 2 feed.
+ - [ ] Add policy tests for cross-ecosystem IOC elevation.
+ 
+ ## Cargo Support
+ 
+ - [ ] Implement Cargo sparse registry adapter in Mosquito Net.
+ - [ ] Support Cargo source replacement configuration docs.
+ - [ ] Proxy sparse index files.
+ - [ ] Filter sparse index candidates according to policy.
+ - [ ] Proxy crate downloads.
+@@ -115,89 +116,89 @@ Goal: expand beyond npm/PyPI MVP into SBOM/VEX, Cargo, Maven, richer intelligenc
+ - [ ] Disassemble bytecode using `javap -c -v` or ASM visitors.
+ - [ ] Evaluate licensing and operational fit for CFR, FernFlower, or Ghidra optional decompilation.
+ - [ ] Detect `Runtime.exec`.
+ - [ ] Detect `ProcessBuilder`.
+ - [ ] Detect socket and HTTP clients.
+ - [ ] Detect reflection and dynamic class loading.
+ - [ ] Detect `ClassLoader#defineClass`.
+ - [ ] Detect deserialization APIs.
+ - [ ] Detect filesystem and credential-path access.
+ - [ ] Detect JNI loading.
+ - [ ] Detect hardcoded domains, IPs, webhook URLs, and token names.
+ - [ ] Load selected classes in isolated JVM profile.
+ - [ ] Capture class loading, process execution, filesystem writes, and network attempts.
+ - [ ] Distinguish dangerous operations from merely exposed APIs.
+ - [ ] Attribute behavior to bytecode, class loading, Maven plugins, or transitive dependencies.
+ - [ ] Add Maven fixture repository and malicious plugin/JAR tests.
+ 
+ ## Generic HTTP Adapter
+ 
+ - [ ] Define generic artifact capture semantics.
+ - [ ] Implement passthrough HTTP proxy with artifact digest capture.
+ - [ ] Apply Triage Counter hold pattern before serving captured artifact where practical.
+ - [ ] Record limited protocol metadata and upstream headers with redaction.
+ - [ ] Document limitations compared with ecosystem-specific adapters.
+ - [ ] Add tests for private/non-standard registry passthrough.
+ 
+ ## CLI Phase 2
+ 
+ - [ ] Implement `aedo scan cargo --lockfile Cargo.lock`.
+ - [ ] Implement `aedo scan maven --pom pom.xml`.
+ - [ ] Implement `aedo scan maven --dependency-tree <path>`.
+ - [ ] Implement `aedo scan rush --config rush.json`.
+ - [ ] Implement `aedo scan github-actions --workflow-dir .github/workflows`.
+ - [ ] Resolve GitHub Actions tags to commit SHAs.
+ - [ ] Flag mutable action tags.
+ - [ ] Cross-reference action tag/SHA against Aegiscudo threat feed.
+ - [ ] Implement `aedo attest verify --lockfile package-lock.json --ecosystem npm`.
+ - [ ] Implement `aedo attest verify --requirements requirements.txt --ecosystem pypi`.
+ - [ ] Implement `aedo attest verify --lockfile Cargo.lock --ecosystem cargo`.
+ - [ ] Implement `aedo attest verify --pom pom.xml --ecosystem maven`.
+-- [ ] Implement `aedo sbom generate --format cyclonedx-json`.
+-- [ ] Implement `aedo sbom generate --format cyclonedx-1.6-json`.
+-- [ ] Implement `aedo sbom generate --format spdx-2.3-json`.
++- [x] Implement `aedo sbom generate --format cyclonedx-json`.
++- [x] Implement `aedo sbom generate --format cyclonedx-1.6-json`.
++- [x] Implement `aedo sbom generate --format spdx-2.3-json`.
+ - [ ] Implement `aedo risk <package>@<version> --ecosystem npm`.
+ - [ ] Implement `aedo risk <crate>@<version> --ecosystem cargo`.
+ - [ ] Implement `aedo risk <group-id>:<artifact-id>@<version> --ecosystem maven`.
+ - [ ] Note: `aedo risk` commands are Phase 2 CLI additions; the underlying Triage Counter verdict exists in MVP but the CLI subcommand is intentionally deferred to Phase 2 to keep aedo-cli MVP scope tight.
+ - [ ] Add output and exit-code tests for every Phase 2 command.
+ 
+ ## Dashboard Phase 2
+ 
+ - [ ] Add SBOM export view.
+ - [ ] Add VEX import and suppression state view.
+ - [ ] Add Cargo evidence viewer panels.
+ - [ ] Add Maven/JVM evidence viewer panels.
+ - [ ] Add GitHub Actions workflow integrity scan results.
+ - [ ] Add Scorecard signal tooltips and policy thresholds.
+ - [ ] Add deps.dev dependency graph visualization or table.
+ - [ ] Add cross-ecosystem IOC correlation view.
+ - [ ] Add Phase 2 policy simulator support for VEX and Scorecard.
+ - [ ] Add Playwright coverage for SBOM, VEX, Cargo/Maven evidence, and GitHub Actions scan results.
+ 
+ ## AI And Embedding Evolution
+ 
+ - [ ] Introduce pgvector-backed embedding store for clustering similar malicious code slices and historical case retrieval; populate embeddings for static evidence records (PRD §3.6 — optional in MVP, activated in Phase 2).
+ - [ ] Evaluate migration path to Qdrant or Vertex AI Vector Search for higher-volume embedding needs (PRD §3.6: pgvector for MVP; scale-out in later phases).
+ - [ ] Evaluate LLM-as-judge evaluation pipeline in Langfuse against a golden dataset of manually reviewed package analyses (PRD §4.9: may be introduced in Phase 2).
+ - [ ] Define acceptance criteria for LLM-as-judge pass rate before enabling it as a blocking quality gate.
+ 
+ ## Policy Evolution
+ 
+ - [ ] Evaluate OPA/Rego or Cedar against MVP policy DSL lessons.
+ - [ ] Decide whether to keep YAML DSL, add policy-as-code, or support both.
+ - [ ] Add migration notes for any policy format change.
+ - [ ] Add backward compatibility tests for existing policy profiles.
+ - [ ] Add reachability analysis design for JavaScript/TypeScript.
+ - [ ] Add reachability analysis design for Python.
+ - [ ] Implement reachability only after ecosystem-specific call graph assumptions are validated.
+ 
+ ## Phase 2 Validation
+ 
+-- [ ] SBOM schema validation passes for all export formats.
++- [x] SBOM schema validation passes for all export formats.
+ - [ ] OpenVEX suppression tests pass.
+ - [ ] Cargo protocol compatibility tests pass against fixture sparse registry.
+ - [ ] Maven protocol compatibility tests pass against fixture repository.
+ - [ ] GitHub Actions mutable tag detection tests pass.
+ - [ ] Scorecard/deps.dev feed staleness tests pass.
+ - [ ] Cross-ecosystem IOC policy tests pass.
+ - [ ] Phase 2 E2E scenarios pass locally and in CI.
+  3488 cli/aedo-cli/src/lib.rs
+  3610 cli/aedo-cli/src/sbom.rs
+  7098 total

@@ -38,7 +38,10 @@ pub fn scan_artifact_package(
 }
 
 fn is_tar_gz_artifact(path: &Path) -> bool {
-    let file_name = path.file_name().and_then(|name| name.to_str()).unwrap_or_default();
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default();
     file_name.ends_with(".tgz") || file_name.ends_with(".tar.gz")
 }
 
@@ -220,7 +223,11 @@ mod tests {
             scan_artifact_package(&sample, unpack_dir.path(), ScanLimits::default()).unwrap();
 
         assert!(!manifest.is_empty());
-        assert!(manifest.iter().any(|entry| entry.path.ends_with("package.json")));
+        assert!(
+            manifest
+                .iter()
+                .any(|entry| entry.path.ends_with("package.json"))
+        );
         let indicator_types: Vec<_> = evidence
             .indicators
             .iter()
@@ -232,15 +239,20 @@ mod tests {
 
     #[test]
     fn scans_pypi_wheel_and_generates_manifest() {
-        let sample = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../testdata/pypi/packages/aegiscudo_benign_pypi_fixture-1.0.0-py3-none-any.whl");
+        let sample = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(
+            "../../testdata/pypi/packages/aegiscudo_benign_pypi_fixture-1.0.0-py3-none-any.whl",
+        );
         let unpack_dir = tempdir().unwrap();
 
         let (_evidence, manifest) =
             scan_artifact_package(&sample, unpack_dir.path(), ScanLimits::default()).unwrap();
 
         assert!(!manifest.is_empty());
-        assert!(manifest.iter().any(|entry| entry.path.ends_with("METADATA")));
+        assert!(
+            manifest
+                .iter()
+                .any(|entry| entry.path.ends_with("METADATA"))
+        );
     }
 
     #[test]
@@ -262,7 +274,11 @@ mod tests {
         let error = scan_artifact_package(&artifact_path, unpack_dir.path(), ScanLimits::default())
             .unwrap_err();
 
-        assert!(error.to_string().contains("symlink or hardlink archive entries"));
+        assert!(
+            error
+                .to_string()
+                .contains("symlink or hardlink archive entries")
+        );
     }
 
     #[test]
@@ -360,7 +376,8 @@ mod tests {
         .unwrap_err();
 
         assert!(
-            error.to_string().contains("single-file limit") || error.to_string().contains("single file"),
+            error.to_string().contains("single-file limit")
+                || error.to_string().contains("single file"),
             "expected single file limit error in: {error}"
         );
     }

@@ -53,12 +53,7 @@ const DANGEROUS_BUILTINS: &[(&str, Severity)] = &[
 /// - `__import__(...)` dynamic imports
 /// - `compile(...)` code compilation
 /// - `open(...)` file access calls (advisory, context-sensitive)
-pub fn scan_py_ast(
-    root: &Path,
-    path: &Path,
-    source: &str,
-    indicators: &mut Vec<StaticIndicator>,
-) {
+pub fn scan_py_ast(root: &Path, path: &Path, source: &str, indicators: &mut Vec<StaticIndicator>) {
     let lang = tree_sitter_python::LANGUAGE;
     let mut parser = tree_sitter::Parser::new();
     if parser.set_language(&lang.into()).is_err() {
@@ -139,7 +134,15 @@ fn check_from_import_statement(
     for child in node.children(&mut cursor) {
         if child.kind() == "dotted_name" {
             let module_name = node_text(source, child);
-            emit_for_module(root, path, source, node, module_name, "from-import", indicators);
+            emit_for_module(
+                root,
+                path,
+                source,
+                node,
+                module_name,
+                "from-import",
+                indicators,
+            );
             break; // Only the first dotted_name is the module; rest are names.
         }
     }
@@ -265,43 +268,64 @@ mod tests {
     #[test]
     fn import_subprocess_detected() {
         let types = scan("import subprocess\nsubprocess.run(['ls'])");
-        assert!(types.contains(&"py-ast-dangerous-import".to_owned()), "{types:?}");
+        assert!(
+            types.contains(&"py-ast-dangerous-import".to_owned()),
+            "{types:?}"
+        );
     }
 
     #[test]
     fn from_subprocess_import_detected() {
         let types = scan("from subprocess import run\nrun(['ls'])");
-        assert!(types.contains(&"py-ast-dangerous-import".to_owned()), "{types:?}");
+        assert!(
+            types.contains(&"py-ast-dangerous-import".to_owned()),
+            "{types:?}"
+        );
     }
 
     #[test]
     fn import_os_detected() {
         let types = scan("import os\nos.system('ls')");
-        assert!(types.contains(&"py-ast-dangerous-import".to_owned()), "{types:?}");
+        assert!(
+            types.contains(&"py-ast-dangerous-import".to_owned()),
+            "{types:?}"
+        );
     }
 
     #[test]
     fn import_safe_module_not_flagged() {
         let types = scan("import json\nimport pathlib\ndata = json.loads('{}')");
-        assert!(!types.contains(&"py-ast-dangerous-import".to_owned()), "{types:?}");
+        assert!(
+            !types.contains(&"py-ast-dangerous-import".to_owned()),
+            "{types:?}"
+        );
     }
 
     #[test]
     fn eval_call_detected() {
         let types = scan("result = eval(user_input)");
-        assert!(types.contains(&"py-ast-dangerous-call".to_owned()), "{types:?}");
+        assert!(
+            types.contains(&"py-ast-dangerous-call".to_owned()),
+            "{types:?}"
+        );
     }
 
     #[test]
     fn exec_call_detected() {
         let types = scan("exec('import os; os.system(\"ls\")')");
-        assert!(types.contains(&"py-ast-dangerous-call".to_owned()), "{types:?}");
+        assert!(
+            types.contains(&"py-ast-dangerous-call".to_owned()),
+            "{types:?}"
+        );
     }
 
     #[test]
     fn dunder_import_detected() {
         let types = scan("mod = __import__('os')");
-        assert!(types.contains(&"py-ast-dangerous-call".to_owned()), "{types:?}");
+        assert!(
+            types.contains(&"py-ast-dangerous-call".to_owned()),
+            "{types:?}"
+        );
     }
 
     #[test]
@@ -309,24 +333,36 @@ mod tests {
         // eval inside a comment should not produce an AST-level indicator
         // (regex-based scan may still flag it; this validates AST accuracy)
         let types = scan("# eval is dangerous\nprint('safe code')");
-        assert!(!types.contains(&"py-ast-dangerous-call".to_owned()), "{types:?}");
+        assert!(
+            !types.contains(&"py-ast-dangerous-call".to_owned()),
+            "{types:?}"
+        );
     }
 
     #[test]
     fn import_socket_detected() {
         let types = scan("import socket\ns = socket.socket()");
-        assert!(types.contains(&"py-ast-dangerous-import".to_owned()), "{types:?}");
+        assert!(
+            types.contains(&"py-ast-dangerous-import".to_owned()),
+            "{types:?}"
+        );
     }
 
     #[test]
     fn import_pickle_detected() {
         let types = scan("import pickle\nobj = pickle.loads(data)");
-        assert!(types.contains(&"py-ast-dangerous-import".to_owned()), "{types:?}");
+        assert!(
+            types.contains(&"py-ast-dangerous-import".to_owned()),
+            "{types:?}"
+        );
     }
 
     #[test]
     fn getattr_obfuscation_detected() {
         let types = scan(r#"fn = getattr(builtins, "__import__")"#);
-        assert!(types.contains(&"py-ast-obfuscated-call".to_owned()), "{types:?}");
+        assert!(
+            types.contains(&"py-ast-obfuscated-call".to_owned()),
+            "{types:?}"
+        );
     }
 }
