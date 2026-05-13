@@ -22,7 +22,7 @@ jobs:
           cargo test --workspace --all-features | tee artifacts/rust-unit-tests.log
       - name: Upload Rust unit test results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: rust-unit-test-log
           path: artifacts/rust-unit-tests.log
@@ -84,7 +84,7 @@ jobs:
           cargo test -p mosquito-net -- --ignored --nocapture --test-threads=1 | tee artifacts/mosquito-net-compose-integration.log
       - name: Upload integration test results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: mosquito-net-compose-integration-log
           path: artifacts/mosquito-net-compose-integration.log
@@ -118,7 +118,7 @@ jobs:
           exit-code: 0
       - name: Upload container scan results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: trivy-${{ matrix.service }}-sarif
           path: trivy-${{ matrix.service }}.sarif
@@ -153,14 +153,14 @@ jobs:
           pnpm schema:validate | tee artifacts/schema-validation.log
       - name: Upload Node unit test results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: node-unit-test-log
           path: artifacts/node-unit-tests.log
           if-no-files-found: error
       - name: Upload schema validation results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: schema-validation-log
           path: artifacts/schema-validation.log
@@ -201,7 +201,7 @@ jobs:
       - run: pnpm playwright
       - name: Upload Playwright report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: command-center-playwright-report
           path: apps/command-center/playwright-report
@@ -226,7 +226,7 @@ jobs:
           uv run pytest | tee artifacts/python-unit-tests.log
       - name: Upload Python unit test results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: python-unit-test-log
           path: artifacts/python-unit-tests.log
@@ -288,7 +288,7 @@ jobs:
         run: pnpm coverage:check -- --write-summary artifacts/coverage-threshold-summary.md
       - name: Upload coverage reports
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: coverage-reports
           path: |
