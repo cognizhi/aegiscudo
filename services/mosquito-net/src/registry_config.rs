@@ -20,8 +20,8 @@ pub enum RegistryAdapter {
 }
 
 impl RegistryAdapter {
-    pub fn is_mvp_supported(self) -> bool {
-        matches!(self, Self::Npm | Self::Pypi)
+    pub fn is_proxy_supported(self) -> bool {
+        matches!(self, Self::Npm | Self::Pypi | Self::Cargo | Self::Maven | Self::GenericHttp)
     }
 }
 
@@ -41,6 +41,7 @@ pub struct RegistryConfig {
     pub name: String,
     pub adapter: RegistryAdapter,
     pub upstream_url: String,
+    pub cargo_allowed_download_origins: Vec<String>,
     pub mount_path: String,
     pub auth_type: CredentialAuthType,
     pub credential_ref: Option<Uuid>,
@@ -73,6 +74,8 @@ pub enum RegistryConfigError {
     DuplicateMountPath,
     #[error("registry upstream URL is invalid")]
     InvalidUpstreamUrl,
+    #[error("Cargo allowed download origin is invalid")]
+    InvalidCargoAllowedDownloadOrigin,
     #[error("authenticated upstream URLs must use https")]
     InsecureAuthenticatedUpstream,
     #[error("registry configuration repository is unavailable")]
@@ -174,6 +177,7 @@ impl PostgresRegistryConfigRepository {
                             registry_configs.name,
                             registry_configs.adapter::text AS adapter,
                             registry_configs.upstream_url,
+                            registry_configs.cargo_allowed_download_origins,
                             registry_configs.mount_path,
                             registry_configs.auth_type::text AS auth_type,
                             registry_configs.credential_ref,
@@ -205,8 +209,8 @@ fn validate_and_sort_configs(
     mut configs: Vec<RegistryConfig>,
 ) -> Result<Vec<RegistryConfig>, RegistryConfigError> {
     let mut seen_mounts = HashSet::new();
-    for config in &configs {
-        validate_registry_config(config)?;
+    for config in &mut configs {
+        normalize_registry_config(config)?;
         let mount = normalized_mount(&config.mount_path)?;
         if !seen_mounts.insert(mount) {
             return Err(RegistryConfigError::DuplicateMountPath);
@@ -227,6 +231,7 @@ fn registry_config_from_row(
         name: row.try_get("name")?,
         adapter: adapter_from_db(row.try_get("adapter")?)?,
         upstream_url: row.try_get("upstream_url")?,
+        cargo_allowed_download_origins: row.try_get("cargo_allowed_download_origins")?,
         mount_path: row.try_get("mount_path")?,
         auth_type: auth_type_from_db(row.try_get("auth_type")?)?,
         credential_ref: row.try_get("credential_ref")?,
@@ -291,10 +296,43 @@ fn normalized_mount(mount_path: &str) -> Result<String, RegistryConfigError> {
     Ok(effective.to_owned())
 }
 
-fn validate_registry_config(config: &RegistryConfig) -> Result<(), RegistryConfigError> {
+fn normalize_registry_config(config: &mut RegistryConfig) -> Result<(), RegistryConfigError> {
     validate_upstream_url(&config.upstream_url, config.auth_type)?;
     validate_credential_configuration(config.auth_type, config.credential_ref)?;
+    let mut normalized_origins = Vec::with_capacity(config.cargo_allowed_download_origins.len());
+    let mut seen_origins = HashSet::new();
+    for origin in &config.cargo_allowed_download_origins {
+        let normalized = normalize_allowed_origin(origin)?;
+        if seen_origins.insert(normalized.clone()) {
+            normalized_origins.push(normalized);
+        }
+    }
+    config.cargo_allowed_download_origins = normalized_origins;
     Ok(())
+}
+
+fn normalize_allowed_origin(origin: &str) -> Result<String, RegistryConfigError> {
+    let parsed = Url::parse(origin).map_err(|_| RegistryConfigError::InvalidCargoAllowedDownloadOrigin)?;
+    if !matches!(parsed.scheme(), "http" | "https")
+        || parsed.host_str().is_none()
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+        || parsed.path() != "/"
+    {
+        return Err(RegistryConfigError::InvalidCargoAllowedDownloadOrigin);
+    }
+
+    let host = parsed
+        .host_str()
+        .ok_or(RegistryConfigError::InvalidCargoAllowedDownloadOrigin)?;
+    let mut normalized = format!("{}://{}", parsed.scheme(), host);
+    if let Some(port) = parsed.port() {
+        normalized.push(':');
+        normalized.push_str(&port.to_string());
+    }
+    Ok(normalized)
 }
 
 fn validate_upstream_url(
@@ -339,6 +377,7 @@ mod tests {
             name: mount_path.trim_matches('/').to_owned(),
             adapter,
             upstream_url: "https://registry.example.invalid".to_owned(),
+            cargo_allowed_download_origins: Vec::new(),
             mount_path: mount_path.to_owned(),
             auth_type: CredentialAuthType::None,
             credential_ref: None,
@@ -416,6 +455,45 @@ mod tests {
         assert!(matches!(
             result,
             Err(RegistryConfigError::InsecureAuthenticatedUpstream)
+        ));
+    }
+
+    #[test]
+    fn normalizes_cargo_allowed_download_origins() {
+        let mut cargo = config("/proxy/cargo-public", RegistryAdapter::Cargo);
+        cargo.cargo_allowed_download_origins = vec![
+            "https://static.example.invalid/".to_owned(),
+            "https://static.example.invalid".to_owned(),
+            "http://127.0.0.1:8443/".to_owned(),
+        ];
+
+        let store = RegistryConfigStore::new(vec![cargo]).expect("valid store");
+        let configs = store
+            .configs
+            .read()
+            .expect("registry config store lock should not be poisoned")
+            .clone();
+
+        assert_eq!(
+            configs[0].cargo_allowed_download_origins,
+            vec![
+                "https://static.example.invalid".to_owned(),
+                "http://127.0.0.1:8443".to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_cargo_allowed_download_origin() {
+        let mut cargo = config("/proxy/cargo-public", RegistryAdapter::Cargo);
+        cargo.cargo_allowed_download_origins =
+            vec!["https://static.example.invalid/path".to_owned()];
+
+        let result = RegistryConfigStore::new(vec![cargo]);
+
+        assert!(matches!(
+            result,
+            Err(RegistryConfigError::InvalidCargoAllowedDownloadOrigin)
         ));
     }
 

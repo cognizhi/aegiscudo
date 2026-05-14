@@ -41,6 +41,26 @@ pub struct NormalizedPackageRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct NormalizedQueryRequest {
+    pub kind: PackageRequestKind,
+    pub tenant_id: Uuid,
+    pub policy_profile_id: Uuid,
+    pub coordinate: PackageCoordinate,
+    pub trace_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub requested_digest: Option<ArtifactDigest>,
+    #[serde(default)]
+    pub explicit_version_or_integrity: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct DecisionQueryRequest {
+    pub tenant_id: Uuid,
+    pub policy_profile_id: Uuid,
+    pub request: NormalizedQueryRequest,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct DecisionRequest {
     pub tenant_id: Uuid,
     pub registry_config_id: Uuid,

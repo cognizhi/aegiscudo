@@ -94,6 +94,26 @@ services:
     ports:
       - "${AEGISCUDO_PYPI_FIXTURE_PORT:-18081}:8080"
 
+  cargo-fixture-registry:
+    image: python:3.12-alpine
+    working_dir: /workspace
+    command: ["python", "/workspace/scripts/fixture_registry.py", "--ecosystem", "cargo", "--root", "/workspace/testdata/cargo", "--port", "8080"]
+    volumes:
+      - ../scripts:/workspace/scripts:ro
+      - ../testdata/cargo:/workspace/testdata/cargo:ro
+    ports:
+      - "${AEGISCUDO_CARGO_FIXTURE_PORT:-18082}:8080"
+
+  maven-fixture-registry:
+    image: python:3.12-alpine
+    working_dir: /workspace
+    command: ["python", "/workspace/scripts/fixture_registry.py", "--ecosystem", "maven", "--root", "/workspace/testdata/maven", "--port", "8080"]
+    volumes:
+      - ../scripts:/workspace/scripts:ro
+      - ../testdata/maven:/workspace/testdata/maven:ro
+    ports:
+      - "${AEGISCUDO_MAVEN_FIXTURE_PORT:-18083}:8080"
+
   triage-counter:
     build:
       context: ..
@@ -120,9 +140,14 @@ services:
         condition: service_started
       pypi-fixture-registry:
         condition: service_started
+      cargo-fixture-registry:
+        condition: service_started
+      maven-fixture-registry:
+        condition: service_started
     environment:
       DATABASE_URL: postgres://aegiscudo:aegiscudo@postgres:5432/aegiscudo
       MOSQUITO_NET_BIND_ADDR: 0.0.0.0:8080
+      MOSQUITO_NET_CARGO_DOWNLOAD_MAC_KEY: ${MOSQUITO_NET_CARGO_DOWNLOAD_MAC_KEY}
       TRIAGE_COUNTER_URL: http://triage-counter:8081
     ports:
       - "${MOSQUITO_NET_PORT:-18000}:8080"

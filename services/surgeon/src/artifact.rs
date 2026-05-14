@@ -42,14 +42,18 @@ fn is_tar_gz_artifact(path: &Path) -> bool {
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or_default();
-    file_name.ends_with(".tgz") || file_name.ends_with(".tar.gz")
+    file_name.ends_with(".tgz") || file_name.ends_with(".tar.gz") || file_name.ends_with(".crate")
 }
 
 fn is_zip_artifact(path: &Path) -> bool {
-    matches!(
-        path.extension().and_then(|ext| ext.to_str()),
-        Some("whl" | "zip")
-    )
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| {
+            matches!(
+                ext.to_ascii_lowercase().as_str(),
+                "whl" | "zip" | "jar" | "war" | "ear"
+            )
+        })
 }
 
 fn unpack_tar_gz_bytes(
@@ -204,12 +208,14 @@ fn is_zip_symlink(entry: &zip::read::ZipFile<'_>) -> bool {
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::io::Write;
     use std::path::PathBuf;
 
     use flate2::Compression;
     use flate2::write::GzEncoder;
     use tar::{Builder, EntryType, Header};
     use tempfile::tempdir;
+    use zip::write::SimpleFileOptions;
 
     use super::*;
 
@@ -252,6 +258,339 @@ mod tests {
             manifest
                 .iter()
                 .any(|entry| entry.path.ends_with("METADATA"))
+        );
+    }
+
+    #[test]
+    fn scans_maven_jar_and_detects_malicious_fixture_indicators() {
+        let sample = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../samples/malicious/java/env-snoop/target/env-snoop-1.0.0.jar");
+        let unpack_dir = tempdir().unwrap();
+
+        let (evidence, manifest) =
+            scan_artifact_package(&sample, unpack_dir.path(), ScanLimits::default()).unwrap();
+
+        assert!(!manifest.is_empty());
+        assert!(
+            manifest
+                .iter()
+                .any(|entry| entry.path.ends_with("EnvSnoop.class"))
+        );
+        let indicator_types: Vec<_> = evidence
+            .indicators
+            .iter()
+            .map(|indicator| indicator.indicator_type.as_str())
+            .collect();
+
+        assert!(indicator_types.contains(&"java-outbound-http"), "{indicator_types:?}");
+        assert!(indicator_types.contains(&"java-env-read"), "{indicator_types:?}");
+        assert!(
+            indicator_types.contains(&"java-hardcoded-endpoint-or-token"),
+            "{indicator_types:?}"
+        );
+        assert!(indicator_types.contains(&"maven-build-plugin"), "{indicator_types:?}");
+    }
+
+    #[test]
+    fn scans_maven_jar_with_packaged_pom_and_detects_build_plugin() {
+        let artifact_dir = tempdir().unwrap();
+        let artifact_path = artifact_dir.path().join("plugin-evil-1.0.0.jar");
+        {
+            let file = fs::File::create(&artifact_path).unwrap();
+            let mut zip = zip::ZipWriter::new(file);
+            zip.start_file("META-INF/MANIFEST.MF", SimpleFileOptions::default())
+                .unwrap();
+            zip.write_all(b"Manifest-Version: 1.0\n\n").unwrap();
+            zip.start_file(
+                "META-INF/maven/com.example/plugin-evil/pom.xml",
+                SimpleFileOptions::default(),
+            )
+            .unwrap();
+            zip.write_all(
+                br#"<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>com.example</groupId>
+  <artifactId>plugin-evil</artifactId>
+  <version>1.0.0</version>
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>org.codehaus.mojo</groupId>
+        <artifactId>exec-maven-plugin</artifactId>
+        <version>3.1.0</version>
+      </plugin>
+    </plugins>
+  </build>
+</project>
+"#,
+            )
+            .unwrap();
+            zip.finish().unwrap();
+        }
+
+        let unpack_dir = tempdir().unwrap();
+        let (evidence, manifest) =
+            scan_artifact_package(&artifact_path, unpack_dir.path(), ScanLimits::default())
+                .unwrap();
+
+        assert!(!manifest.is_empty());
+        assert!(manifest.iter().any(|entry| entry.path.ends_with("pom.xml")));
+        let indicator_types: Vec<_> = evidence
+            .indicators
+            .iter()
+            .map(|indicator| indicator.indicator_type.as_str())
+            .collect();
+
+        assert!(indicator_types.contains(&"maven-build-plugin"), "{indicator_types:?}");
+    }
+
+    #[test]
+    fn scans_cargo_crate_and_generates_manifest() {
+        let source_dir = tempdir().unwrap();
+        fs::create_dir_all(source_dir.path().join("src")).unwrap();
+        fs::write(
+            source_dir.path().join("Cargo.toml"),
+            r#"
+[package]
+name = "cargo-evil"
+version = "0.1.0"
+edition = "2024"
+build = "build.rs"
+
+[dependencies]
+serde = { git = "https://github.com/example/serde" }
+"#,
+        )
+        .unwrap();
+        fs::write(
+            source_dir.path().join("build.rs"),
+            r#"
+use std::net::TcpStream;
+
+fn main() {
+    let _ = TcpStream::connect("127.0.0.1:9999");
+}
+"#,
+        )
+        .unwrap();
+        fs::write(source_dir.path().join("src/lib.rs"), "pub fn hello() {}\n").unwrap();
+
+        let artifact_dir = tempdir().unwrap();
+        let artifact_path = artifact_dir.path().join("cargo-evil-0.1.0.crate");
+        {
+            let file = fs::File::create(&artifact_path).unwrap();
+            let encoder = GzEncoder::new(file, Compression::fast());
+            let mut builder = Builder::new(encoder);
+            builder
+                .append_path_with_name(
+                    source_dir.path().join("Cargo.toml"),
+                    "cargo-evil-0.1.0/Cargo.toml",
+                )
+                .unwrap();
+            builder
+                .append_path_with_name(
+                    source_dir.path().join("build.rs"),
+                    "cargo-evil-0.1.0/build.rs",
+                )
+                .unwrap();
+            builder
+                .append_path_with_name(
+                    source_dir.path().join("src/lib.rs"),
+                    "cargo-evil-0.1.0/src/lib.rs",
+                )
+                .unwrap();
+            builder.into_inner().unwrap().finish().unwrap();
+        }
+
+        let unpack_dir = tempdir().unwrap();
+        let (evidence, manifest) =
+            scan_artifact_package(&artifact_path, unpack_dir.path(), ScanLimits::default())
+                .unwrap();
+
+        assert!(!manifest.is_empty());
+        assert!(manifest.iter().any(|entry| entry.path.ends_with("Cargo.toml")));
+        let indicator_types: Vec<_> = evidence
+            .indicators
+            .iter()
+            .map(|indicator| indicator.indicator_type.as_str())
+            .collect();
+        assert!(indicator_types.contains(&"cargo-build-script"));
+        assert!(indicator_types.contains(&"cargo-git-dependency"));
+        assert!(indicator_types.contains(&"rust-raw-network"));
+    }
+
+    #[test]
+    fn cargo_crate_with_multiple_malicious_indicators_is_fully_detected() {
+        let source_dir = tempdir().unwrap();
+        fs::create_dir_all(source_dir.path().join("src")).unwrap();
+        fs::create_dir_all(source_dir.path().join("vendor")).unwrap();
+        fs::write(
+            source_dir.path().join("Cargo.toml"),
+            r#"
+[package]
+name = "cargo-malicious"
+version = "0.1.0"
+edition = "2024"
+build = "build.rs"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+serde = { git = "https://github.com/example/serde" }
+
+[patch.crates-io]
+serde = { git = "https://github.com/evil/serde" }
+"#,
+        )
+        .unwrap();
+        fs::write(
+            source_dir.path().join("build.rs"),
+            r#"
+use std::net::TcpStream;
+
+fn main() {
+    let _ = TcpStream::connect("127.0.0.1:9999");
+    let _ = std::env::var("HOME");
+}
+"#,
+        )
+        .unwrap();
+        fs::write(source_dir.path().join("src/lib.rs"), "pub fn hello() {}\n").unwrap();
+        fs::write(
+            source_dir.path().join("vendor/libfoo.so"),
+            [0x7f, b'E', b'L', b'F', 0x02, 0x01, 0x01, 0x00u8],
+        )
+        .unwrap();
+
+        let artifact_dir = tempdir().unwrap();
+        let artifact_path = artifact_dir.path().join("cargo-malicious-0.1.0.crate");
+        {
+            let file = fs::File::create(&artifact_path).unwrap();
+            let encoder = GzEncoder::new(file, Compression::fast());
+            let mut builder = Builder::new(encoder);
+            builder
+                .append_path_with_name(
+                    source_dir.path().join("Cargo.toml"),
+                    "cargo-malicious-0.1.0/Cargo.toml",
+                )
+                .unwrap();
+            builder
+                .append_path_with_name(
+                    source_dir.path().join("build.rs"),
+                    "cargo-malicious-0.1.0/build.rs",
+                )
+                .unwrap();
+            builder
+                .append_path_with_name(
+                    source_dir.path().join("src/lib.rs"),
+                    "cargo-malicious-0.1.0/src/lib.rs",
+                )
+                .unwrap();
+            builder
+                .append_path_with_name(
+                    source_dir.path().join("vendor/libfoo.so"),
+                    "cargo-malicious-0.1.0/vendor/libfoo.so",
+                )
+                .unwrap();
+            builder.into_inner().unwrap().finish().unwrap();
+        }
+
+        let unpack_dir = tempdir().unwrap();
+        let (evidence, manifest) =
+            scan_artifact_package(&artifact_path, unpack_dir.path(), ScanLimits::default())
+                .unwrap();
+
+        assert!(!manifest.is_empty());
+        let indicator_types: Vec<_> = evidence
+            .indicators
+            .iter()
+            .map(|indicator| indicator.indicator_type.as_str())
+            .collect();
+        assert!(
+            indicator_types.contains(&"cargo-build-script"),
+            "missing cargo-build-script: {indicator_types:?}"
+        );
+        assert!(
+            indicator_types.contains(&"cargo-git-dependency"),
+            "missing cargo-git-dependency: {indicator_types:?}"
+        );
+        assert!(
+            indicator_types.contains(&"cargo-patch-override"),
+            "missing cargo-patch-override: {indicator_types:?}"
+        );
+        assert!(
+            indicator_types.contains(&"cargo-proc-macro"),
+            "missing cargo-proc-macro: {indicator_types:?}"
+        );
+        assert!(
+            indicator_types.contains(&"rust-raw-network"),
+            "missing rust-raw-network: {indicator_types:?}"
+        );
+        assert!(
+            indicator_types.contains(&"bundled-native-artifact"),
+            "missing bundled-native-artifact: {indicator_types:?}"
+        );
+        assert!(
+            indicator_types.contains(&"rust-env-read"),
+            "missing rust-env-read: {indicator_types:?}"
+        );
+    }
+
+    #[test]
+    fn packaged_cargo_target_artifacts_are_still_flagged() {
+        let source_dir = tempdir().unwrap();
+        fs::create_dir_all(source_dir.path().join("target/debug")).unwrap();
+        fs::write(
+            source_dir.path().join("Cargo.toml"),
+            r#"
+[package]
+name = "cargo-native"
+version = "0.1.0"
+edition = "2024"
+"#,
+        )
+        .unwrap();
+        fs::write(
+            source_dir.path().join("target/debug/libpayload.bin"),
+            [0x7f, b'E', b'L', b'F', 0x02, 0x01, 0x01, 0x00],
+        )
+        .unwrap();
+
+        let artifact_dir = tempdir().unwrap();
+        let artifact_path = artifact_dir.path().join("cargo-native-0.1.0.crate");
+        {
+            let file = fs::File::create(&artifact_path).unwrap();
+            let encoder = GzEncoder::new(file, Compression::fast());
+            let mut builder = Builder::new(encoder);
+            builder
+                .append_path_with_name(
+                    source_dir.path().join("Cargo.toml"),
+                    "cargo-native-0.1.0/Cargo.toml",
+                )
+                .unwrap();
+            builder
+                .append_path_with_name(
+                    source_dir.path().join("target/debug/libpayload.bin"),
+                    "cargo-native-0.1.0/target/debug/libpayload.bin",
+                )
+                .unwrap();
+            builder.into_inner().unwrap().finish().unwrap();
+        }
+
+        let unpack_dir = tempdir().unwrap();
+        let (evidence, _manifest) =
+            scan_artifact_package(&artifact_path, unpack_dir.path(), ScanLimits::default())
+                .unwrap();
+
+        assert!(
+            evidence.indicators.iter().any(|indicator| {
+                indicator.indicator_type == "bundled-native-artifact"
+                    && indicator.file_path == "cargo-native-0.1.0/target/debug/libpayload.bin"
+            }),
+            "packaged `.crate` target contents are shipped package artifacts and should still be surfaced: {:#?}",
+            evidence.indicators
         );
     }
 

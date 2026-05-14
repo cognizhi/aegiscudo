@@ -31,6 +31,12 @@ const FEEDS: &[FeedSource] = &[
     FeedSource::DepsDev,
     FeedSource::OpenSsfScorecard,
 ];
+const IOC_INDICATOR_MAINTAINER_IDENTITY: &str = "maintainer-identity";
+const IOC_INDICATOR_DOMAIN: &str = "domain";
+const IOC_INDICATOR_IP: &str = "ip";
+const IOC_INDICATOR_URL: &str = "url";
+const IOC_INDICATOR_PACKAGE_NAME: &str = "package-name";
+const IOC_INDICATOR_BEHAVIORAL_FINGERPRINT: &str = "behavioral-fingerprint";
 
 #[derive(Debug, Clone)]
 pub struct AppState {
@@ -42,6 +48,7 @@ pub struct AppState {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct LiveFeedSources {
     deps_dev_url: Option<String>,
+    deps_dev_api_base_url: Option<String>,
     openssf_scorecard_url: Option<String>,
 }
 
@@ -49,6 +56,7 @@ impl LiveFeedSources {
     fn from_env() -> Self {
         Self {
             deps_dev_url: std::env::var("FEED_HARVESTER_DEPS_DEV_URL").ok(),
+            deps_dev_api_base_url: std::env::var("FEED_HARVESTER_DEPS_DEV_API_BASE_URL").ok(),
             openssf_scorecard_url: std::env::var("FEED_HARVESTER_OPENSSF_SCORECARD_URL").ok(),
         }
     }
@@ -59,6 +67,12 @@ impl LiveFeedSources {
             FeedSource::OpenSsfScorecard => self.openssf_scorecard_url.as_deref(),
             _ => None,
         }
+    }
+
+    fn deps_dev_api_base_url(&self) -> &str {
+        self.deps_dev_api_base_url
+            .as_deref()
+            .unwrap_or("https://api.deps.dev/v3")
     }
 }
 
@@ -225,8 +239,43 @@ async fn persist_feed_records(
         FeedSource::OpenSsfScorecard => {
             persist_scorecard_records(transaction, snapshot_id, bytes).await
         }
+        FeedSource::OpenSsfMaliciousPackages | FeedSource::OpenSsfPackageAnalysis => {
+            persist_cross_ecosystem_ioc_records(transaction, snapshot_id, feed, bytes).await
+        }
         _ => Ok(()),
     }
+}
+
+async fn persist_cross_ecosystem_ioc_records(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    snapshot_id: Uuid,
+    feed: FeedSource,
+    bytes: &[u8],
+) -> Result<(), ApiError> {
+    let value = serde_json::from_slice::<Value>(bytes)?;
+    for record in cross_ecosystem_ioc_records(feed, &value) {
+        sqlx::query(
+            r#"
+            INSERT INTO cross_ecosystem_ioc_records (
+              snapshot_id, ecosystem, namespace, package_name, package_version,
+              indicator_type, indicator_value, details
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            "#,
+        )
+        .bind(snapshot_id)
+        .bind(&record.ecosystem)
+        .bind(&record.namespace)
+        .bind(&record.package_name)
+        .bind(&record.package_version)
+        .bind(&record.indicator_type)
+        .bind(&record.indicator_value)
+        .bind(SqlxJson(&record.details))
+        .execute(&mut **transaction)
+        .await?;
+    }
+
+    Ok(())
 }
 
 async fn persist_deps_dev_records(
@@ -387,7 +436,14 @@ async fn load_feed_snapshot_bytes(
     feed: FeedSource,
 ) -> Result<(FeedState, Option<Vec<u8>>), ApiError> {
     if let Some(url) = live_sources.url_for(feed) {
-        match fetch_live_feed_bytes(http_client, url).await {
+        let live_fetch = match feed {
+            FeedSource::DepsDev => {
+                fetch_live_deps_dev_bytes(http_client, url, live_sources.deps_dev_api_base_url())
+                    .await
+            }
+            _ => fetch_live_feed_bytes(http_client, url).await,
+        };
+        match live_fetch {
             Ok(bytes) => match normalized_record_count(feed, &bytes) {
                 Ok(_) => return Ok((FeedState::Fresh, Some(bytes))),
                 Err(error) => {
@@ -426,6 +482,77 @@ async fn fetch_live_feed_bytes(http_client: &Client, url: &str) -> Result<Vec<u8
     Ok(response.bytes().await?.to_vec())
 }
 
+async fn fetch_live_deps_dev_bytes(
+    http_client: &Client,
+    metadata_url: &str,
+    deps_dev_api_base_url: &str,
+) -> Result<Vec<u8>, ApiError> {
+    let bytes = fetch_live_feed_bytes(http_client, metadata_url).await?;
+    let value = serde_json::from_slice::<Value>(&bytes)?;
+    let enriched = enrich_live_deps_dev_payload(http_client, value, deps_dev_api_base_url).await?;
+    serde_json::to_vec(&enriched).map_err(ApiError::InvalidFeed)
+}
+
+async fn enrich_live_deps_dev_payload(
+    http_client: &Client,
+    value: Value,
+    deps_dev_api_base_url: &str,
+) -> Result<Value, ApiError> {
+    if !should_enrich_deps_dev_payload(&value) {
+        return Ok(value);
+    }
+
+    let package_values = deps_dev_packages(&value)
+        .into_iter()
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut merged_packages = Vec::new();
+    let mut seen_packages = BTreeSet::new();
+    extend_unique_deps_dev_packages(&mut merged_packages, &mut seen_packages, &value);
+
+    let mut merged_edges = Vec::new();
+    let mut seen_edges = BTreeSet::new();
+    let mut graph_fetches = 0_u64;
+
+    for package in &package_values {
+        let Some(version_key) = deps_dev_version_key_from_value(package) else {
+            continue;
+        };
+        graph_fetches += 1;
+
+        let graph_url = deps_dev_dependencies_url(deps_dev_api_base_url, &version_key)?;
+        let graph_bytes = fetch_live_feed_bytes(http_client, &graph_url).await?;
+        let graph_value = serde_json::from_slice::<Value>(&graph_bytes)?;
+        extend_unique_deps_dev_packages(&mut merged_packages, &mut seen_packages, &graph_value);
+
+        for edge in deps_dev_dependency_edges(&graph_value) {
+            if seen_edges.insert((
+                edge.package_purl.clone(),
+                edge.dependency_purl.clone(),
+                edge.relationship.clone(),
+            )) {
+                merged_edges.push(explicit_deps_dev_edge_document(&edge));
+            }
+        }
+    }
+
+    if graph_fetches == 0 {
+        return Ok(value);
+    }
+
+    match value {
+        Value::Object(mut map) => {
+            map.insert("packages".to_owned(), Value::Array(merged_packages));
+            map.insert("edges".to_owned(), Value::Array(merged_edges));
+            Ok(Value::Object(map))
+        }
+        _ => Ok(json!({
+            "packages": merged_packages,
+            "edges": merged_edges,
+        })),
+    }
+}
+
 async fn read_fixture_bytes(
     fixture_dir: &std::path::Path,
     feed: FeedSource,
@@ -462,7 +589,7 @@ impl FeedSource {
             Self::OpenSsfPackageAnalysis => "openssf-package-analysis",
             Self::CisaKev => "cisa-kev",
             Self::FirstEpss => "first-epss",
-            Self::DepsDev => "deps-dev",
+            Self::DepsDev => "deps.dev",
             Self::OpenSsfScorecard => "openssf-scorecard",
         }
     }
@@ -624,16 +751,14 @@ fn normalized_record_count(feed: FeedSource, bytes: &[u8]) -> Result<u64, ApiErr
                 .map_or(0, |items| items.len() as u64))
         }
         FeedSource::DepsDev => {
-            // deps.dev fixture: JSON object with a "packages" array, or a plain array.
+            // deps.dev may arrive as package metadata, a node-indexed graph, or explicit edge data.
             let value = serde_json::from_slice::<Value>(bytes)?;
-            Ok(match &value {
-                Value::Array(items) => items.len() as u64,
-                Value::Object(map) => map
-                    .get("packages")
-                    .and_then(Value::as_array)
-                    .map_or(0, |items| items.len() as u64),
-                _ => 0,
-            })
+            let package_count = deps_dev_packages(&value).len() as u64;
+            if package_count > 0 {
+                return Ok(package_count);
+            }
+
+            Ok(deps_dev_dependency_edges(&value).len() as u64)
         }
         FeedSource::OpenSsfScorecard => {
             // Scorecard fixture: JSON object with a "results" array, or a plain array.
@@ -681,6 +806,7 @@ fn deps_dev_packages(value: &Value) -> Vec<&Value> {
         Value::Array(items) => items.iter().collect(),
         Value::Object(map) => map
             .get("packages")
+            .or_else(|| map.get("nodes"))
             .and_then(Value::as_array)
             .map_or_else(Vec::new, |items| items.iter().collect()),
         _ => Vec::new(),
@@ -705,6 +831,13 @@ struct ParsedPurl {
     namespace: Option<String>,
     name: String,
     version: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DepsDevVersionKey {
+    system: String,
+    name: String,
+    version: String,
 }
 
 #[derive(Debug, Clone)]
@@ -748,6 +881,25 @@ struct ScorecardCheckRecord {
     details: Value,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FeedPackageIdentity {
+    ecosystem: String,
+    namespace: Option<String>,
+    name: String,
+    version: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CrossEcosystemIocRecord {
+    ecosystem: String,
+    namespace: Option<String>,
+    package_name: String,
+    package_version: Option<String>,
+    indicator_type: String,
+    indicator_value: String,
+    details: Value,
+}
+
 fn parse_deps_dev_package(value: &Value) -> Option<DepsDevPackageRecord> {
     let parsed = package_identity_from_value(value)?;
     let dependency_count = value
@@ -781,6 +933,61 @@ fn parse_deps_dev_package(value: &Value) -> Option<DepsDevPackageRecord> {
         project_links,
         raw_document: value.clone(),
     })
+}
+
+fn should_enrich_deps_dev_payload(value: &Value) -> bool {
+    match value {
+        Value::Array(_) => true,
+        Value::Object(map) => {
+            map.contains_key("packages")
+                && !map.contains_key("nodes")
+                && !map.contains_key("edges")
+                && !map.contains_key("dependencyGraph")
+        }
+        _ => false,
+    }
+}
+
+fn extend_unique_deps_dev_packages(
+    target: &mut Vec<Value>,
+    seen_purls: &mut BTreeSet<String>,
+    value: &Value,
+) {
+    for package in deps_dev_packages(value) {
+        let Some(parsed) = package_identity_from_value(package) else {
+            continue;
+        };
+        if seen_purls.insert(parsed.purl) {
+            target.push(package.clone());
+        }
+    }
+}
+
+fn explicit_deps_dev_edge_document(edge: &DepsDevDependencyEdgeRecord) -> Value {
+    let mut object = serde_json::Map::new();
+    object.insert(
+        "fromPurl".to_owned(),
+        Value::String(edge.package_purl.clone()),
+    );
+    object.insert(
+        "toPurl".to_owned(),
+        Value::String(edge.dependency_purl.clone()),
+    );
+    object.insert(
+        "relationship".to_owned(),
+        Value::String(edge.relationship.clone()),
+    );
+
+    if let Value::Object(details) = &edge.details {
+        for (key, value) in details {
+            if matches!(key.as_str(), "fromNode" | "toNode") {
+                continue;
+            }
+            object.entry(key.clone()).or_insert_with(|| value.clone());
+        }
+    }
+
+    Value::Object(object)
 }
 
 fn deps_dev_dependency_edges(value: &Value) -> Vec<DepsDevDependencyEdgeRecord> {
@@ -993,6 +1200,237 @@ fn parse_scorecard_check(value: &Value) -> Option<ScorecardCheckRecord> {
     })
 }
 
+fn cross_ecosystem_ioc_records(feed: FeedSource, value: &Value) -> Vec<CrossEcosystemIocRecord> {
+    let mut seen = BTreeSet::new();
+    let mut records = Vec::new();
+
+    match feed {
+        FeedSource::OpenSsfMaliciousPackages => {
+            for package in openssf_malicious_packages(value) {
+                let Some(identity) = feed_package_identity(package) else {
+                    continue;
+                };
+                let mut indicators = vec![(
+                    IOC_INDICATOR_PACKAGE_NAME,
+                    package_indicator_value(identity.namespace.as_deref(), &identity.name),
+                )];
+                indicators.extend(indicator_values(package, &["maintainerIdentity", "maintainerIdentities", "maintainers"]).into_iter().map(|value| (IOC_INDICATOR_MAINTAINER_IDENTITY, value)));
+                indicators.extend(indicator_values(package, &["domains", "domain"]).into_iter().map(|value| (IOC_INDICATOR_DOMAIN, value)));
+                indicators.extend(indicator_values(package, &["ips", "ip"]).into_iter().map(|value| (IOC_INDICATOR_IP, value)));
+                indicators.extend(indicator_values(package, &["urls", "url"]).into_iter().map(|value| (IOC_INDICATOR_URL, value)));
+
+                for (indicator_type, indicator_value) in indicators {
+                    if seen.insert((
+                        identity.ecosystem.clone(),
+                        identity.namespace.clone(),
+                        identity.name.clone(),
+                        identity.version.clone(),
+                        indicator_type.to_owned(),
+                        indicator_value.clone(),
+                    )) {
+                        records.push(CrossEcosystemIocRecord {
+                            ecosystem: identity.ecosystem.clone(),
+                            namespace: identity.namespace.clone(),
+                            package_name: identity.name.clone(),
+                            package_version: identity.version.clone(),
+                            indicator_type: indicator_type.to_owned(),
+                            indicator_value,
+                            details: package.clone(),
+                        });
+                    }
+                }
+            }
+        }
+        FeedSource::OpenSsfPackageAnalysis => {
+            for result in openssf_package_analysis_results(value) {
+                let Some(identity) = feed_package_identity(result) else {
+                    continue;
+                };
+                let Some(fingerprint) = behavioral_fingerprint(result) else {
+                    continue;
+                };
+                if seen.insert((
+                    identity.ecosystem.clone(),
+                    identity.namespace.clone(),
+                    identity.name.clone(),
+                    identity.version.clone(),
+                    IOC_INDICATOR_BEHAVIORAL_FINGERPRINT.to_owned(),
+                    fingerprint.clone(),
+                )) {
+                    records.push(CrossEcosystemIocRecord {
+                        ecosystem: identity.ecosystem,
+                        namespace: identity.namespace,
+                        package_name: identity.name,
+                        package_version: identity.version,
+                        indicator_type: IOC_INDICATOR_BEHAVIORAL_FINGERPRINT.to_owned(),
+                        indicator_value: fingerprint,
+                        details: result.clone(),
+                    });
+                }
+            }
+        }
+        _ => {}
+    }
+
+    records
+}
+
+fn openssf_malicious_packages(value: &Value) -> Vec<&Value> {
+    match value {
+        Value::Array(items) => items.iter().collect(),
+        Value::Object(map) => map
+            .get("packages")
+            .and_then(Value::as_array)
+            .map_or_else(Vec::new, |items| items.iter().collect()),
+        _ => Vec::new(),
+    }
+}
+
+fn openssf_package_analysis_results(value: &Value) -> Vec<&Value> {
+    match value {
+        Value::Array(items) => items.iter().collect(),
+        Value::Object(map) => map
+            .get("results")
+            .or_else(|| map.get("packages"))
+            .and_then(Value::as_array)
+            .map_or_else(Vec::new, |items| items.iter().collect()),
+        _ => Vec::new(),
+    }
+}
+
+fn feed_package_identity(value: &Value) -> Option<FeedPackageIdentity> {
+    let package = value.get("package").filter(|value| value.is_object()).unwrap_or(value);
+    let ecosystem = package
+        .get("ecosystem")
+        .and_then(Value::as_str)?
+        .trim()
+        .to_ascii_lowercase();
+    let raw_name = package.get("name").and_then(Value::as_str)?.trim();
+    let version = package
+        .get("version")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
+
+    let explicit_namespace = package
+        .get("namespace")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
+    let (namespace, name) = match explicit_namespace {
+        Some(namespace) => (Some(namespace), raw_name.to_owned()),
+        None => split_package_name_for_ecosystem(&ecosystem, raw_name),
+    };
+
+    Some(FeedPackageIdentity {
+        ecosystem,
+        namespace,
+        name,
+        version,
+    })
+}
+
+fn split_package_name_for_ecosystem(ecosystem: &str, raw_name: &str) -> (Option<String>, String) {
+    if ecosystem == "npm" {
+        if let Some(scoped) = raw_name.strip_prefix('@') {
+            if let Some((namespace, name)) = scoped.split_once('/') {
+                return (Some(namespace.to_owned()), name.to_owned());
+            }
+        }
+    }
+
+    (None, raw_name.to_owned())
+}
+
+fn package_indicator_value(namespace: Option<&str>, name: &str) -> String {
+    match namespace {
+        Some(namespace) => format!(
+            "{}/{}",
+            normalize_indicator_value(namespace),
+            normalize_indicator_value(name)
+        ),
+        None => normalize_indicator_value(name),
+    }
+}
+
+fn behavioral_fingerprint(value: &Value) -> Option<String> {
+    let analysis = value.get("analysis")?;
+    let behaviors = analysis.get("behaviors")?.as_array()?;
+    let components = behaviors
+        .iter()
+        .filter_map(|behavior| {
+            behavior
+                .get("id")
+                .and_then(Value::as_str)
+                .or_else(|| behavior.get("description").and_then(Value::as_str))
+                .map(normalize_indicator_value)
+                .filter(|value| !value.is_empty())
+        })
+        .collect::<BTreeSet<_>>();
+    if components.is_empty() {
+        None
+    } else {
+        Some(components.into_iter().collect::<Vec<_>>().join("|"))
+    }
+}
+
+fn indicator_values(value: &Value, field_names: &[&str]) -> Vec<String> {
+    let mut values = BTreeSet::new();
+    let object = match value {
+        Value::Object(object) => object,
+        _ => return Vec::new(),
+    };
+
+    for field_name in field_names {
+        if let Some(field_value) = object.get(*field_name) {
+            collect_stringish_values(&mut values, field_value);
+        }
+    }
+
+    values.into_iter().collect()
+}
+
+fn collect_stringish_values(target: &mut BTreeSet<String>, value: &Value) {
+    match value {
+        Value::String(value) => {
+            let normalized = normalize_indicator_value(value);
+            if !normalized.is_empty() {
+                target.insert(normalized);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                collect_stringish_values(target, item);
+            }
+        }
+        Value::Object(object) => {
+            for key in [
+                "value",
+                "id",
+                "name",
+                "email",
+                "url",
+                "domain",
+                "ip",
+                "handle",
+                "login",
+            ] {
+                if let Some(candidate) = object.get(key) {
+                    collect_stringish_values(target, candidate);
+                    break;
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn normalize_indicator_value(value: &str) -> String {
+    value.trim().to_ascii_lowercase()
+}
+
 fn package_identity_from_value(value: &Value) -> Option<ParsedPurl> {
     if let Some(purl) = value.get("purl").and_then(Value::as_str) {
         return parse_purl(purl);
@@ -1035,6 +1473,33 @@ fn package_identity_from_version_key(value: &Value) -> Option<ParsedPurl> {
     })
 }
 
+fn deps_dev_version_key_from_value(value: &Value) -> Option<DepsDevVersionKey> {
+    if let Some(version_key) = value.get("versionKey") {
+        return Some(DepsDevVersionKey {
+            system: version_key.get("system").and_then(Value::as_str)?.to_owned(),
+            name: version_key.get("name").and_then(Value::as_str)?.to_owned(),
+            version: version_key.get("version").and_then(Value::as_str)?.to_owned(),
+        });
+    }
+
+    let parsed = package_identity_from_value(value)?;
+    let version = parsed.version?;
+    let system = deps_dev_purl_type_to_system(&parsed.ecosystem)?.to_owned();
+    let name = match parsed.namespace {
+        Some(namespace) if !namespace.is_empty() && system.eq_ignore_ascii_case("MAVEN") => {
+            format!("{namespace}:{}", parsed.name)
+        }
+        Some(namespace) if !namespace.is_empty() => format!("{namespace}/{}", parsed.name),
+        _ => parsed.name,
+    };
+
+    Some(DepsDevVersionKey {
+        system,
+        name,
+        version,
+    })
+}
+
 fn deps_dev_system_to_purl_type(system: &str) -> Option<&'static str> {
     if system.eq_ignore_ascii_case("GO") {
         Some("golang")
@@ -1053,6 +1518,56 @@ fn deps_dev_system_to_purl_type(system: &str) -> Option<&'static str> {
     } else {
         None
     }
+}
+
+fn deps_dev_purl_type_to_system(ecosystem: &str) -> Option<&'static str> {
+    if ecosystem.eq_ignore_ascii_case("golang") {
+        Some("GO")
+    } else if ecosystem.eq_ignore_ascii_case("gem") {
+        Some("RUBYGEMS")
+    } else if ecosystem.eq_ignore_ascii_case("npm") {
+        Some("NPM")
+    } else if ecosystem.eq_ignore_ascii_case("cargo") {
+        Some("CARGO")
+    } else if ecosystem.eq_ignore_ascii_case("maven") {
+        Some("MAVEN")
+    } else if ecosystem.eq_ignore_ascii_case("pypi") {
+        Some("PYPI")
+    } else if ecosystem.eq_ignore_ascii_case("nuget") {
+        Some("NUGET")
+    } else {
+        None
+    }
+}
+
+fn deps_dev_dependencies_url(
+    deps_dev_api_base_url: &str,
+    version_key: &DepsDevVersionKey,
+) -> Result<String, ApiError> {
+    let mut url = reqwest::Url::parse(deps_dev_api_base_url).map_err(|error| {
+        ApiError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("invalid deps.dev API base URL: {error}"),
+        ))
+    })?;
+    {
+        let mut segments = url.path_segments_mut().map_err(|_| {
+            ApiError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "deps.dev API base URL cannot be a base path",
+            ))
+        })?;
+        segments.pop_if_empty();
+        segments.extend([
+            "systems",
+            &version_key.system.to_ascii_lowercase(),
+            "packages",
+            &version_key.name,
+            "versions",
+            &version_key.version,
+        ]);
+    }
+    Ok(format!("{url}:dependencies"))
 }
 
 fn split_deps_dev_name_for_purl(system: &str, raw_name: &str) -> (Option<String>, String) {
@@ -1121,7 +1636,7 @@ fn build_purl(
 fn sha256_digest(bytes: &[u8]) -> Result<ArtifactDigest, aegiscudo_core::DigestError> {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
-    ArtifactDigest::sha256(format!("{:x}", hasher.finalize()))
+    ArtifactDigest::sha256(hex::encode(hasher.finalize()))
 }
 
 fn feed_snapshot_response_from_row(
@@ -1228,6 +1743,48 @@ mod tests {
     }
 
     #[test]
+    fn counts_deps_dev_node_index_graph_payload() {
+        let count = normalized_record_count(
+            FeedSource::DepsDev,
+            br#"{
+                "nodes": [
+                    {"versionKey": {"system": "NPM", "name": "express", "version": "4.18.2"}},
+                    {"versionKey": {"system": "NPM", "name": "accepts", "version": "1.3.8"}},
+                    {"versionKey": {"system": "NPM", "name": "mime-types", "version": "2.1.34"}}
+                ],
+                "edges": [
+                    {"fromNode": 0, "toNode": 1, "requirement": "~1.3.8"},
+                    {"fromNode": 1, "toNode": 2, "requirement": "~2.1.34"}
+                ]
+            }"#,
+        )
+        .expect("valid feed");
+
+        assert_eq!(count, 3);
+    }
+
+    #[test]
+    fn counts_deps_dev_explicit_edges_without_packages() {
+        let count = normalized_record_count(
+            FeedSource::DepsDev,
+            br#"{
+                "dependencyGraph": {
+                    "edges": [
+                        {
+                            "fromPurl": "pkg:npm/express@4.18.2",
+                            "toPurl": "pkg:npm/accepts@1.3.8",
+                            "relationship": "runtime"
+                        }
+                    ]
+                }
+            }"#,
+        )
+        .expect("valid feed");
+
+        assert_eq!(count, 1);
+    }
+
+    #[test]
     fn counts_scorecard_results_array() {
         let count = normalized_record_count(
             FeedSource::OpenSsfScorecard,
@@ -1289,6 +1846,23 @@ mod tests {
         assert_eq!(record.package_name, "lodash");
         assert_eq!(record.package_version.as_deref(), Some("4.17.21"));
         assert_eq!(record.licenses, vec!["MIT"]);
+    }
+
+    #[test]
+    fn parse_deps_dev_package_derives_identity_from_version_key() {
+        let value = serde_json::json!({
+            "versionKey": {"system": "NPM", "name": "express", "version": "4.18.2"},
+            "relation": "SELF",
+            "bundled": false,
+            "errors": []
+        });
+
+        let record = parse_deps_dev_package(&value).expect("deps.dev package node");
+
+        assert_eq!(record.purl, "pkg:npm/express@4.18.2");
+        assert_eq!(record.ecosystem, "npm");
+        assert_eq!(record.package_name, "express");
+        assert_eq!(record.package_version.as_deref(), Some("4.18.2"));
     }
 
     #[test]
@@ -1397,6 +1971,73 @@ mod tests {
     }
 
     #[test]
+    fn malicious_package_ioc_records_capture_supported_indicator_types() {
+        let value = serde_json::json!({
+            "packages": [
+                {
+                    "ecosystem": "npm",
+                    "name": "@bad/actor",
+                    "maintainers": ["evil@example.test"],
+                    "domains": ["evil.example"],
+                    "ips": ["203.0.113.10"],
+                    "urls": ["https://evil.example/dropper"]
+                }
+            ]
+        });
+
+        let records = cross_ecosystem_ioc_records(FeedSource::OpenSsfMaliciousPackages, &value);
+
+        assert!(records.iter().any(|record| {
+            record.indicator_type == IOC_INDICATOR_PACKAGE_NAME
+                && record.indicator_value == "bad/actor"
+        }));
+        assert!(records.iter().any(|record| {
+            record.indicator_type == IOC_INDICATOR_MAINTAINER_IDENTITY
+                && record.indicator_value == "evil@example.test"
+        }));
+        assert!(records.iter().any(|record| {
+            record.indicator_type == IOC_INDICATOR_DOMAIN
+                && record.indicator_value == "evil.example"
+        }));
+        assert!(records.iter().any(|record| {
+            record.indicator_type == IOC_INDICATOR_IP
+                && record.indicator_value == "203.0.113.10"
+        }));
+        assert!(records.iter().any(|record| {
+            record.indicator_type == IOC_INDICATOR_URL
+                && record.indicator_value == "https://evil.example/dropper"
+        }));
+    }
+
+    #[test]
+    fn package_analysis_ioc_records_capture_behavioral_fingerprint() {
+        let value = serde_json::json!({
+            "results": [
+                {
+                    "package": {
+                        "ecosystem": "npm",
+                        "name": "malware-sample",
+                        "version": "1.0.0"
+                    },
+                    "analysis": {
+                        "behaviors": [
+                            {"id": "NETWORK_ACCESS"},
+                            {"id": "EXEC_BINARY"}
+                        ]
+                    }
+                }
+            ]
+        });
+
+        let records = cross_ecosystem_ioc_records(FeedSource::OpenSsfPackageAnalysis, &value);
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].indicator_type, IOC_INDICATOR_BEHAVIORAL_FINGERPRINT);
+        assert_eq!(records[0].indicator_value, "exec_binary|network_access");
+        assert_eq!(records[0].package_name, "malware-sample");
+    }
+
+    #[test]
     fn package_identity_from_value_builds_purl_without_explicit_purl_field() {
         let value = serde_json::json!({
             "ecosystem": "pypi",
@@ -1413,6 +2054,7 @@ mod tests {
     fn live_feed_sources_only_target_supported_live_feeds() {
         let sources = LiveFeedSources {
             deps_dev_url: Some("https://example.test/deps-dev.json".to_owned()),
+            deps_dev_api_base_url: Some("https://example.test/v3".to_owned()),
             openssf_scorecard_url: Some("https://example.test/scorecard.json".to_owned()),
         };
 
@@ -1424,17 +2066,25 @@ mod tests {
             sources.url_for(FeedSource::OpenSsfScorecard),
             Some("https://example.test/scorecard.json")
         );
+        assert_eq!(sources.deps_dev_api_base_url(), "https://example.test/v3");
         assert_eq!(sources.url_for(FeedSource::Osv), None);
+    }
+
+    #[test]
+    fn deps_dev_feed_name_matches_policy_contract() {
+        assert_eq!(FeedSource::DepsDev.name(), "deps.dev");
     }
 
     #[tokio::test]
     async fn load_feed_snapshot_bytes_prefers_live_deps_dev_response() {
         let http_client = build_http_client().expect("http client");
-        let (url, handle) =
-            spawn_json_server(r#"{"packages":[{"purl":"pkg:npm/lodash@4.17.21"}]}"#.to_owned())
-                .await;
+        let (url, handle) = spawn_json_server(
+            r#"{"packages":[{"purl":"pkg:npm/lodash@4.17.21"}],"edges":[]}"#.to_owned(),
+        )
+        .await;
         let live_sources = LiveFeedSources {
             deps_dev_url: Some(url),
+            deps_dev_api_base_url: Some("http://127.0.0.1:9/v3".to_owned()),
             openssf_scorecard_url: None,
         };
 
@@ -1455,10 +2105,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn load_feed_snapshot_bytes_prefers_live_deps_dev_graph_response() {
+        let http_client = build_http_client().expect("http client");
+        let (url, handle) = spawn_json_server(
+            r#"{
+                "nodes": [
+                    {"versionKey": {"system": "NPM", "name": "express", "version": "4.18.2"}},
+                    {"versionKey": {"system": "NPM", "name": "accepts", "version": "1.3.8"}}
+                ],
+                "edges": [
+                    {"fromNode": 0, "toNode": 1, "requirement": "~1.3.8"}
+                ]
+            }"#
+            .to_owned(),
+        )
+        .await;
+        let live_sources = LiveFeedSources {
+            deps_dev_url: Some(url),
+            deps_dev_api_base_url: Some("http://127.0.0.1:9/v3".to_owned()),
+            openssf_scorecard_url: None,
+        };
+
+        let (state, bytes) = load_feed_snapshot_bytes(
+            &test_fixture_dir(),
+            &http_client,
+            &live_sources,
+            FeedSource::DepsDev,
+        )
+        .await
+        .expect("load feed bytes");
+
+        handle.abort();
+
+        assert_eq!(state, FeedState::Fresh);
+        let bytes = bytes.expect("live bytes should exist");
+        assert_eq!(normalized_record_count(FeedSource::DepsDev, &bytes).unwrap(), 2);
+        let edges = deps_dev_dependency_edges(&serde_json::from_slice::<Value>(&bytes).unwrap());
+        assert_eq!(edges.len(), 1);
+    }
+
+    #[tokio::test]
     async fn load_feed_snapshot_bytes_falls_back_to_fixture_when_live_fetch_fails() {
         let http_client = build_http_client().expect("http client");
         let live_sources = LiveFeedSources {
             deps_dev_url: None,
+            deps_dev_api_base_url: None,
             openssf_scorecard_url: Some("http://127.0.0.1:9/scorecard.json".to_owned()),
         };
 
@@ -1485,6 +2176,7 @@ mod tests {
         let (url, handle) = spawn_json_server("{not-json".to_owned()).await;
         let live_sources = LiveFeedSources {
             deps_dev_url: Some(url),
+            deps_dev_api_base_url: Some("http://127.0.0.1:9/v3".to_owned()),
             openssf_scorecard_url: None,
         };
 
@@ -1513,6 +2205,7 @@ mod tests {
         let (url, handle) = spawn_json_server("{not-json".to_owned()).await;
         let live_sources = LiveFeedSources {
             deps_dev_url: None,
+            deps_dev_api_base_url: None,
             openssf_scorecard_url: Some(url),
         };
         let missing_fixture_dir = std::env::temp_dir()
@@ -1532,6 +2225,101 @@ mod tests {
 
         assert_eq!(state, FeedState::Unavailable);
         assert!(bytes.is_none(), "missing fallback fixture should stay unavailable");
+    }
+
+    #[tokio::test]
+    async fn load_feed_snapshot_bytes_enriches_live_deps_dev_packages_with_graphs() {
+        let http_client = build_http_client().expect("http client");
+        let (metadata_url, api_base_url, handle) = spawn_deps_dev_enrichment_server(
+            r#"{
+                "packages": [
+                    {
+                        "purl": "pkg:npm/express@4.18.2",
+                        "ecosystem": "npm",
+                        "name": "express",
+                        "version": "4.18.2",
+                        "licenses": ["MIT"]
+                    }
+                ]
+            }"#
+            .to_owned(),
+            vec![(
+                "/v3/systems/npm/packages/express/versions/4.18.2:dependencies".to_owned(),
+                r#"{
+                    "nodes": [
+                        {"versionKey": {"system": "NPM", "name": "express", "version": "4.18.2"}},
+                        {"versionKey": {"system": "NPM", "name": "accepts", "version": "1.3.8"}}
+                    ],
+                    "edges": [
+                        {"fromNode": 0, "toNode": 1, "requirement": "~1.3.8"}
+                    ]
+                }"#
+                .to_owned(),
+            )],
+        )
+        .await;
+        let live_sources = LiveFeedSources {
+            deps_dev_url: Some(metadata_url),
+            deps_dev_api_base_url: Some(api_base_url),
+            openssf_scorecard_url: None,
+        };
+
+        let (state, bytes) = load_feed_snapshot_bytes(
+            &test_fixture_dir(),
+            &http_client,
+            &live_sources,
+            FeedSource::DepsDev,
+        )
+        .await
+        .expect("load deps.dev bytes");
+
+        handle.abort();
+
+        assert_eq!(state, FeedState::Fresh);
+        let bytes = bytes.expect("live bytes should exist");
+        let value = serde_json::from_slice::<Value>(&bytes).expect("merged deps.dev payload");
+        assert_eq!(deps_dev_packages(&value).len(), 2);
+        assert_eq!(deps_dev_dependency_edges(&value).len(), 1);
+    }
+
+    #[tokio::test]
+    async fn load_feed_snapshot_bytes_falls_back_when_deps_dev_graph_enrichment_fails() {
+        let http_client = build_http_client().expect("http client");
+        let (metadata_url, api_base_url, handle) = spawn_deps_dev_enrichment_server(
+            r#"{
+                "packages": [
+                    {
+                        "purl": "pkg:npm/express@4.18.2",
+                        "ecosystem": "npm",
+                        "name": "express",
+                        "version": "4.18.2"
+                    }
+                ]
+            }"#
+            .to_owned(),
+            Vec::new(),
+        )
+        .await;
+        let live_sources = LiveFeedSources {
+            deps_dev_url: Some(metadata_url),
+            deps_dev_api_base_url: Some(api_base_url),
+            openssf_scorecard_url: None,
+        };
+
+        let (state, bytes) = load_feed_snapshot_bytes(
+            &test_fixture_dir(),
+            &http_client,
+            &live_sources,
+            FeedSource::DepsDev,
+        )
+        .await
+        .expect("load fallback bytes");
+
+        handle.abort();
+
+        assert_eq!(state, FeedState::Degraded);
+        let bytes = bytes.expect("fixture fallback bytes should exist");
+        assert!(normalized_record_count(FeedSource::DepsDev, &bytes).unwrap() > 0);
     }
 
     fn test_fixture_dir() -> PathBuf {
@@ -1559,5 +2347,60 @@ mod tests {
             let _ = axum::serve(listener, app).await;
         });
         (format!("http://{address}/feed.json"), handle)
+    }
+
+    async fn spawn_deps_dev_enrichment_server(
+        metadata_body: String,
+        graph_routes: Vec<(String, String)>,
+    ) -> (String, String, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind deps.dev listener");
+        let address = listener.local_addr().expect("listener address");
+        let metadata_body = Arc::new(metadata_body);
+        let graph_routes = Arc::new(graph_routes);
+        let app = Router::new()
+            .route(
+                "/feed.json",
+                get(move || {
+                    let metadata_body = metadata_body.clone();
+                    async move {
+                        (
+                            [(axum::http::header::CONTENT_TYPE, "application/json")],
+                            (*metadata_body).clone(),
+                        )
+                    }
+                }),
+            )
+            .route(
+                "/v3/{*path}",
+                get(move |axum::extract::Path(path): axum::extract::Path<String>| {
+                    let graph_routes = graph_routes.clone();
+                    async move {
+                        let route_path = format!("/v3/{path}");
+                        if let Some((_, body)) = graph_routes
+                            .iter()
+                            .find(|(candidate_path, _)| candidate_path == &route_path)
+                        {
+                            (
+                                StatusCode::OK,
+                                [(axum::http::header::CONTENT_TYPE, "application/json")],
+                                body.clone(),
+                            )
+                                .into_response()
+                        } else {
+                            StatusCode::NOT_FOUND.into_response()
+                        }
+                    }
+                }),
+            );
+        let handle = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        (
+            format!("http://{address}/feed.json"),
+            format!("http://{address}/v3"),
+            handle,
+        )
     }
 }

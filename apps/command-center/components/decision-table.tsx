@@ -307,6 +307,7 @@ export function DecisionTable({
         </div>
       </div>
       <ArtifactEvidenceViewer
+        key={selectedItem?.artifact_id ?? "artifact-evidence-empty"}
         item={selectedItem}
         evidence={evidenceQuery.data}
         isLoading={evidenceQuery.isLoading}

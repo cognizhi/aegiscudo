@@ -30,6 +30,7 @@ def load_fixture(name: str) -> dict[str, object]:
     ("model", "fixture_name"),
     [
         (PolicyProfile, "policy.default.json"),
+        (PolicyProfile, "policy.legacy-phase1.json"),
         (DecisionResponse, "decision.allow.json"),
         (StaticEvidence, "evidence.static.json"),
         (SandboxTelemetry, "sandbox-telemetry.canary.json"),
@@ -95,6 +96,14 @@ def test_policy_profile_accepts_scorecard_thresholds() -> None:
 
     assert policy.scorecard_thresholds is not None
     assert policy.scorecard_thresholds.branch_protection == 8.0
+
+
+def test_policy_profile_legacy_fixture_remains_backward_compatible() -> None:
+    policy = PolicyProfile.model_validate(load_fixture("policy.legacy-phase1.json"))
+
+    assert policy.scorecard_thresholds is None
+    assert policy.known_vulnerability_threshold.epss_probability_floor is None
+    assert policy.mode.value == "warn"
 
 
 def test_policy_profile_rejects_null_scorecard_threshold_value() -> None:

@@ -1,5 +1,5 @@
 use aegiscudo_telemetry::init_json_tracing;
-use anyhow::Context;
+use anyhow::{Context, ensure};
 use mosquito_net::{
     audit::PostgresAuditEventRepository,
     rate_limit::{ProxyRateLimitConfig, RateLimitConfig},
@@ -27,6 +27,7 @@ async fn main() -> anyhow::Result<()> {
         std::env::var("TRIAGE_COUNTER_URL").unwrap_or_else(|_| "http://127.0.0.1:8081".to_owned());
     let triage_timeout_ms = env_u64("TRIAGE_COUNTER_TIMEOUT_MS", 750).clamp(100, 5_000);
     let triage_max_retries = env_u8("TRIAGE_COUNTER_MAX_RETRIES", 1).min(3);
+    let cargo_download_mac_key = required_env_bytes("MOSQUITO_NET_CARGO_DOWNLOAD_MAC_KEY")?;
     let triage_client = TriageClient::new(
         &triage_counter_url,
         Duration::from_millis(triage_timeout_ms),
@@ -64,13 +65,14 @@ async fn main() -> anyhow::Result<()> {
     );
     axum::serve(
         listener,
-        mosquito_net::app_with_runtime_dependencies_and_reload(
+        mosquito_net::app_with_runtime_dependencies_and_reload_and_cargo_download_mac_key(
             registry_configs,
             Some(registry_repository),
             triage_client,
             rate_limit_config,
             Some(audit_repository),
             max_artifact_bytes,
+            cargo_download_mac_key,
         )
         .into_make_service_with_connect_info::<SocketAddr>(),
     )
@@ -97,4 +99,14 @@ fn env_usize(name: &str, default: usize) -> usize {
         .ok()
         .and_then(|value| value.parse().ok())
         .unwrap_or(default)
+}
+
+fn required_env_bytes(name: &str) -> anyhow::Result<Vec<u8>> {
+    let value = std::env::var(name)
+        .with_context(|| format!("{name} is required for stable Cargo download-route signing"))?;
+    ensure!(
+        !value.is_empty(),
+        "{name} must not be empty for stable Cargo download-route signing"
+    );
+    Ok(value.into_bytes())
 }

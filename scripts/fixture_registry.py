@@ -8,10 +8,12 @@ import hashlib
 import io
 import json
 import mimetypes
+import tomllib
 import tarfile
+from typing import Any
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import unquote, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 
 class FixtureRegistryHandler(BaseHTTPRequestHandler):
@@ -19,11 +21,16 @@ class FixtureRegistryHandler(BaseHTTPRequestHandler):
     root: Path
 
     def do_GET(self) -> None:
-        path = unquote(urlparse(self.path).path).strip("/")
+        parsed = urlparse(self.path)
+        path = unquote(parsed.path).strip("/")
         if self.ecosystem == "npm":
             self._handle_npm(path)
         elif self.ecosystem == "pypi":
             self._handle_pypi(path)
+        elif self.ecosystem == "cargo":
+            self._handle_cargo(path, parsed.query)
+        elif self.ecosystem == "maven":
+            self._handle_maven(path)
         else:
             self.send_error(500, "invalid fixture registry ecosystem")
 
@@ -72,6 +79,47 @@ class FixtureRegistryHandler(BaseHTTPRequestHandler):
             return
         self.send_error(404)
 
+    def _handle_cargo(self, path: str, query: str) -> None:
+        if path == "config.json":
+            self._send_bytes(render_cargo_registry_config(), "application/json")
+            return
+
+        parts = [part for part in path.split("/") if part]
+        if parts[:3] == ["api", "v1", "crates"]:
+            if len(parts) == 3:
+                params = parse_qs(query)
+                search_query = params.get("q", [""])[0]
+                per_page = int(params.get("per_page", ["10"])[0])
+                payload = render_cargo_search_results(self.root, search_query, per_page)
+                self._send_bytes(payload, "application/json")
+                return
+            if len(parts) == 6 and parts[5] == "download":
+                self._send_cargo_crate(parts[3], parts[4])
+                return
+            self.send_error(404)
+            return
+
+        crate_name = parse_cargo_sparse_index_request(self.root, path)
+        if crate_name is None:
+            self.send_error(404)
+            return
+        payload = render_cargo_sparse_index(self.root, crate_name)
+        self._send_bytes(payload, "application/vnd.rust.crate-index")
+
+    def _handle_maven(self, path: str) -> None:
+        if not path:
+            self.send_error(404)
+            return
+        self._send_file(self.root / path, mimetypes.guess_type(path)[0] or "application/octet-stream")
+
+    def _send_cargo_crate(self, crate_name: str, version: str) -> None:
+        try:
+            payload = build_cargo_crate(self.root, crate_name, version)
+        except FileNotFoundError:
+            self.send_error(404)
+            return
+        self._send_bytes(payload, "application/octet-stream")
+
     def _send_file(self, path: Path, content_type: str) -> None:
         resolved = path.resolve()
         if self.root.resolve() not in resolved.parents and resolved != self.root.resolve():
@@ -92,7 +140,7 @@ class FixtureRegistryHandler(BaseHTTPRequestHandler):
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Serve Aegiscudo fixture registry testdata")
-    parser.add_argument("--ecosystem", choices=("npm", "pypi"), required=True)
+    parser.add_argument("--ecosystem", choices=("npm", "pypi", "cargo", "maven"), required=True)
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8080)
@@ -106,8 +154,129 @@ def main() -> None:
     server = ThreadingHTTPServer((args.host, args.port), handler)
     print(json.dumps({"service": "fixture-registry", "ecosystem": args.ecosystem, "port": args.port}), flush=True)
     server.serve_forever()
+
+
 def fixture_registry_base_url(host: str | None) -> str:
     return f"http://{host}" if host else "http://127.0.0.1"
+
+
+def render_cargo_registry_config() -> bytes:
+    return json.dumps({"dl": "api/v1/crates", "api": "."}).encode()
+
+
+def render_cargo_search_results(root: Path, query: str, per_page: int) -> bytes:
+    query = query.strip().lower()
+    crates: list[dict[str, Any]] = []
+    for package in list_cargo_fixture_packages(root):
+        name = package["name"].lower()
+        description = (package.get("description") or "").lower()
+        if query and query not in name and query not in description:
+            continue
+        crates.append(
+            {
+                "name": package["name"],
+                "max_version": package["version"],
+                "description": package.get("description") or "",
+            }
+        )
+    crates = crates[: max(per_page, 0)]
+    return json.dumps({"crates": crates, "meta": {"total": len(crates)}}).encode()
+
+
+def render_cargo_sparse_index(root: Path, crate_name: str) -> bytes:
+    package = cargo_fixture_package(root, crate_name)
+    crate_bytes = build_cargo_crate(root, package["name"], package["version"])
+    entry = {
+        "name": package["name"],
+        "vers": package["version"],
+        "deps": [],
+        "cksum": hashlib.sha256(crate_bytes).hexdigest(),
+        "features": {},
+        "yanked": False,
+        "links": None,
+    }
+    return (json.dumps(entry) + "\n").encode()
+
+
+def build_cargo_crate(root: Path, crate_name: str, version: str) -> bytes:
+    package = cargo_fixture_package(root, crate_name)
+    if package["version"] != version:
+        raise FileNotFoundError(version)
+    source_dir = resolve_cargo_package_source_dir(root, crate_name)
+
+    buffer = io.BytesIO()
+    with gzip.GzipFile(fileobj=buffer, mode="wb", mtime=0) as compressed:
+        with tarfile.open(fileobj=compressed, mode="w") as archive:
+            crate_root = Path(f"{crate_name}-{version}")
+            for item in sorted(source_dir.rglob("*")):
+                if not item.is_file():
+                    continue
+                archive.add(
+                    item,
+                    arcname=crate_root / item.relative_to(source_dir),
+                    filter=_normalize_tarinfo,
+                )
+
+    return buffer.getvalue()
+
+
+def parse_cargo_sparse_index_request(root: Path, path: str) -> str | None:
+    for package in list_cargo_fixture_packages(root):
+        if path == cargo_sparse_index_path(package["name"]):
+            return package["name"]
+    return None
+
+
+def cargo_sparse_index_path(crate_name: str) -> str:
+    if len(crate_name) == 1:
+        return f"1/{crate_name}"
+    if len(crate_name) == 2:
+        return f"2/{crate_name}"
+    if len(crate_name) == 3:
+        return f"3/{crate_name[:1]}/{crate_name}"
+    return f"{crate_name[:2]}/{crate_name[2:4]}/{crate_name}"
+
+
+def list_cargo_fixture_packages(root: Path) -> list[dict[str, str]]:
+    package_sources = root / "package-sources"
+    if not package_sources.is_dir():
+        return []
+
+    packages: list[dict[str, str]] = []
+    for source_dir in sorted(package_sources.iterdir()):
+        if not source_dir.is_dir():
+            continue
+        package = cargo_fixture_package(root, source_dir.name)
+        packages.append(package)
+    return packages
+
+
+def cargo_fixture_package(root: Path, crate_name: str) -> dict[str, str]:
+    source_dir = resolve_cargo_package_source_dir(root, crate_name)
+    manifest_path = source_dir / "Cargo.toml"
+    if not manifest_path.is_file():
+        raise FileNotFoundError(manifest_path)
+
+    manifest = tomllib.loads(manifest_path.read_text())
+    package = manifest.get("package") or {}
+    name = package.get("name")
+    version = package.get("version")
+    if not isinstance(name, str) or not isinstance(version, str):
+        raise FileNotFoundError(manifest_path)
+
+    description = package.get("description")
+    return {
+        "name": name,
+        "version": version,
+        "description": description if isinstance(description, str) else "",
+    }
+
+
+def resolve_cargo_package_source_dir(root: Path, crate_name: str) -> Path:
+    source_dir = root / "package-sources" / crate_name
+    if source_dir.is_dir():
+        return source_dir
+    raise FileNotFoundError(source_dir)
 
 
 def parse_npm_tarball_request(path: str) -> tuple[str, str]:

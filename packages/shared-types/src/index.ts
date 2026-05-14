@@ -23,6 +23,7 @@ export const packageEcosystems = [
   "maven",
   "docker-oci",
   "generic-http",
+  "githubactions",
 ] as const;
 
 export type PackageEcosystem = (typeof packageEcosystems)[number];
@@ -105,6 +106,32 @@ export type LlmUsageFailingTrace =
   GeneratedAegiscudoApiComponents["schemas"]["LlmUsageFailingTrace"];
 export type LlmUsagePromptTemplateVersion =
   GeneratedAegiscudoApiComponents["schemas"]["LlmUsagePromptTemplateVersion"];
+export type SbomNtiaValidation =
+  GeneratedAegiscudoApiComponents["schemas"]["SbomNtiaValidation"];
+export type SbomDocumentSummary =
+  GeneratedAegiscudoApiComponents["schemas"]["SbomDocumentSummary"];
+export type OpenVexExpiryPolicy =
+  GeneratedAegiscudoApiComponents["schemas"]["OpenVexExpiryPolicy"];
+export type OpenVexDocumentSummary =
+  GeneratedAegiscudoApiComponents["schemas"]["OpenVexDocumentSummary"];
+export type OpenVexDocument =
+  GeneratedAegiscudoApiComponents["schemas"]["OpenVexDocument"];
+export type SignalPolicyAction =
+  GeneratedAegiscudoApiComponents["schemas"]["SignalPolicyAction"];
+export type ScorecardCheckThreshold =
+  GeneratedAegiscudoApiComponents["schemas"]["ScorecardCheckThreshold"];
+export type PolicyScorecardThresholds =
+  GeneratedAegiscudoApiComponents["schemas"]["PolicyScorecardThresholds"];
+export type DepsDdevPackageSummary =
+  GeneratedAegiscudoApiComponents["schemas"]["DepsDdevPackageSummary"];
+export type DepsDdevPackagesResponse =
+  GeneratedAegiscudoApiComponents["schemas"]["DepsDdevPackagesResponse"];
+export type IocRecordSummary =
+  GeneratedAegiscudoApiComponents["schemas"]["IocRecordSummary"];
+export type IocRecordsResponse =
+  GeneratedAegiscudoApiComponents["schemas"]["IocRecordsResponse"];
+export type GithubActionsScanResult =
+  GeneratedAegiscudoApiComponents["schemas"]["GithubActionsScanResult"];
 
 export function purl(coordinate: PackageCoordinate): string {
   const packagePath = coordinate.namespace

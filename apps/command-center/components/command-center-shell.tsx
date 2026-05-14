@@ -25,9 +25,15 @@ import { CommandPaletteTrigger } from "./command-palette";
 import { DecisionTable } from "./decision-table";
 import { IntegrationsPanel } from "./integrations-panel";
 import { LlmUsagePanel } from "./llm-usage-panel";
+import { OpenVexDocumentsPanel } from "./openvex-documents-panel";
 import { OverrideQueue } from "./override-queue";
 import { PolicySimulatorPanel } from "./policy-simulator-panel";
+import { DepsDdevPackagesPanel } from "./deps-dev-packages-panel";
+import { GithubActionsScanResultsPanel } from "./github-actions-scan-results-panel";
+import { IocRecordsPanel } from "./ioc-records-panel";
+import { ScorecardThresholdsPanel } from "./scorecard-thresholds-panel";
 import { RegistryProxiesPanel } from "./registry-proxies-panel";
+import { SbomExportsPanel } from "./sbom-exports-panel";
 import { HelpTooltip, TooltipProvider } from "./ui/tooltip";
 
 const RequestTimelineChart = dynamic(
@@ -433,9 +439,17 @@ export function CommandCenterShell({ appVersion }: CommandCenterShellProps) {
             {activeNav === "admin-ai-providers" && <AiProvidersPanel />}
             {activeNav === "admin-llm-usage" && <LlmUsagePanel />}
             {activeNav === "admin-audit-log" && <AuditLogPanel />}
-            {(activeNav === "analysis-evidence" ||
-              activeNav === "analysis-sandbox" ||
-              activeNav === "admin-settings") && (
+            {activeNav === "analysis-evidence" && (
+              <div className="space-y-5">
+                <SbomExportsPanel />
+                <OpenVexDocumentsPanel />
+                <ScorecardThresholdsPanel />
+                <DepsDdevPackagesPanel />
+                <IocRecordsPanel />
+                <GithubActionsScanResultsPanel />
+              </div>
+            )}
+            {(activeNav === "analysis-sandbox" || activeNav === "admin-settings") && (
               <PlaceholderPanel label={NAV_TITLES[activeNav].title} />
             )}
           </section>

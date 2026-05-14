@@ -1,0 +1,1 @@
+ALTER TYPE package_ecosystem ADD VALUE IF NOT EXISTS 'githubactions';

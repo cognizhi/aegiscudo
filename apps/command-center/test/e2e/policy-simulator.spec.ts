@@ -28,6 +28,47 @@ const shadowProfile = {
 
 const mockPolicyProfiles = [defaultProfile, shadowProfile];
 
+const mockScorecardThresholds = {
+  policy_profile_id: defaultProfile.id,
+  policy_version_id: defaultProfile.latest_version_id,
+  code_review: { min_score: 7.0, action: "block", enabled: true },
+  branch_protection: { min_score: 6.0, action: "warn", enabled: true },
+  ci_cd: { min_score: 5.0, action: "warn", enabled: false },
+  maintained: { min_score: 4.0, action: "warn", enabled: false },
+  signed_releases: { min_score: 0.0, action: "allow", enabled: false },
+};
+
+const mockVexDocuments = [
+  {
+    id: "018f4a6f-aaaa-0000-0000-000000000001",
+    tenant_id: tenantId,
+    source: "manual",
+    document_id: "vex-doc-e2e-1",
+    author: "security@example.com",
+    context: "https://openvex.dev/ns",
+    version: 1,
+    document_timestamp: "2026-05-01T00:00:00Z",
+    imported_at: "2026-05-02T00:00:00Z",
+    expiry_policy: "never",
+    document_digest: "sha256:abcdef",
+    statement_count: 4,
+  },
+  {
+    id: "018f4a6f-bbbb-0000-0000-000000000002",
+    tenant_id: tenantId,
+    source: "manual",
+    document_id: "vex-doc-e2e-2",
+    author: "security@example.com",
+    context: "https://openvex.dev/ns",
+    version: 1,
+    document_timestamp: "2026-05-03T00:00:00Z",
+    imported_at: "2026-05-04T00:00:00Z",
+    expiry_policy: "never",
+    document_digest: "sha256:fedcba",
+    statement_count: 7,
+  },
+];
+
 const mockPolicySimulation = {
   tenant_id: tenantId,
   target_policy_profile_id: shadowProfile.id,
@@ -106,6 +147,17 @@ test.describe("Policy Simulator", () => {
     await page.route(`**/api/tenants/${tenantId}/policy-profiles`, async (route) => {
       await route.fulfill({ json: mockPolicyProfiles });
     });
+    // Default Scorecard mock for all tests (used as soon as profiles load)
+    await page.route(
+      `**/api/tenants/${tenantId}/policy-profiles/*/scorecard-thresholds`,
+      async (route) => {
+        await route.fulfill({ json: mockScorecardThresholds });
+      },
+    );
+    // Default VEX documents mock for all tests
+    await page.route(`**/api/tenants/${tenantId}/analysis/openvex-documents`, async (route) => {
+      await route.fulfill({ json: mockVexDocuments });
+    });
   });
 
   test("replays the selected policy profile and renders a decision diff", async ({ page }) => {
@@ -146,5 +198,49 @@ test.describe("Policy Simulator", () => {
     await openShell(page);
     await page.getByRole("button", { name: "Simulator" }).click();
     await expect(page.getByText("No policy profiles are available for replay in this tenant.")).toBeVisible();
+  });
+
+  test("shows enabled Scorecard thresholds in effect for the selected profile", async ({ page }) => {
+    await openShell(page);
+    await page.getByRole("button", { name: "Simulator" }).click();
+
+    const section = page.getByLabel("Scorecard thresholds in effect for this simulation");
+    await expect(section).toBeVisible();
+    // Code Review and Branch Protection are enabled — should appear
+    await expect(section.getByText("Code Review")).toBeVisible();
+    await expect(section.getByText("Branch Protection")).toBeVisible();
+    // min score and action labels visible
+    await expect(section.getByText(/min 7.*block/)).toBeVisible();
+    await expect(section.getByText(/min 6.*warn/)).toBeVisible();
+    // Disabled checks — CI / CD is disabled, should not appear
+    await expect(section.getByText("CI / CD")).not.toBeVisible();
+  });
+
+  test("shows VEX suppression advisory with document count and pending note", async ({ page }) => {
+    await openShell(page);
+    await page.getByRole("button", { name: "Simulator" }).click();
+
+    const vexSection = page.getByLabel("VEX suppression status");
+    await expect(vexSection).toBeVisible();
+    // 2 documents, 4 + 7 = 11 statements
+    await expect(vexSection.getByText(/2.*document/)).toBeVisible();
+    await expect(vexSection.getByText(/11.*statement/)).toBeVisible();
+    await expect(vexSection.getByText(/not yet active/)).toBeVisible();
+    await expect(vexSection.getByText(/component identity matching is pending/)).toBeVisible();
+  });
+
+  test("shows VEX suppression inactive when no documents are imported", async ({ page }) => {
+    // Override the VEX mock set in beforeEach with an empty list
+    await page.route(`**/api/tenants/${tenantId}/analysis/openvex-documents`, async (route) => {
+      await route.fulfill({ json: [] });
+    });
+
+    await openShell(page);
+    await page.getByRole("button", { name: "Simulator" }).click();
+
+    const vexSection = page.getByLabel("VEX suppression status");
+    await expect(vexSection).toBeVisible();
+    await expect(vexSection.getByText(/No OpenVEX documents are imported/)).toBeVisible();
+    await expect(vexSection.getByText(/VEX suppression is inactive/)).toBeVisible();
   });
 });

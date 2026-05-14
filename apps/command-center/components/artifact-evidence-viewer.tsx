@@ -27,11 +27,7 @@ export function ArtifactEvidenceViewer({
   errorMessage,
 }: ArtifactEvidenceViewerProps) {
   const artifactId = item?.artifact_id ?? "";
-  const [tabState, setTabState] = useState<{ artifactId: string; activeTab: EvidenceTab }>({
-    artifactId,
-    activeTab: "static",
-  });
-  const activeTab = tabState.artifactId === artifactId ? tabState.activeTab : "static";
+  const [activeTab, setActiveTab] = useState<EvidenceTab>("static");
 
   if (!item) {
     return (
@@ -41,38 +37,71 @@ export function ArtifactEvidenceViewer({
     );
   }
 
-  const summary = asRecord(item.summary);
-  const evidenceSummary = asRecord(summary.evidence);
-  const limitations = asStringArray(summary.limitations);
-  const observedBehavior = asStringArray(summary.ai_observed_behavior);
-  const inference = asStringArray(summary.ai_inference);
+  const queuedSummary = asRecord(item.summary);
+  const detailedSummary = asRecord(evidence?.summary);
+  const evidenceSummary = {
+    ...asRecord(queuedSummary.evidence),
+    ...asRecord(detailedSummary.evidence),
+  };
+  const limitations = resolveSummaryStringArray(detailedSummary, queuedSummary, "limitations");
+  const observedBehavior = resolveSummaryStringArray(detailedSummary, queuedSummary, "ai_observed_behavior");
+  const inference = resolveSummaryStringArray(detailedSummary, queuedSummary, "ai_inference");
+  const coordinate = evidence?.coordinate ?? item.coordinate;
+  const traceId = evidence?.trace_id ?? item.trace_id;
+  const artifactSha256 = evidence?.artifact_sha256 ?? item.artifact_sha256;
+  const confidence = evidence?.confidence ?? item.confidence;
+  const requiresHitl = evidence?.requires_hitl ?? item.requires_hitl;
+  const recommendedAction = evidence?.recommended_action ?? item.recommended_action;
 
   return (
     <div className="border-t border-(--color-border) px-4 py-4">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <div className="text-xs uppercase tracking-[0.24em] text-(--color-muted)">Artifact Evidence Viewer</div>
-          <h3 className="mt-1 text-base font-semibold">{purl(item.coordinate)}</h3>
-          <div className="mt-2 text-xs text-(--color-muted)">Trace {item.trace_id}</div>
-          <div className="text-xs text-(--color-muted)">Digest {truncateDigest(item.artifact_sha256)}</div>
+          <h3 className="mt-1 text-base font-semibold">{purl(coordinate)}</h3>
+          <div className="mt-2 text-xs text-(--color-muted)" data-testid="artifact-trace-id">
+            Trace {traceId}
+          </div>
+          <div className="text-xs text-(--color-muted)">Digest {truncateDigest(artifactSha256)}</div>
         </div>
         <div className="flex flex-wrap gap-2 text-xs">
-          <span className="rounded-full border border-(--color-border) px-3 py-1 text-(--color-muted)">
-            Confidence {item.confidence}
+          <span
+            className="rounded-full border border-(--color-border) px-3 py-1 text-(--color-muted)"
+            data-testid="artifact-chip-confidence"
+          >
+            Confidence {confidence}
           </span>
-          <span className="rounded-full border border-(--color-border) px-3 py-1 text-(--color-muted)">
-            {item.requires_hitl ? "Requires HITL" : "Automated outcome"}
+          <span
+            className="rounded-full border border-(--color-border) px-3 py-1 text-(--color-muted)"
+            data-testid="artifact-chip-hitl"
+          >
+            {requiresHitl ? "Requires HITL" : "Automated outcome"}
           </span>
-          <span className="rounded-full border border-(--color-border) px-3 py-1 text-(--color-text)">
-            {item.recommended_action}
+          <span
+            className="rounded-full border border-(--color-border) px-3 py-1 text-(--color-text)"
+            data-testid="artifact-chip-recommended-action"
+          >
+            {recommendedAction}
           </span>
         </div>
       </div>
 
       <div className="mt-4 grid gap-3 md:grid-cols-3">
-        <SummaryCard label="Static indicators" value={String(evidenceSummary.static_indicator_count ?? 0)} />
-        <SummaryCard label="Sandbox events" value={String(evidenceSummary.sandbox_event_count ?? 0)} />
-        <SummaryCard label="Malware matches" value={String(evidenceSummary.malware_match_count ?? 0)} />
+        <SummaryCard
+          label="Static indicators"
+          value={String(evidenceSummary.static_indicator_count ?? 0)}
+          testId="artifact-summary-static-indicators"
+        />
+        <SummaryCard
+          label="Sandbox events"
+          value={String(evidenceSummary.sandbox_event_count ?? 0)}
+          testId="artifact-summary-sandbox-events"
+        />
+        <SummaryCard
+          label="Malware matches"
+          value={String(evidenceSummary.malware_match_count ?? 0)}
+          testId="artifact-summary-malware-matches"
+        />
       </div>
 
       <div className="mt-4 grid gap-4 md:grid-cols-2">
@@ -91,7 +120,7 @@ export function ArtifactEvidenceViewer({
                 ? "border-(--color-accent) bg-(--color-accent)/12 text-(--color-text)"
                 : "border-(--color-border) text-(--color-muted) hover:bg-white/6"
             }`}
-            onClick={() => setTabState({ artifactId, activeTab: tab.id })}
+            onClick={() => setActiveTab(tab.id)}
             type="button"
           >
             {tab.label}
@@ -118,10 +147,12 @@ function renderTabContent(tab: EvidenceTab, evidence?: ArtifactEvidence) {
   const langfuseTraceHref = buildLangfuseTraceUrl(langfuseTraceId);
 
   if (tab === "static") {
-    return evidence.static_reports.length ? (
-      <StaticReportViewer artifactId={evidence.artifact_id} reports={evidence.static_reports} />
-    ) : (
-      <div className="text-sm text-(--color-muted)">No static analysis reports are available.</div>
+    return (
+      <StaticReportViewer
+        artifactId={evidence.artifact_id}
+        coordinate={evidence.coordinate}
+        reports={evidence.static_reports}
+      />
     );
   }
 
@@ -135,7 +166,7 @@ function renderTabContent(tab: EvidenceTab, evidence?: ArtifactEvidence) {
 
   if (tab === "ai") {
     return (
-      <div className="space-y-3">
+      <div className="space-y-3" data-testid="artifact-ai-explanation-panel">
         <div className="rounded-lg border border-(--color-warning) bg-(--color-warning)/8 px-3 py-2 text-sm text-(--color-text)">
           AI explanation is advisory only and never the sole enforcement authority.
         </div>
@@ -180,11 +211,21 @@ function renderTabContent(tab: EvidenceTab, evidence?: ArtifactEvidence) {
   );
 }
 
-function SummaryCard({ label, value }: { label: string; value: string }) {
+function SummaryCard({
+  label,
+  value,
+  testId,
+}: {
+  label: string;
+  value: string;
+  testId?: string;
+}) {
   return (
-    <div className="rounded-lg border border-(--color-border) bg-white/5 px-3 py-2">
+    <div className="rounded-lg border border-(--color-border) bg-white/5 px-3 py-2" data-testid={testId}>
       <div className="text-xs uppercase tracking-[0.18em] text-(--color-muted)">{label}</div>
-      <div className="mt-1 text-xl font-semibold">{value}</div>
+      <div className="mt-1 text-xl font-semibold" data-testid={testId ? `${testId}-value` : undefined}>
+        {value}
+      </div>
     </div>
   );
 }
@@ -232,55 +273,76 @@ function JsonBlock({ value, compact = false }: { value: unknown; compact?: boole
 
 function StaticReportViewer({
   artifactId,
+  coordinate,
   reports,
 }: {
   artifactId: string;
+  coordinate: ArtifactEvidence["coordinate"];
   reports: Array<Record<string, unknown>>;
 }) {
   const allIndicators = reports.flatMap((report) => getIndicators(report));
   const indicatorsByFile = groupIndicatorsByFile(allIndicators);
+  const cargoSignals = summarizeCargoSignals(allIndicators);
+  const jvmSignals = summarizeJvmSignals(allIndicators);
+  const showCargoPanel = coordinate.ecosystem === "cargo";
+  const showJvmPanel = coordinate.ecosystem === "maven";
+  const hasReports = reports.length > 0;
   const fileEntries = Array.from(indicatorsByFile.entries()).sort(([left], [right]) => left.localeCompare(right));
 
   return (
     <div className="space-y-4">
+      {showCargoPanel ? <CargoEvidencePanel signals={cargoSignals} /> : null}
+      {showJvmPanel ? <JvmEvidencePanel signals={jvmSignals} /> : null}
       <div className="grid gap-3 md:grid-cols-[minmax(0,220px)_minmax(0,1fr)]">
-        <div className="rounded-lg border border-(--color-border) bg-white/4 p-3">
+        <div className="rounded-lg border border-(--color-border) bg-white/4 p-3" data-testid="artifact-static-files">
           <div className="text-xs uppercase tracking-[0.18em] text-(--color-muted)">Files</div>
           <div className="mt-3 space-y-2">
-            {fileEntries.map(([filePath, indicators]) => (
-              <div key={`${artifactId}-${filePath}`} className="rounded-lg border border-(--color-border) bg-black/10 px-3 py-2">
-                <div className="text-sm font-medium text-(--color-text)">{filePath}</div>
-                <div className="mt-1 text-xs text-(--color-muted)">{indicators.length} indicators</div>
-              </div>
-            ))}
+            {fileEntries.length ? (
+              fileEntries.map(([filePath, indicators]) => (
+                <div key={`${artifactId}-${filePath}`} className="rounded-lg border border-(--color-border) bg-black/10 px-3 py-2">
+                  <div className="text-sm font-medium text-(--color-text)">{filePath}</div>
+                  <div className="mt-1 text-xs text-(--color-muted)">{indicators.length} indicators</div>
+                </div>
+              ))
+            ) : (
+              <div className="text-sm text-(--color-muted)">No static analysis files are available.</div>
+            )}
           </div>
         </div>
         <div className="space-y-3">
-          {reports.map((report, index) => {
-            const indicators = getIndicators(report);
-            const digest = asRecord(report.artifact_digest);
-            return (
-              <div key={`${artifactId}-static-${index}`} className="rounded-lg border border-(--color-border) p-3">
-                <div className="flex flex-wrap items-center justify-between gap-2 text-sm">
-                  <span className="font-medium">Static report {index + 1}</span>
-                  <span className="text-(--color-muted)">{indicators.length} indicators</span>
+          {hasReports ? (
+            reports.map((report, index) => {
+              const indicators = getIndicators(report);
+              const digest = asRecord(report.artifact_digest);
+              return (
+                <div
+                  key={`${artifactId}-static-${index}`}
+                  className="rounded-lg border border-(--color-border) p-3"
+                  data-testid={`artifact-static-report-${index + 1}`}
+                >
+                  <div className="flex flex-wrap items-center justify-between gap-2 text-sm">
+                    <span className="font-medium">Static report {index + 1}</span>
+                    <span className="text-(--color-muted)">{indicators.length} indicators</span>
+                  </div>
+                  <div className="mt-2 grid gap-2 text-xs text-(--color-muted) md:grid-cols-3">
+                    <div>Analyzer {asString(report.analyzer_version) ?? "unknown"}</div>
+                    <div>Rules {asString(report.rule_set_version) ?? "unknown"}</div>
+                    <div>Digest {truncateDigest(asString(digest.hex) ?? artifactId)}</div>
+                  </div>
+                  <div className="mt-3 space-y-3">
+                    {indicators.map((indicator, indicatorIndex) => (
+                      <IndicatorCard
+                        key={`${artifactId}-indicator-${index}-${indicatorIndex}`}
+                        indicator={indicator}
+                      />
+                    ))}
+                  </div>
                 </div>
-                <div className="mt-2 grid gap-2 text-xs text-(--color-muted) md:grid-cols-3">
-                  <div>Analyzer {asString(report.analyzer_version) ?? "unknown"}</div>
-                  <div>Rules {asString(report.rule_set_version) ?? "unknown"}</div>
-                  <div>Digest {truncateDigest(asString(digest.hex) ?? artifactId)}</div>
-                </div>
-                <div className="mt-3 space-y-3">
-                  {indicators.map((indicator, indicatorIndex) => (
-                    <IndicatorCard
-                      key={`${artifactId}-indicator-${index}-${indicatorIndex}`}
-                      indicator={indicator}
-                    />
-                  ))}
-                </div>
-              </div>
-            );
-          })}
+              );
+            })
+          ) : (
+            <div className="text-sm text-(--color-muted)">No static analysis reports are available.</div>
+          )}
         </div>
       </div>
     </div>
@@ -421,6 +483,91 @@ function IndicatorCard({ indicator }: { indicator: StaticIndicator }) {
   );
 }
 
+function CargoEvidencePanel({ signals }: { signals: CargoSignalSummary[] }) {
+  const activeSignals = signals.filter((signal) => signal.count > 0);
+  const reviewFiles = Array.from(new Set(activeSignals.flatMap((signal) => signal.files))).sort((left, right) =>
+    left.localeCompare(right),
+  );
+  const signalRows = activeSignals.map(
+    (signal) => `${signal.label} (${formatFindingCount(signal.count)}): ${signal.matchedTypes.join(", ")}`,
+  );
+
+  return (
+    <div className="rounded-lg border border-(--color-border) bg-black/10 p-3" data-testid="artifact-cargo-panel">
+      <div className="text-xs uppercase tracking-[0.18em] text-(--color-muted)">Cargo Build Profile</div>
+      <div className="mt-1 text-sm text-(--color-muted)">
+        Build-time execution, source overrides, and Rust-side access are summarized from Cargo manifest and static
+        analysis findings.
+      </div>
+      <div className="mt-3 grid gap-3 md:grid-cols-4">
+        {signals.map((signal) => (
+          <SummaryCard
+            key={signal.id}
+            label={signal.label}
+            value={String(signal.count)}
+            testId={`artifact-cargo-summary-${signal.id}`}
+          />
+        ))}
+      </div>
+      <div className="mt-3 grid gap-3 md:grid-cols-2">
+        <EvidenceList
+          title="Triggered Cargo signals"
+          items={signalRows}
+          emptyLabel="No Cargo-specific build signals were captured."
+        />
+        <EvidenceList
+          className=""
+          title="Files requiring review"
+          items={reviewFiles}
+          emptyLabel="No Cargo-specific files were flagged."
+        />
+      </div>
+    </div>
+  );
+}
+
+function JvmEvidencePanel({ signals }: { signals: JvmSignalSummary[] }) {
+  const activeSignals = signals.filter((signal) => signal.count > 0);
+  const reviewFiles = Array.from(new Set(activeSignals.flatMap((signal) => signal.files))).sort((left, right) =>
+    left.localeCompare(right),
+  );
+  const signalRows = activeSignals.map(
+    (signal) => `${signal.label} (${formatFindingCount(signal.count)}): ${signal.matchedTypes.join(", ")}`,
+  );
+
+  return (
+    <div className="rounded-lg border border-(--color-border) bg-black/10 p-3" data-testid="artifact-jvm-panel">
+      <div className="text-xs uppercase tracking-[0.18em] text-(--color-muted)">JVM Binary Profile</div>
+      <div className="mt-1 text-sm text-(--color-muted)">
+        Bytecode, archive, and native payload findings are summarized from normalized static indicators for Maven/JVM
+        artifacts.
+      </div>
+      <div className="mt-3 grid gap-3 md:grid-cols-5">
+        {signals.map((signal) => (
+          <SummaryCard
+            key={signal.id}
+            label={signal.label}
+            value={String(signal.count)}
+            testId={`artifact-jvm-summary-${signal.id}`}
+          />
+        ))}
+      </div>
+      <div className="mt-3 grid gap-3 md:grid-cols-2">
+        <EvidenceList
+          title="Triggered JVM signals"
+          items={signalRows}
+          emptyLabel="No JVM-specific binary signals were captured."
+        />
+        <EvidenceList
+          title="Files requiring review"
+          items={reviewFiles}
+          emptyLabel="No JVM-specific files were flagged."
+        />
+      </div>
+    </div>
+  );
+}
+
 function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
@@ -435,6 +582,16 @@ function asString(value: unknown): string | null {
   return typeof value === "string" && value.trim() ? value : null;
 }
 
+function resolveSummaryStringArray(
+  detailedSummary: Record<string, unknown>,
+  queuedSummary: Record<string, unknown>,
+  key: string,
+): string[] {
+  return Array.isArray(detailedSummary[key])
+    ? asStringArray(detailedSummary[key])
+    : asStringArray(queuedSummary[key]);
+}
+
 function buildLangfuseTraceUrl(traceId: string | null): string | null {
   if (!traceId) {
     return null;
@@ -447,6 +604,10 @@ function asNumber(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
+function formatFindingCount(count: number): string {
+  return `${count} ${count === 1 ? "finding" : "findings"}`;
+}
+
 type StaticIndicator = {
   indicatorType: string;
   severity: string;
@@ -456,6 +617,24 @@ type StaticIndicator = {
   redacted: boolean;
   summary: string;
   details: string[];
+};
+
+type CargoSignalSummary = {
+  id: string;
+  label: string;
+  indicatorTypes: string[];
+  count: number;
+  matchedTypes: string[];
+  files: string[];
+};
+
+type JvmSignalSummary = {
+  id: string;
+  label: string;
+  indicatorTypes: string[];
+  count: number;
+  matchedTypes: string[];
+  files: string[];
 };
 
 type SandboxPhase = {
@@ -519,6 +698,106 @@ function groupIndicatorsByFile(indicators: StaticIndicator[]): Map<string, Stati
     }
   }
   return grouped;
+}
+
+function summarizeCargoSignals(indicators: StaticIndicator[]): CargoSignalSummary[] {
+  const signalDefinitions = [
+    {
+      id: "build-execution",
+      label: "Build execution",
+      indicatorTypes: ["cargo-build-script", "cargo-proc-macro"],
+    },
+    {
+      id: "source-overrides",
+      label: "Source overrides",
+      indicatorTypes: [
+        "cargo-git-dependency",
+        "cargo-path-dependency",
+        "cargo-alternate-registry-dependency",
+        "cargo-patch-override",
+        "cargo-replace-override",
+      ],
+    },
+    {
+      id: "dependency-expansion",
+      label: "Dependency expansion",
+      indicatorTypes: [
+        "cargo-build-dependency",
+        "cargo-dev-dependency",
+        "cargo-target-specific-dependency",
+        "cargo-optional-dependency",
+        "cargo-feature-graph",
+      ],
+    },
+    {
+      id: "native-surface",
+      label: "Native surface",
+      indicatorTypes: ["vendored-native-code", "bundled-native-artifact"],
+    },
+    {
+      id: "runtime-access",
+      label: "Runtime access",
+      indicatorTypes: ["rust-raw-network", "rust-env-read"],
+    },
+  ] satisfies Array<Pick<CargoSignalSummary, "id" | "label" | "indicatorTypes">>;
+
+  return signalDefinitions.map((signal) => {
+    const matches = indicators.filter((indicator) => signal.indicatorTypes.includes(indicator.indicatorType));
+    return {
+      ...signal,
+      count: matches.length,
+      matchedTypes: Array.from(new Set(matches.map((indicator) => indicator.indicatorType))).sort((left, right) =>
+        left.localeCompare(right),
+      ),
+      files: Array.from(new Set(matches.map((indicator) => indicator.filePath))).sort((left, right) =>
+        left.localeCompare(right),
+      ),
+    } satisfies CargoSignalSummary;
+  });
+}
+
+function summarizeJvmSignals(indicators: StaticIndicator[]): JvmSignalSummary[] {
+  const signalDefinitions = [
+    {
+      id: "network-surface",
+      label: "Network surface",
+      indicatorTypes: ["java-outbound-http"],
+    },
+    {
+      id: "environment-access",
+      label: "Environment access",
+      indicatorTypes: ["java-env-read"],
+    },
+    {
+      id: "early-execution",
+      label: "Early execution",
+      indicatorTypes: ["java-static-init"],
+    },
+    {
+      id: "archive-safety",
+      label: "Archive safety",
+      indicatorTypes: ["zip-path-traversal"],
+    },
+    {
+      id: "native-surface",
+      label: "Native surface",
+      indicatorTypes: ["vendored-native-code", "bundled-native-artifact"],
+    },
+  ] satisfies Array<Pick<JvmSignalSummary, "id" | "label" | "indicatorTypes">>;
+
+  return signalDefinitions.map((signal) => {
+    const matches = indicators.filter((indicator) => signal.indicatorTypes.includes(indicator.indicatorType));
+    return {
+      ...signal,
+      count: matches.length,
+      matchedTypes: Array.from(new Set(matches.map((indicator) => indicator.indicatorType))).sort((left, right) =>
+        left.localeCompare(right),
+      ),
+      files: Array.from(new Set(matches.map((indicator) => indicator.filePath))).sort((left, right) =>
+        left.localeCompare(right),
+      ),
+    } satisfies JvmSignalSummary;
+  });
 }
 
 function getSandboxPhases(run: Record<string, unknown>): SandboxPhase[] {

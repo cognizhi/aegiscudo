@@ -98,6 +98,8 @@ class AttestationResult(StrEnum):
 class SandboxProfile(StrEnum):
     NPM_INSTALL = "npm-install-profile"
     PYTHON_INSTALL = "python-install-profile"
+    CARGO_BUILD_PROFILE = "cargo-build-profile"
+    JVM_BINARY_PROFILE = "jvm-binary-profile"
 
 
 class SandboxPhase(StrEnum):
@@ -218,6 +220,9 @@ class SandboxTelemetryEvent(StrictModel):
     type: Annotated[str, Field(min_length=1)]
     severity: Severity
     message: Annotated[str, Field(min_length=1)]
+    destination_url: Annotated[str | None, Field(min_length=1)] = None
+    destination_host: Annotated[str | None, Field(min_length=1)] = None
+    destination_ip: Annotated[str | None, Field(min_length=1)] = None
 
 
 class SandboxTelemetry(StrictModel):

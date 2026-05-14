@@ -146,6 +146,35 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorBody'
+  /v1/tenants/{tenant_id}/policy-profiles/{policy_profile_id}/scorecard-thresholds:
+    get:
+      operationId: getPolicyScorecardThresholds
+      parameters:
+        - name: tenant_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: policy_profile_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Scorecard check thresholds and actions for the latest policy version of the specified profile.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PolicyScorecardThresholds'
+        "404":
+          description: Tenant or policy profile was not found.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
   /v1/tenants/{tenant_id}/policy-simulator/replay:
     post:
       operationId: simulatePolicyReplay
@@ -839,6 +868,132 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorBody'
+  /v1/tenants/{tenant_id}/sboms:
+    get:
+      operationId: listTenantSboms
+      parameters:
+        - name: tenant_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 50
+        - $ref: '#/components/parameters/ActorIdHeader'
+      responses:
+        "200":
+          description: Tenant-scoped SBOM document summaries.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/SbomDocumentSummary'
+        "400":
+          description: The SBOM list query parameters were invalid.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        "401":
+          description: Request actor header is missing.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        "403":
+          description: Request actor is not authorized to read tenant SBOM data.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        "503":
+          description: SBOM service is unavailable.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+  /v1/tenants/{tenant_id}/sboms/{sbom_id}:
+    get:
+      operationId: downloadTenantSbom
+      parameters:
+        - name: tenant_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: sbom_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - $ref: '#/components/parameters/ActorIdHeader'
+      responses:
+        "200":
+          description: Tenant-scoped SBOM document download.
+          headers:
+            Content-Disposition:
+              description: Attachment filename for the exported SBOM document.
+              schema:
+                type: string
+            Content-Type:
+              description: Media type for the exported SBOM document.
+              schema:
+                type: string
+            Content-Length:
+              description: Byte length of the exported SBOM document when available.
+              schema:
+                type: integer
+                minimum: 0
+            Cache-Control:
+              description: Cache policy forwarded from the control-plane download path when present.
+              schema:
+                type: string
+            ETag:
+              description: Entity tag for the exported SBOM document when available.
+              schema:
+                type: string
+            Content-Encoding:
+              description: Content encoding for the exported SBOM document when present.
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                type: string
+                format: binary
+        "401":
+          description: Request actor header is missing.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        "403":
+          description: Request actor is not authorized to read tenant SBOM data.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        "404":
+          description: SBOM document was not found.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        "503":
+          description: SBOM service is unavailable.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
   /v1/tenants/{tenant_id}/openvex-documents:
     get:
       operationId: listOpenVexDocuments
@@ -1014,6 +1169,44 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorBody'
+  /v1/tenants/{tenant_id}/github-actions/scan-results:
+    get:
+      operationId: listGithubActionsScanResults
+      parameters:
+        - name: tenant_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+      responses:
+        "200":
+          description: GitHub Actions workflow integrity scan results for the tenant.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/GithubActionsScanResult'
+        "401":
+          description: Missing actor header.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        "403":
+          description: Actor is not a member of the tenant.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
   /v1/cli/scans:
     post:
       operationId: submitCliScan
@@ -1038,6 +1231,74 @@ paths:
                 $ref: '#/components/schemas/ErrorBody'
         "404":
           description: No matching enabled registry configuration was found.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        "503":
+          description: Triage Counter is unavailable.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+  /v1/cli/github-actions/enrich:
+    post:
+      operationId: enrichCliGithubActions
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CliGithubActionsEnrichmentRequest'
+      responses:
+        "200":
+          description: GitHub Actions scan findings enriched against tenant policy and threat intelligence.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CliGithubActionsEnrichmentResponse'
+        "400":
+          description: GitHub Actions enrichment request validation failed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        "404":
+          description: No matching tenant policy profile was found.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        "503":
+          description: Triage Counter is unavailable.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+  /v1/cli/risk:
+    post:
+      operationId: submitCliRisk
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CliRiskRequest'
+      responses:
+        "200":
+          description: Tenant-scoped risk lookup for a fully qualified package coordinate.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CliRiskResponse'
+        "400":
+          description: CLI risk request validation failed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        "404":
+          description: No matching enabled registry configuration or policy context was found.
           content:
             application/json:
               schema:
@@ -1197,6 +1458,7 @@ components:
             - maven
             - docker-oci
             - generic-http
+            - githubactions
         name:
           type: string
         version:
@@ -1365,6 +1627,31 @@ components:
           minItems: 1
           items:
             $ref: '#/components/schemas/CliScanPackageRequest'
+    CliGithubActionsEnrichmentPackageRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - coordinate
+      properties:
+        coordinate:
+          $ref: '#/components/schemas/PackageCoordinateSummary'
+    CliGithubActionsEnrichmentRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - packages
+      properties:
+        tenant_id:
+          type: string
+          format: uuid
+        policy_profile_id:
+          type: string
+          format: uuid
+        packages:
+          type: array
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/CliGithubActionsEnrichmentPackageRequest'
     CliScanFindingResponse:
       type: object
       additionalProperties: false
@@ -1418,6 +1705,69 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/CliScanFindingResponse'
+    CliGithubActionsEnrichmentResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - tenant_id
+        - policy_profile_id
+        - findings
+      properties:
+        tenant_id:
+          type: string
+          format: uuid
+        policy_profile_id:
+          type: string
+          format: uuid
+        findings:
+          type: array
+          items:
+            $ref: '#/components/schemas/CliScanFindingResponse'
+    CliRiskRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - coordinate
+      properties:
+        tenant_id:
+          type: string
+          format: uuid
+        coordinate:
+          $ref: '#/components/schemas/PackageCoordinateSummary'
+    CliRiskResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - tenant_id
+        - registry_config_id
+        - policy_profile_id
+        - coordinate
+        - decision
+        - rationale
+        - trace_id
+        - create_analysis_job
+      properties:
+        tenant_id:
+          type: string
+          format: uuid
+        registry_config_id:
+          type: string
+          format: uuid
+        policy_profile_id:
+          type: string
+          format: uuid
+        coordinate:
+          $ref: '#/components/schemas/PackageCoordinateSummary'
+        decision:
+          $ref: '#/components/schemas/PolicyDecision'
+        rationale:
+          type: array
+          items:
+            type: string
+        trace_id:
+          type: string
+        create_analysis_job:
+          type: boolean
     CliExplainRequest:
       type: object
       additionalProperties: false
@@ -1835,6 +2185,58 @@ components:
         created_at:
           type: string
           format: date-time
+    SbomNtiaValidation:
+      type: object
+      additionalProperties: false
+      required:
+        - valid
+        - issues
+      properties:
+        valid:
+          type: boolean
+        issues:
+          type: array
+          items:
+            type: string
+    SbomDocumentSummary:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - analysis_job_id
+        - tenant_id
+        - format
+        - source
+        - component_count
+        - storage_size_bytes
+        - created_at
+        - ntia_validation
+      properties:
+        id:
+          type: string
+          format: uuid
+        analysis_job_id:
+          type: string
+          format: uuid
+          nullable: true
+        tenant_id:
+          type: string
+          format: uuid
+          nullable: true
+        format:
+          type: string
+        source:
+          type: string
+        component_count:
+          type: integer
+        storage_size_bytes:
+          type: integer
+          format: int64
+        created_at:
+          type: string
+          format: date-time
+        ntia_validation:
+          $ref: '#/components/schemas/SbomNtiaValidation'
     ArtifactEvidence:
       type: object
       additionalProperties: false
@@ -1995,6 +2397,7 @@ components:
             - maven
             - docker-oci
             - generic-http
+            - githubactions
         limit:
           type: integer
           default: 50
@@ -2115,6 +2518,7 @@ components:
             - maven
             - docker-oci
             - generic-http
+            - githubactions
         replayed_request_count:
           type: integer
         changed_request_count:
@@ -2130,6 +2534,58 @@ components:
         generated_at:
           type: string
           format: date-time
+    SignalPolicyAction:
+      type: string
+      enum:
+        - allow
+        - warn
+        - block
+        - hitl
+    ScorecardCheckThreshold:
+      type: object
+      additionalProperties: false
+      required:
+        - min_score
+        - action
+        - enabled
+      properties:
+        min_score:
+          type: number
+          format: double
+          minimum: 0
+          maximum: 10
+        action:
+          $ref: '#/components/schemas/SignalPolicyAction'
+        enabled:
+          type: boolean
+    PolicyScorecardThresholds:
+      type: object
+      additionalProperties: false
+      required:
+        - policy_profile_id
+        - policy_version_id
+        - code_review
+        - branch_protection
+        - ci_cd
+        - maintained
+        - signed_releases
+      properties:
+        policy_profile_id:
+          type: string
+          format: uuid
+        policy_version_id:
+          type: string
+          format: uuid
+        code_review:
+          $ref: '#/components/schemas/ScorecardCheckThreshold'
+        branch_protection:
+          $ref: '#/components/schemas/ScorecardCheckThreshold'
+        ci_cd:
+          $ref: '#/components/schemas/ScorecardCheckThreshold'
+        maintained:
+          $ref: '#/components/schemas/ScorecardCheckThreshold'
+        signed_releases:
+          $ref: '#/components/schemas/ScorecardCheckThreshold'
     RegistryConfig:
       type: object
       additionalProperties: false
@@ -2563,3 +3019,46 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/LlmUsagePromptTemplateVersion'
+    GithubActionsScanResult:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - tenant_id
+        - policy_profile_id
+        - owner
+        - repo
+        - ref
+        - decision
+        - rationale
+        - trace_id
+        - scanned_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        tenant_id:
+          type: string
+          format: uuid
+        policy_profile_id:
+          type: string
+          format: uuid
+        owner:
+          type: string
+        repo:
+          type: string
+        ref:
+          type: string
+        decision:
+          type: string
+        rationale:
+          type: array
+          items:
+            type: string
+        trace_id:
+          type: string
+        fallback_ref:
+          type: string
+        scanned_at:
+          type: string
+          format: date-time

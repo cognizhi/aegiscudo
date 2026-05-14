@@ -15,6 +15,9 @@ except ModuleNotFoundError:  # pragma: no cover - exercised only when dependency
     asyncpg = None
 
 
+SIMILAR_CASE_LIMIT = 3
+
+
 class ProcessNextFinalizationJobResponse(BaseModel):
     model_config = ConfigDict(frozen=True)
 
@@ -118,7 +121,8 @@ class PostgresFinalizationRepository:
     async def load_finalization_inputs(self, job: FinalizationJob) -> dict[str, Any]:
         static_rows = await self._pool.fetch(
             """
-            SELECT report
+            SELECT report,
+                   embedding::text AS embedding_literal
             FROM static_analysis_reports
             WHERE analysis_job_id = $1 AND artifact_id = $2
             ORDER BY created_at ASC
@@ -164,6 +168,7 @@ class PostgresFinalizationRepository:
             """,
             job.artifact_id,
         )
+        similar_cases = await self._load_similar_cases(job, static_rows)
 
         return {
             "static_reports": [decode_json_value(row["report"]) for row in static_rows],
@@ -171,7 +176,63 @@ class PostgresFinalizationRepository:
             "ai_explanation": decode_json_value(ai_row["explanation"]) if ai_row is not None else None,
             "vulnerabilities": [dict(row) for row in vulnerability_rows],
             "malware_matches": [dict(row) for row in malware_rows],
+            "similar_cases": similar_cases,
         }
+
+    async def _load_similar_cases(
+        self,
+        job: FinalizationJob,
+        static_rows: list[Any],
+    ) -> list[dict[str, Any]]:
+        embedding_literal = next(
+            (
+                row["embedding_literal"]
+                for row in static_rows
+                if row["embedding_literal"] is not None
+            ),
+            None,
+        )
+        if embedding_literal is None:
+            return []
+
+        similar_rows = await self._pool.fetch(
+            """
+            SELECT reports.analysis_job_id,
+                   reports.artifact_id,
+                   reports.created_at,
+                   reports.report,
+                   reports.embedding <=> $2::vector AS distance,
+                   artifacts.ecosystem::text AS ecosystem,
+                   artifacts.namespace,
+                   artifacts.package_name,
+                   artifacts.package_version,
+                   summaries.recommended_action::text AS recommended_action,
+                   summaries.confidence
+            FROM static_analysis_reports AS reports
+            JOIN analysis_jobs AS jobs
+              ON jobs.id = reports.analysis_job_id
+            JOIN artifacts
+              ON artifacts.id = reports.artifact_id
+            LEFT JOIN LATERAL (
+              SELECT recommended_action, confidence
+              FROM analysis_summaries
+              WHERE artifact_id = reports.artifact_id
+              ORDER BY created_at DESC
+              LIMIT 1
+            ) AS summaries ON TRUE
+            WHERE jobs.tenant_id = $1
+              AND reports.embedding IS NOT NULL
+              AND reports.artifact_id <> $3
+            ORDER BY reports.embedding <=> $2::vector ASC,
+                     reports.created_at DESC
+            LIMIT $4
+            """,
+            job.tenant_id,
+            embedding_literal,
+            job.artifact_id,
+            SIMILAR_CASE_LIMIT,
+        )
+        return [summarize_historical_case(dict(row)) for row in similar_rows]
 
     async def persist_analysis_summary(
         self,
@@ -361,6 +422,7 @@ def build_final_analysis_summary(inputs: dict[str, Any]) -> FinalizationSummary:
         "limitations": dedupe_preserve_order(limitations),
         "ai_observed_behavior": ai_explanation.get("observed_behavior", []) if isinstance(ai_explanation, dict) else [],
         "ai_inference": ai_explanation.get("inference", []) if isinstance(ai_explanation, dict) else [],
+        "historical_similar_cases": normalize_similar_cases(inputs.get("similar_cases", [])),
     }
     return FinalizationSummary(
         recommended_action=recommended_action,
@@ -401,6 +463,36 @@ def decode_json_value(value: Any) -> Any:
     if isinstance(value, str):
         return json.loads(value)
     return value
+
+
+def summarize_historical_case(row: dict[str, Any]) -> dict[str, Any]:
+    report = decode_json_value(row.get("report"))
+    indicators = collect_static_indicators([report]) if isinstance(report, dict) else []
+    created_at = row.get("created_at")
+
+    return {
+        "artifact_id": str(row["artifact_id"]),
+        "analysis_job_id": str(row["analysis_job_id"]),
+        "distance": round(float(row["distance"]), 4) if row.get("distance") is not None else None,
+        "package_coordinate": {
+            "ecosystem": row.get("ecosystem"),
+            "namespace": row.get("namespace"),
+            "name": row.get("package_name"),
+            "version": row.get("package_version"),
+        },
+        "recommended_action": row.get("recommended_action"),
+        "confidence": row.get("confidence"),
+        "indicator_summaries": [
+            indicator["summary"]
+            for indicator in indicators
+            if isinstance(indicator.get("summary"), str)
+        ][:3],
+        "created_at": created_at.isoformat() if hasattr(created_at, "isoformat") else created_at,
+    }
+
+
+def normalize_similar_cases(cases: list[Any]) -> list[dict[str, Any]]:
+    return [case for case in cases if isinstance(case, dict)]
 
 
 def dedupe_preserve_order(items: list[str]) -> list[str]:

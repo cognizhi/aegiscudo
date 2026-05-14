@@ -17,7 +17,10 @@ use uuid::Uuid;
 
 mod sbom;
 
-use sbom::{SbomDocument, SbomFormat, SbomResolvedDecision, load_sbom_document, render_sbom};
+use sbom::{
+    SbomDocument, SbomFormat, SbomResolvedDecision, load_sbom_document,
+    load_sbom_document_from_inputs, parse_maven_coordinate, render_sbom,
+};
 
 const DEFAULT_API_URL: &str = "http://127.0.0.1:8082";
 const ACTOR_HEADER: &str = "x-aegiscudo-actor-id";
@@ -58,6 +61,7 @@ enum Command {
         command: VexCommand,
     },
     Explain(ExplainArgs),
+    Risk(RiskArgs),
     Policy {
         #[command(subcommand)]
         command: PolicyCommand,
@@ -85,6 +89,10 @@ struct AuthLoginArgs {
     api_url: String,
     #[arg(long, env = "AEGISCUDO_TOKEN")]
     token: Option<String>,
+    #[arg(long, env = "AEGISCUDO_TENANT_ID")]
+    tenant_id: Option<Uuid>,
+    #[arg(long, env = "AEGISCUDO_POLICY_PROFILE_ID")]
+    policy_profile_id: Option<Uuid>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -151,6 +159,9 @@ struct SbomGenerateArgs {
     lockfile: Option<PathBuf>,
     #[arg(long)]
     requirements: Option<PathBuf>,
+    /// Path to the output of `mvn dependency:tree`
+    #[arg(long)]
+    dependency_tree: Option<PathBuf>,
     #[arg(long, value_enum, default_value_t = SbomFormat::CyclonedxJson)]
     format: SbomFormat,
     #[arg(long)]
@@ -214,6 +225,12 @@ struct GitHubActionsScanArgs {
     /// Resolve mutable GitHub action tags to commit SHAs via the GitHub API.
     #[arg(long, default_value_t = false)]
     resolve_tags: bool,
+    /// Explicit tenant context for remote GitHub Actions enrichment.
+    #[arg(long)]
+    tenant_id: Option<Uuid>,
+    /// Explicit policy profile for remote GitHub Actions enrichment.
+    #[arg(long)]
+    policy_profile_id: Option<Uuid>,
     #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
     output_format: OutputFormat,
     #[arg(long, value_enum, default_value_t = FailOn::Block)]
@@ -228,6 +245,22 @@ struct ExplainArgs {
     package: String,
     #[arg(long, value_enum)]
     ecosystem: EcosystemArg,
+}
+
+#[derive(Debug, Args)]
+struct RiskArgs {
+    /// Package coordinate:
+    ///   npm: "left-pad@1.0.0" or "@scope/pkg@1.0.0"
+    ///   pypi: "requests@2.31.0"
+    ///   cargo: "serde@1.0.0"
+    ///   maven: "org.apache.commons:commons-lang3@3.14.0"
+    package: String,
+    #[arg(long, value_enum)]
+    ecosystem: EcosystemArg,
+    #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+    output_format: OutputFormat,
+    #[arg(long, value_enum, default_value_t = FailOn::Block)]
+    fail_on: FailOn,
 }
 
 #[derive(Debug, Subcommand)]
@@ -258,6 +291,8 @@ struct CiPreflightArgs {
 enum EcosystemArg {
     Npm,
     Pypi,
+    Cargo,
+    Maven,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
@@ -293,10 +328,18 @@ struct CliConfig {
     api_url: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     token: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tenant_id: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    policy_profile_id: Option<Uuid>,
 }
 
 #[derive(Debug, Serialize)]
 struct CliScanSubmission {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tenant_id: Option<Uuid>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    policy_profile_id: Option<Uuid>,
     packages: Vec<CliScanSubmissionPackage>,
 }
 
@@ -366,6 +409,15 @@ struct CliOpenVexApiResponse {
     imported_at: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct CliRiskApiResponse {
+    coordinate: PackageCoordinate,
+    decision: PolicyDecision,
+    rationale: Vec<String>,
+    trace_id: String,
+    create_analysis_job: bool,
+}
+
 pub fn run(args: impl IntoIterator<Item = OsString>) -> anyhow::Result<i32> {
     match Cli::parse_from(args).command {
         Command::Auth { command } => run_auth(command),
@@ -373,6 +425,7 @@ pub fn run(args: impl IntoIterator<Item = OsString>) -> anyhow::Result<i32> {
         Command::Sbom { command } => run_sbom(command),
         Command::Vex { command } => run_vex(command),
         Command::Explain(args) => run_explain(args),
+        Command::Risk(args) => run_risk(args),
         Command::Policy { command } => match command {
             PolicyCommand::Test(args) => run_policy_test(args),
         },
@@ -385,8 +438,11 @@ pub fn run(args: impl IntoIterator<Item = OsString>) -> anyhow::Result<i32> {
 fn run_sbom(command: SbomCommand) -> anyhow::Result<i32> {
     match command {
         SbomCommand::Generate(args) => {
-            let mut document =
-                load_sbom_document(args.lockfile.as_deref(), args.requirements.as_deref())?;
+            let mut document = load_sbom_document_from_inputs(
+                args.lockfile.as_deref(),
+                args.requirements.as_deref(),
+                args.dependency_tree.as_deref(),
+            )?;
             if let Some(config) = load_sbom_enrichment_config(&document)? {
                 enrich_sbom_with_decisions(&mut document, &config)?;
             } else if !document.supports_remote_decision_ecosystem() {
@@ -487,7 +543,7 @@ fn run_ci_preflight(args: CiPreflightArgs) -> anyhow::Result<i32> {
             .join(", ")
     );
     let findings = aggregate_ci_preflight_findings(discovered)?;
-    let report = submit_scan_report(source, false, findings)?;
+    let report = submit_scan_report(source, false, findings, None)?;
     print_report(&report, args.format)?;
     Ok(exit_code(&report.findings, args.fail_on))
 }
@@ -578,7 +634,11 @@ fn run_auth(command: AuthCommand) -> anyhow::Result<i32> {
             let existing = load_cli_config()?;
             let config = CliConfig {
                 api_url: normalize_api_url(&args.api_url),
-                token: args.token.or(existing.and_then(|entry| entry.token)),
+                token: args.token.or(existing.as_ref().and_then(|entry| entry.token.clone())),
+                tenant_id: args.tenant_id.or(existing.as_ref().and_then(|entry| entry.tenant_id)),
+                policy_profile_id: args
+                    .policy_profile_id
+                    .or(existing.as_ref().and_then(|entry| entry.policy_profile_id)),
             };
             probe_api_health(&config.api_url)?;
             let config_path = save_cli_config(&config)?;
@@ -620,6 +680,12 @@ fn run_auth(command: AuthCommand) -> anyhow::Result<i32> {
                     "auth status: configured for {} (token: {token_status}, api: {health})",
                     config.api_url,
                 );
+                if let Some(tenant_id) = config.tenant_id {
+                    println!("tenant_id: {tenant_id}");
+                }
+                if let Some(policy_profile_id) = config.policy_profile_id {
+                    println!("policy_profile_id: {policy_profile_id}");
+                }
             }
             None => println!("auth status: not configured"),
         },
@@ -697,6 +763,7 @@ fn run_scan(command: ScanCommand) -> anyhow::Result<i32> {
                 args.lockfile.display().to_string(),
                 args.upload_manifest,
                 findings,
+                None,
             )?;
             print_report(&report, args.output_format)?;
             Ok(exit_code(&report.findings, args.fail_on))
@@ -708,6 +775,7 @@ fn run_scan(command: ScanCommand) -> anyhow::Result<i32> {
                 args.lockfile.display().to_string(),
                 args.upload_manifest,
                 findings,
+                None,
             )?;
             print_report(&report, args.output_format)?;
             Ok(exit_code(&report.findings, args.fail_on))
@@ -719,6 +787,7 @@ fn run_scan(command: ScanCommand) -> anyhow::Result<i32> {
                 args.requirements.display().to_string(),
                 args.upload_manifest,
                 findings,
+                None,
             )?;
             print_report(&report, args.output_format)?;
             Ok(exit_code(&report.findings, args.fail_on))
@@ -729,6 +798,7 @@ fn run_scan(command: ScanCommand) -> anyhow::Result<i32> {
                 args.lockfile.display().to_string(),
                 false,
                 findings,
+                None,
             )?;
             print_report(&report, args.output_format)?;
             Ok(exit_code(&report.findings, args.fail_on))
@@ -750,13 +820,13 @@ fn run_scan(command: ScanCommand) -> anyhow::Result<i32> {
                     ));
                 }
             };
-            let report = submit_scan_report(source, false, findings)?;
+            let report = submit_scan_report(source, false, findings, None)?;
             print_report(&report, args.output_format)?;
             Ok(exit_code(&report.findings, args.fail_on))
         }
         ScanCommand::Rush(args) => {
             let (source, findings) = parse_rush_config(&args.config)?;
-            let report = submit_scan_report(source, false, findings)?;
+            let report = submit_scan_report(source, false, findings, None)?;
             print_report(&report, args.output_format)?;
             Ok(exit_code(&report.findings, args.fail_on))
         }
@@ -771,6 +841,10 @@ fn run_scan(command: ScanCommand) -> anyhow::Result<i32> {
                 args.workflow_dir.display().to_string(),
                 false,
                 findings,
+                Some(CliEnrichmentContext {
+                    tenant_id: args.tenant_id,
+                    policy_profile_id: args.policy_profile_id,
+                }),
             )?;
             print_report(&report, args.output_format)?;
             Ok(exit_code(&report.findings, args.fail_on))
@@ -811,6 +885,141 @@ fn run_explain(args: ExplainArgs) -> anyhow::Result<i32> {
     Ok(0)
 }
 
+fn run_risk(args: RiskArgs) -> anyhow::Result<i32> {
+    if args.output_format == OutputFormat::Sarif {
+        anyhow::bail!(
+            "SARIF output is not supported for aedo risk; use --output-format text or json"
+        );
+    }
+    let coordinate = parse_risk_coordinate(&args.package, args.ecosystem)?;
+    let config = load_api_config()?;
+    let response = submit_risk_request(&config, &coordinate)?;
+
+    match args.output_format {
+        OutputFormat::Text => {
+            println!("coordinate: {}", response.coordinate.purl());
+            println!(
+                "decision: {}",
+                serde_json::to_string(&response.decision)
+                    .unwrap_or_default()
+                    .trim_matches('"')
+                    .to_owned()
+            );
+            for signal in &response.rationale {
+                println!("  signal: {signal}");
+            }
+            if response.create_analysis_job {
+                println!("note: an analysis job has been queued for asynchronous review");
+            }
+            println!("trace_id: {}", response.trace_id);
+        }
+        OutputFormat::Json => {
+            let json_output = serde_json::json!({
+                "coordinate": response.coordinate.purl(),
+                "decision": response.decision,
+                "rationale": response.rationale,
+                "trace_id": response.trace_id,
+                "create_analysis_job": response.create_analysis_job,
+            });
+            println!("{}", serde_json::to_string_pretty(&json_output)?);
+        }
+        OutputFormat::Sarif => unreachable!("sarif rejected above"),
+    }
+
+    Ok(match args.fail_on {
+        FailOn::Warn => {
+            if response.decision != PolicyDecision::Allow {
+                1
+            } else {
+                0
+            }
+        }
+        FailOn::Block => {
+            if response.decision.is_blocking() {
+                1
+            } else {
+                0
+            }
+        }
+    })
+}
+
+fn parse_risk_coordinate(
+    spec: &str,
+    ecosystem: EcosystemArg,
+) -> anyhow::Result<PackageCoordinate> {
+    match ecosystem {
+        EcosystemArg::Npm => parse_npm_explain_coordinate(spec),
+        EcosystemArg::Pypi => parse_pypi_explain_coordinate(spec),
+        EcosystemArg::Cargo => parse_cargo_risk_coordinate(spec),
+        EcosystemArg::Maven => parse_maven_risk_coordinate(spec),
+    }
+}
+
+fn parse_cargo_risk_coordinate(spec: &str) -> anyhow::Result<PackageCoordinate> {
+    let trimmed = spec.trim();
+    let (name, version) = trimmed
+        .rsplit_once('@')
+        .ok_or_else(|| anyhow::anyhow!("cargo risk expects <crate>@<version>"))?;
+    let name = name.trim();
+    let version = version.trim();
+    if name.is_empty() || version.is_empty() {
+        anyhow::bail!("cargo risk expects <crate>@<version>");
+    }
+    Ok(PackageCoordinate::new(
+        PackageEcosystem::Cargo,
+        name,
+        Some(version),
+        None::<String>,
+    ))
+}
+
+fn parse_maven_risk_coordinate(spec: &str) -> anyhow::Result<PackageCoordinate> {
+    // Expected format: <groupId>:<artifactId>@<version>
+    let trimmed = spec.trim();
+    let at_pos = trimmed
+        .rfind('@')
+        .ok_or_else(|| anyhow::anyhow!("maven risk expects <groupId>:<artifactId>@<version>"))?;
+    let coordinate_part = &trimmed[..at_pos];
+    let version = trimmed[at_pos + 1..].trim();
+    if version.is_empty() {
+        anyhow::bail!("maven risk expects <groupId>:<artifactId>@<version>");
+    }
+    let (group_id, artifact_id) = coordinate_part
+        .split_once(':')
+        .ok_or_else(|| anyhow::anyhow!("maven risk expects <groupId>:<artifactId>@<version>"))?;
+    let group_id = group_id.trim();
+    let artifact_id = artifact_id.trim();
+    if group_id.is_empty() || artifact_id.is_empty() {
+        anyhow::bail!("maven risk expects <groupId>:<artifactId>@<version>");
+    }
+    Ok(PackageCoordinate::new(
+        PackageEcosystem::Maven,
+        artifact_id,
+        Some(version),
+        Some(group_id),
+    ))
+}
+
+fn submit_risk_request(
+    config: &CliConfig,
+    coordinate: &PackageCoordinate,
+) -> anyhow::Result<CliRiskApiResponse> {
+    let client = Client::builder().timeout(SCAN_TIMEOUT).build()?;
+    let mut request = client
+        .post(format!("{}/v1/cli/risk", config.api_url))
+        .json(&serde_json::json!({ "coordinate": coordinate }));
+    if let Some(token) = config.token.as_deref() {
+        request = request.bearer_auth(token);
+    }
+    request
+        .send()
+        .and_then(reqwest::blocking::Response::error_for_status)
+        .with_context(|| format!("submitting risk lookup to {}/v1/cli/risk", config.api_url))?
+        .json()
+        .with_context(|| format!("parsing risk response from {}", config.api_url))
+}
+
 fn enrich_sbom_with_decisions(
     document: &mut SbomDocument,
     config: &CliConfig,
@@ -829,7 +1038,14 @@ fn enrich_sbom_with_decisions(
         return Ok(());
     }
 
-    let remote_findings = match submit_scan_findings(config, &findings) {
+    let Some(enrichment_path) = scan_enrichment_path(&findings) else {
+        eprintln!(
+            "skipping Aegiscudo decision enrichment because these SBOM inputs do not map to a supported CLI enrichment path"
+        );
+        return Ok(());
+    };
+
+    let remote_findings = match submit_scan_findings(config, &findings, enrichment_path, None) {
         Ok(findings) => findings,
         Err(error) => {
             eprintln!(
@@ -1121,7 +1337,7 @@ fn parse_requirements_scan_line(line: &str) -> Option<ParsedRequirementFinding> 
     })
 }
 
-fn parse_requirements_editable_name(line: &str) -> Option<String> {
+fn parse_requirements_editable_name(line: &str, requirements_path: &Path) -> Option<String> {
     let spec = if let Some(value) = line.strip_prefix("-e") {
         value
     } else if let Some(value) = line.strip_prefix("--editable") {
@@ -1134,9 +1350,146 @@ fn parse_requirements_editable_name(line: &str) -> Option<String> {
     let egg = spec
         .split("#egg=")
         .nth(1)
-        .or_else(|| spec.split("&egg=").nth(1))?;
-    let egg = egg.split(['&', ' ', '\t']).next().unwrap_or(egg).trim();
-    normalize_requirements_name(egg)
+        .or_else(|| spec.split("&egg=").nth(1));
+    if let Some(egg) = egg {
+        let egg = egg.split(['&', ' ', '\t']).next().unwrap_or(egg).trim();
+        return normalize_requirements_name(egg);
+    }
+
+    editable_local_project_name(spec, requirements_path)
+}
+
+fn editable_local_project_name(spec: &str, requirements_path: &Path) -> Option<String> {
+    let spec = spec.split([' ', '\t']).next().unwrap_or(spec).trim();
+    let spec = spec.split(';').next().unwrap_or(spec).trim();
+    let spec = normalize_local_editable_spec(spec)?;
+    let candidate = if spec.is_absolute() {
+        spec
+    } else {
+        requirements_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join(spec)
+    };
+    if !candidate.is_dir() {
+        return None;
+    }
+
+    editable_project_name_from_pyproject(&candidate)
+        .or_else(|| editable_project_name_from_setup_cfg(&candidate))
+}
+
+fn normalize_local_editable_spec(spec: &str) -> Option<PathBuf> {
+    if spec.is_empty() {
+        return None;
+    }
+
+    let spec = strip_local_editable_path_extras(spec).trim();
+    if spec.is_empty() {
+        return None;
+    }
+
+    if spec.starts_with("file://") {
+        return reqwest::Url::parse(spec).ok()?.to_file_path().ok();
+    }
+
+    let raw_spec = if let Some(path) = spec.strip_prefix("file:") {
+        percent_decode_local_editable_path(path)?
+    } else {
+        if spec.contains("://")
+            || spec.starts_with("git+")
+            || spec.starts_with("hg+")
+            || spec.starts_with("svn+")
+            || spec.starts_with("bzr+")
+        {
+            return None;
+        }
+        spec.to_owned()
+    };
+
+    Some(PathBuf::from(raw_spec))
+}
+
+fn percent_decode_local_editable_path(path: &str) -> Option<String> {
+    let bytes = path.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0usize;
+
+    while index < bytes.len() {
+        if bytes[index] == b'%' {
+            if index + 2 >= bytes.len() {
+                return None;
+            }
+            let hex = std::str::from_utf8(&bytes[index + 1..index + 3]).ok()?;
+            let value = u8::from_str_radix(hex, 16).ok()?;
+            decoded.push(value);
+            index += 3;
+            continue;
+        }
+
+        decoded.push(bytes[index]);
+        index += 1;
+    }
+
+    String::from_utf8(decoded).ok()
+}
+
+fn strip_local_editable_path_extras(spec: &str) -> &str {
+    if spec.ends_with(']') {
+        if let Some(index) = spec.rfind('[') {
+            return &spec[..index];
+        }
+    }
+    spec
+}
+
+fn editable_project_name_from_pyproject(project_root: &Path) -> Option<String> {
+    let contents = fs::read_to_string(project_root.join("pyproject.toml")).ok()?;
+    let document: toml::Value = toml::from_str(&contents).ok()?;
+
+    document
+        .get("project")
+        .and_then(|project| project.get("name"))
+        .and_then(|value| value.as_str())
+        .and_then(normalize_requirements_name)
+        .or_else(|| {
+            document
+                .get("tool")
+                .and_then(|tool| tool.get("poetry"))
+                .and_then(|poetry| poetry.get("name"))
+                .and_then(|value| value.as_str())
+                .and_then(normalize_requirements_name)
+        })
+}
+
+fn editable_project_name_from_setup_cfg(project_root: &Path) -> Option<String> {
+    let contents = fs::read_to_string(project_root.join("setup.cfg")).ok()?;
+    let mut in_metadata = false;
+
+    for raw_line in contents.lines() {
+        let trimmed = raw_line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with(';') {
+            continue;
+        }
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            in_metadata = trimmed.eq_ignore_ascii_case("[metadata]");
+            continue;
+        }
+        if !in_metadata {
+            continue;
+        }
+        let Some((key, value)) = trimmed
+            .split_once('=')
+            .or_else(|| trimmed.split_once(':'))
+        else {
+            continue;
+        };
+        if key.trim().eq_ignore_ascii_case("name") {
+            return normalize_requirements_name(value.trim());
+        }
+    }
+
+    None
 }
 
 fn package_lock_name_from_path(path: &str) -> Option<&str> {
@@ -1453,28 +1806,6 @@ fn parse_maven_dependency_tree(path: &PathBuf) -> anyhow::Result<Vec<ScanFinding
     }
 
     Ok(findings)
-}
-
-fn parse_maven_coordinate(coord: &str) -> Option<(String, String, String)> {
-    let parts: Vec<&str> = coord.splitn(7, ':').collect();
-    // Expected formats:
-    //   groupId:artifactId:type:version                      (4 parts, root)
-    //   groupId:artifactId:type:version:scope                (5 parts)
-    //   groupId:artifactId:type:classifier:version:scope     (6 parts)
-    if parts.len() < 4 {
-        return None;
-    }
-    let group_id = parts[0].trim();
-    let artifact_id = parts[1].trim();
-    let version = if parts.len() >= 6 {
-        parts[4].trim()
-    } else {
-        parts[3].trim()
-    };
-    if group_id.is_empty() || artifact_id.is_empty() || version.is_empty() {
-        return None;
-    }
-    Some((group_id.to_owned(), artifact_id.to_owned(), version.to_owned()))
 }
 
 fn parse_rush_config(config_path: &PathBuf) -> anyhow::Result<(String, Vec<ScanFinding>)> {
@@ -1851,7 +2182,7 @@ fn collect_requirements_findings(
                 })?;
             continue;
         }
-        if let Some(name) = parse_requirements_editable_name(trimmed) {
+        if let Some(name) = parse_requirements_editable_name(trimmed, path) {
             findings.push(ParsedRequirementFinding {
                 name,
                 version: None,
@@ -2135,22 +2466,25 @@ fn submit_scan_report(
     source: String,
     upload_manifest: bool,
     findings: Vec<ScanFinding>,
+    override_context: Option<CliEnrichmentContext>,
 ) -> anyhow::Result<ScanReport> {
-    // Gate: only submit to the API when findings are from API-enrichable ecosystems (npm/pypi).
-    // Each individual scan subcommand produces a single-ecosystem finding set, so
-    // any(enrichable) implies all(enrichable) in practice. If that invariant ever breaks (e.g.
-    // a future ci-preflight extension to Cargo), this gate must be revisited to avoid submitting
-    // non-enrichable findings to the API and failing the count check in merge_scan_findings.
-    if findings.is_empty() || !any_finding_api_enrichable(&findings) {
+    let Some(enrichment_path) = scan_enrichment_path(&findings) else {
         return Ok(ScanReport {
             source,
             upload_manifest,
             findings,
         });
-    }
+    };
 
-    let config = load_api_config()?;
-    let remote_findings = submit_scan_findings(&config, &findings)?;
+    let Some(config) = load_scan_enrichment_config(enrichment_path)? else {
+        return Ok(ScanReport {
+            source,
+            upload_manifest,
+            findings,
+        });
+    };
+    let remote_findings =
+        submit_scan_findings(&config, &findings, enrichment_path, override_context)?;
     Ok(ScanReport {
         source,
         upload_manifest,
@@ -2158,17 +2492,62 @@ fn submit_scan_report(
     })
 }
 
-fn any_finding_api_enrichable(findings: &[ScanFinding]) -> bool {
-    findings
+#[derive(Debug, Clone, Copy)]
+struct CliEnrichmentContext {
+    tenant_id: Option<Uuid>,
+    policy_profile_id: Option<Uuid>,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ScanEnrichmentPath {
+    RegistryScan,
+    GithubActions,
+}
+
+impl ScanEnrichmentPath {
+    fn route(self) -> &'static str {
+        match self {
+            Self::RegistryScan => "/v1/cli/scans",
+            Self::GithubActions => "/v1/cli/github-actions/enrich",
+        }
+    }
+}
+
+fn scan_enrichment_path(findings: &[ScanFinding]) -> Option<ScanEnrichmentPath> {
+    let ecosystem = findings.first()?.coordinate.ecosystem.clone();
+    if findings
         .iter()
-        .any(|f| matches!(f.coordinate.ecosystem, PackageEcosystem::Npm | PackageEcosystem::Pypi))
+        .any(|finding| finding.coordinate.ecosystem != ecosystem)
+    {
+        return None;
+    }
+
+    match ecosystem {
+        PackageEcosystem::Npm | PackageEcosystem::Pypi => Some(ScanEnrichmentPath::RegistryScan),
+        PackageEcosystem::GithubActions => Some(ScanEnrichmentPath::GithubActions),
+        _ => None,
+    }
 }
 
 fn load_api_config() -> anyhow::Result<CliConfig> {
     Ok(load_cli_config()?.unwrap_or_else(|| CliConfig {
         api_url: normalize_api_url(DEFAULT_API_URL),
         token: None,
+        tenant_id: None,
+        policy_profile_id: None,
     }))
+}
+
+fn load_scan_enrichment_config(
+    enrichment_path: ScanEnrichmentPath,
+) -> anyhow::Result<Option<CliConfig>> {
+    match enrichment_path {
+        ScanEnrichmentPath::RegistryScan => Ok(Some(load_api_config()?)),
+        ScanEnrichmentPath::GithubActions => Ok(load_cli_config()?.map(|mut config| {
+            config.api_url = normalize_api_url(&config.api_url);
+            config
+        })),
+    }
 }
 
 fn load_openvex_document(path: &Path) -> anyhow::Result<serde_json::Value> {
@@ -2240,9 +2619,25 @@ fn load_sbom_enrichment_config(document: &SbomDocument) -> anyhow::Result<Option
 fn submit_scan_findings(
     config: &CliConfig,
     findings: &[ScanFinding],
+    enrichment_path: ScanEnrichmentPath,
+    override_context: Option<CliEnrichmentContext>,
 ) -> anyhow::Result<Vec<CliScanApiFinding>> {
+    let override_context = override_context.unwrap_or(CliEnrichmentContext {
+        tenant_id: None,
+        policy_profile_id: None,
+    });
+    let tenant_id = override_context.tenant_id.or(config.tenant_id);
+    let policy_profile_id = override_context.policy_profile_id.or(config.policy_profile_id);
+    if matches!(enrichment_path, ScanEnrichmentPath::GithubActions) && policy_profile_id.is_none() {
+        anyhow::bail!(
+            "GitHub Actions enrichment requires an explicit policy profile; configure one with `aedo auth login --policy-profile-id <uuid>` or pass `--policy-profile-id` to `aedo scan github-actions`"
+        );
+    }
+
     let client = Client::builder().timeout(SCAN_TIMEOUT).build()?;
     let submission = CliScanSubmission {
+        tenant_id,
+        policy_profile_id,
         packages: findings
             .iter()
             .map(|finding| CliScanSubmissionPackage {
@@ -2253,7 +2648,7 @@ fn submit_scan_findings(
     };
 
     let mut request = client
-        .post(format!("{}/v1/cli/scans", config.api_url))
+        .post(format!("{}{}", config.api_url, enrichment_path.route()))
         .json(&submission);
     if let Some(token) = config.token.as_deref() {
         request = request.bearer_auth(token);
@@ -2262,7 +2657,13 @@ fn submit_scan_findings(
     let response = request
         .send()
         .and_then(reqwest::blocking::Response::error_for_status)
-        .with_context(|| format!("submitting CLI scan to {}/v1/cli/scans", config.api_url))?;
+        .with_context(|| {
+            format!(
+                "submitting CLI scan to {}{}",
+                config.api_url,
+                enrichment_path.route()
+            )
+        })?;
     let body: CliScanApiResponse = response
         .json()
         .with_context(|| format!("parsing CLI scan response from {}", config.api_url))?;
@@ -2340,6 +2741,11 @@ fn parse_explain_coordinate(
     match ecosystem {
         EcosystemArg::Npm => parse_npm_explain_coordinate(spec),
         EcosystemArg::Pypi => parse_pypi_explain_coordinate(spec),
+        EcosystemArg::Cargo | EcosystemArg::Maven => {
+            anyhow::bail!(
+                "aedo explain is only supported for npm and pypi packages; use aedo risk for other ecosystems"
+            )
+        }
     }
 }
 
@@ -2433,10 +2839,30 @@ fn merge_scan_findings(
                 local.coordinate.purl()
             );
         }
-        local.decision = remote.decision;
+        local.decision = stricter_scan_decision(local.decision.clone(), remote.decision);
     }
 
     Ok(local_findings)
+}
+
+fn stricter_scan_decision(local: PolicyDecision, remote: PolicyDecision) -> PolicyDecision {
+    if decision_severity(&remote) > decision_severity(&local) {
+        remote
+    } else {
+        local
+    }
+}
+
+fn decision_severity(decision: &PolicyDecision) -> u8 {
+    match decision {
+        PolicyDecision::Allow => 0,
+        PolicyDecision::AllowWithWarning => 1,
+        PolicyDecision::FallbackToApprovedCandidate => 2,
+        PolicyDecision::RequireHitlApproval => 3,
+        PolicyDecision::QuarantinePendingAnalysis => 4,
+        PolicyDecision::BlockPolicyViolation => 5,
+        PolicyDecision::BlockKnownMalicious => 6,
+    }
 }
 
 fn print_report(report: &ScanReport, format: OutputFormat) -> anyhow::Result<()> {
@@ -2535,6 +2961,28 @@ mod tests {
         .unwrap();
 
         validate_policy_file(&path).expect("policy file with scorecard thresholds should validate");
+    }
+
+    #[test]
+    fn validate_policy_file_accepts_current_default_fixture() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("policy-default.json");
+        std::fs::write(&path, include_str!("../../../schemas/fixtures/policy.default.json")).unwrap();
+
+        validate_policy_file(&path).expect("current default policy fixture should validate");
+    }
+
+    #[test]
+    fn validate_policy_file_accepts_legacy_policy_fixture() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("policy-legacy.json");
+        std::fs::write(
+            &path,
+            include_str!("../../../schemas/fixtures/policy.legacy-phase1.json"),
+        )
+        .unwrap();
+
+        validate_policy_file(&path).expect("legacy Phase 1 policy fixture should remain valid");
     }
 
     #[test]
@@ -2853,6 +3301,183 @@ mod tests {
     }
 
     #[test]
+    fn editable_local_requirements_use_setup_cfg_name_for_scan() {
+        let dir = tempdir().unwrap();
+        let package_dir = dir.path().join("pkg");
+        let path = dir.path().join("requirements.txt");
+        fs::create_dir_all(&package_dir).unwrap();
+        fs::write(
+            package_dir.join("setup.cfg"),
+            "[metadata]\nname = Demo_Pkg\nversion = 0.1.0\n",
+        )
+        .unwrap();
+        fs::write(&path, "--editable ./pkg\n").unwrap();
+
+        let findings = parse_requirements(&path).unwrap();
+
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].coordinate.purl(), "pkg:pypi/demo-pkg");
+    }
+
+    #[test]
+    fn editable_local_requirements_use_pyproject_name_for_scan_root_path() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("requirements.txt");
+        fs::write(
+            dir.path().join("pyproject.toml"),
+            "[project]\nname = \"scan-root-demo\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        fs::write(&path, "-e .\n").unwrap();
+
+        let findings = parse_requirements(&path).unwrap();
+
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].coordinate.purl(), "pkg:pypi/scan-root-demo");
+    }
+
+    #[test]
+    fn editable_local_requirements_with_extras_use_setup_cfg_name_for_scan() {
+        let dir = tempdir().unwrap();
+        let package_dir = dir.path().join("pkg");
+        let path = dir.path().join("requirements.txt");
+        fs::create_dir_all(&package_dir).unwrap();
+        fs::write(package_dir.join("setup.cfg"), "[metadata]\nname = Demo_Extras\n").unwrap();
+        fs::write(&path, "--editable ./pkg[test]\n").unwrap();
+
+        let findings = parse_requirements(&path).unwrap();
+
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].coordinate.purl(), "pkg:pypi/demo-extras");
+    }
+
+    #[test]
+    fn editable_local_requirements_use_setup_cfg_colon_name_for_scan() {
+        let dir = tempdir().unwrap();
+        let package_dir = dir.path().join("pkg");
+        let path = dir.path().join("requirements.txt");
+        fs::create_dir_all(&package_dir).unwrap();
+        fs::write(package_dir.join("setup.cfg"), "[metadata]\nname: Demo_Colon\n").unwrap();
+        fs::write(&path, "--editable ./pkg\n").unwrap();
+
+        let findings = parse_requirements(&path).unwrap();
+
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].coordinate.purl(), "pkg:pypi/demo-colon");
+    }
+
+    #[test]
+    fn editable_file_url_requirements_use_pyproject_name_for_scan() {
+        let dir = tempdir().unwrap();
+        let package_dir = dir.path().join("pkg");
+        let path = dir.path().join("requirements.txt");
+        fs::create_dir_all(&package_dir).unwrap();
+        fs::write(
+            package_dir.join("pyproject.toml"),
+            "[project]\nname = \"demo-file-url\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        fs::write(&path, format!("-e file://{}\n", package_dir.display())).unwrap();
+
+        let findings = parse_requirements(&path).unwrap();
+
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].coordinate.purl(), "pkg:pypi/demo-file-url");
+    }
+
+    #[test]
+    fn editable_file_url_requirements_decode_percent_escapes_for_scan() {
+        let dir = tempdir().unwrap();
+        let package_dir = dir.path().join("demo pkg");
+        let path = dir.path().join("requirements.txt");
+        fs::create_dir_all(&package_dir).unwrap();
+        fs::write(
+            package_dir.join("pyproject.toml"),
+            "[project]\nname = \"demo-scan-percent\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        let encoded_path = package_dir.display().to_string().replace(' ', "%20");
+        fs::write(&path, format!("-e file://{}\n", encoded_path)).unwrap();
+
+        let findings = parse_requirements(&path).unwrap();
+
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].coordinate.purl(), "pkg:pypi/demo-scan-percent");
+    }
+
+    #[test]
+    fn editable_file_relative_requirements_decode_percent_escapes_for_scan() {
+        let dir = tempdir().unwrap();
+        let package_dir = dir.path().join("demo pkg");
+        let path = dir.path().join("requirements.txt");
+        fs::create_dir_all(&package_dir).unwrap();
+        fs::write(
+            package_dir.join("pyproject.toml"),
+            "[project]\nname = \"demo-file-relative-scan\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        fs::write(&path, "-e file:./demo%20pkg\n").unwrap();
+
+        let findings = parse_requirements(&path).unwrap();
+
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].coordinate.purl(), "pkg:pypi/demo-file-relative-scan");
+    }
+
+    #[test]
+    fn remote_editable_requirements_without_egg_are_ignored() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("requirements.txt");
+        fs::write(&path, "-e git+https://example.invalid/demo.git\n").unwrap();
+
+        let findings = parse_requirements(&path).unwrap();
+
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn editable_nested_include_paths_resolve_relative_for_scan() {
+        let dir = tempdir().unwrap();
+        let sub_dir = dir.path().join("sub");
+        let package_dir = dir.path().join("pkg");
+        let root = dir.path().join("requirements.txt");
+        let nested = sub_dir.join("requirements.txt");
+        fs::create_dir_all(&sub_dir).unwrap();
+        fs::create_dir_all(&package_dir).unwrap();
+        fs::write(
+            package_dir.join("pyproject.toml"),
+            "[project]\nname = \"demo-nested-scan\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        fs::write(&root, "-r sub/requirements.txt\n").unwrap();
+        fs::write(&nested, "-e ../pkg\n").unwrap();
+
+        let findings = parse_requirements(&root).unwrap();
+
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].coordinate.purl(), "pkg:pypi/demo-nested-scan");
+    }
+
+    #[test]
+    fn editable_local_requirements_prefer_egg_name_for_scan() {
+        let dir = tempdir().unwrap();
+        let package_dir = dir.path().join("pkg");
+        let path = dir.path().join("requirements.txt");
+        fs::create_dir_all(&package_dir).unwrap();
+        fs::write(
+            package_dir.join("pyproject.toml"),
+            "[project]\nname = \"metadata-name\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        fs::write(&path, "-e ./pkg#egg=override-name\n").unwrap();
+
+        let findings = parse_requirements(&path).unwrap();
+
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].coordinate.purl(), "pkg:pypi/override-name");
+    }
+
+    #[test]
     fn parses_requirements_direct_references_and_hashes() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("requirements.txt");
@@ -3111,6 +3736,8 @@ mod tests {
         let config = CliConfig {
             api_url: "http://127.0.0.1:18002".to_owned(),
             token: Some("fixture-token".to_owned()),
+            tenant_id: None,
+            policy_profile_id: None,
         };
         let path = save_cli_config(&config).unwrap();
         assert!(path.exists());
@@ -3160,6 +3787,8 @@ mod tests {
             Some(CliConfig {
                 api_url: format!("http://{address}"),
                 token: Some("fixture-token".to_owned()),
+                tenant_id: None,
+                policy_profile_id: None,
             })
         );
 
@@ -3233,6 +3862,8 @@ mod tests {
         save_cli_config(&CliConfig {
             api_url: format!("http://{address}"),
             token: Some("fixture-token".to_owned()),
+            tenant_id: None,
+            policy_profile_id: None,
         })
         .unwrap();
 
@@ -3375,6 +4006,58 @@ checksum = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
     }
 
     #[test]
+    fn maven_sbom_generate_writes_dependency_tree_output() {
+        let dir = tempdir().unwrap();
+        let dependency_tree = dir.path().join("dependency-tree.txt");
+        let output = dir.path().join("sbom.cdx.json");
+        fs::write(
+            &dependency_tree,
+            r#"[INFO] com.example:demo-app:jar:1.0.0
+[INFO] +- org.springframework:spring-core:jar:6.1.0:compile
+[INFO] |  \- org.springframework:spring-jcl:jar:6.1.0:compile
+[INFO] \- com.fasterxml.jackson.core:jackson-databind:jar:2.17.2:compile
+"#,
+        )
+        .unwrap();
+
+        let exit_code = run([
+            OsString::from("aedo"),
+            OsString::from("sbom"),
+            OsString::from("generate"),
+            OsString::from("--dependency-tree"),
+            dependency_tree.into_os_string(),
+            OsString::from("--format"),
+            OsString::from("cyclonedx-json"),
+            OsString::from("--output"),
+            output.clone().into_os_string(),
+        ])
+        .unwrap();
+
+        assert_eq!(exit_code, 0);
+
+        let rendered: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(output).unwrap()).unwrap();
+        assert_eq!(
+            rendered["metadata"]["component"]["purl"],
+            "pkg:maven/com.example/demo-app@1.0.0"
+        );
+        assert!(
+            rendered["components"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|component| component["purl"] == "pkg:maven/org.springframework/spring-core@6.1.0")
+        );
+        assert!(
+            rendered["components"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|component| component["purl"] == "pkg:maven/com.fasterxml.jackson.core/jackson-databind@2.17.2")
+        );
+    }
+
+    #[test]
     fn sbom_generate_skips_remote_decisions_for_cargo_lock_when_configured() {
         let _guard = env_lock().lock().unwrap();
         let dir = tempdir().unwrap();
@@ -3420,6 +4103,8 @@ checksum = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
         save_cli_config(&CliConfig {
             api_url: "http://127.0.0.1:9".to_owned(),
             token: Some("fixture-token".to_owned()),
+        tenant_id: None,
+        policy_profile_id: None,
         })
         .unwrap();
 
@@ -3518,6 +4203,8 @@ checksum = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
         save_cli_config(&CliConfig {
             api_url: format!("http://{address}"),
             token: Some("fixture-token".to_owned()),
+        tenant_id: None,
+        policy_profile_id: None,
         })
         .unwrap();
 
@@ -3610,6 +4297,8 @@ checksum = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
         save_cli_config(&CliConfig {
             api_url: format!("http://{address}"),
             token: Some("fixture-token".to_owned()),
+        tenant_id: None,
+        policy_profile_id: None,
         })
         .unwrap();
 
@@ -3695,6 +4384,8 @@ checksum = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
         save_cli_config(&CliConfig {
             api_url: format!("http://{address}"),
             token: Some("fixture-token".to_owned()),
+        tenant_id: None,
+        policy_profile_id: None,
         })
         .unwrap();
 
@@ -3814,6 +4505,8 @@ checksum = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
         save_cli_config(&CliConfig {
             api_url: format!("http://{address}"),
             token: Some("fixture-token".to_owned()),
+        tenant_id: None,
+        policy_profile_id: None,
         })
         .unwrap();
 
@@ -3987,6 +4680,8 @@ snapshots:
         save_cli_config(&CliConfig {
             api_url: "http://127.0.0.1:9/".to_owned(),
             token: Some("fixture-token".to_owned()),
+        tenant_id: None,
+        policy_profile_id: None,
         })
         .unwrap();
 
@@ -4216,6 +4911,8 @@ version = "0.1.0"
         save_cli_config(&CliConfig {
             api_url: "not a url".to_owned(),
             token: Some("fixture-token".to_owned()),
+        tenant_id: None,
+        policy_profile_id: None,
         })
         .unwrap();
 
@@ -4265,6 +4962,8 @@ version = "0.1.0"
         save_cli_config(&CliConfig {
             api_url: "http://127.0.0.1:9/".to_owned(),
             token: Some("fixture-token".to_owned()),
+        tenant_id: None,
+        policy_profile_id: None,
         })
         .unwrap();
 
@@ -4359,6 +5058,440 @@ version = "0.1.0"
     }
 
     #[test]
+    fn risk_parses_cargo_coordinate() {
+        let coordinate = parse_risk_coordinate("serde@1.0.0", EcosystemArg::Cargo).unwrap();
+
+        assert_eq!(coordinate.ecosystem, PackageEcosystem::Cargo);
+        assert_eq!(coordinate.name, "serde");
+        assert_eq!(coordinate.version.as_deref(), Some("1.0.0"));
+        assert_eq!(coordinate.namespace, None);
+    }
+
+    #[test]
+    fn risk_parses_maven_coordinate() {
+        let coordinate = parse_risk_coordinate(
+            "org.apache.commons:commons-lang3@3.14.0",
+            EcosystemArg::Maven,
+        )
+        .unwrap();
+
+        assert_eq!(coordinate.ecosystem, PackageEcosystem::Maven);
+        assert_eq!(coordinate.name, "commons-lang3");
+        assert_eq!(coordinate.version.as_deref(), Some("3.14.0"));
+        assert_eq!(coordinate.namespace.as_deref(), Some("org.apache.commons"));
+    }
+
+    #[test]
+    fn risk_cargo_rejects_missing_version() {
+        let error = parse_risk_coordinate("serde", EcosystemArg::Cargo).unwrap_err();
+
+        assert!(error.to_string().contains("cargo risk expects <crate>@<version>"));
+    }
+
+    #[test]
+    fn risk_maven_rejects_missing_colon() {
+        let error =
+            parse_risk_coordinate("commons-lang3@3.14.0", EcosystemArg::Maven).unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("maven risk expects <groupId>:<artifactId>@<version>"));
+    }
+
+    #[test]
+    fn risk_maven_rejects_missing_version() {
+        let error = parse_risk_coordinate(
+            "org.apache.commons:commons-lang3",
+            EcosystemArg::Maven,
+        )
+        .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("maven risk expects <groupId>:<artifactId>@<version>"));
+    }
+
+    #[test]
+    fn risk_returns_decision_from_api() {
+        let _guard = env_lock().lock().unwrap();
+        let dir = tempdir().unwrap();
+        unsafe {
+            env::set_var(CONFIG_OVERRIDE_ENV, dir.path());
+        }
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        save_cli_config(&CliConfig {
+            api_url: format!("http://{address}"),
+            token: Some("risk-token".to_owned()),
+        tenant_id: None,
+        policy_profile_id: None,
+        })
+        .unwrap();
+
+        let server = thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buffer = [0_u8; 8192];
+                let bytes_read = stream.read(&mut buffer).unwrap();
+                let request = String::from_utf8_lossy(&buffer[..bytes_read]);
+                assert!(request.contains("POST /v1/cli/risk HTTP/1.1"));
+                assert!(request.contains("\"ecosystem\":\"cargo\""));
+                assert!(request.contains("\"name\":\"serde\""));
+                assert!(request.contains("authorization: Bearer risk-token"));
+
+                let response = serde_json::json!({
+                    "tenant_id": "018f4a6f-55d0-7000-8000-000000000001",
+                    "registry_config_id": "018f4a6f-55d0-7000-8000-000000000201",
+                    "policy_profile_id": "018f4a6f-55d0-7000-8000-000000000301",
+                    "coordinate": {
+                        "ecosystem": "cargo",
+                        "name": "serde",
+                        "version": "1.0.0",
+                        "namespace": null
+                    },
+                    "decision": "ALLOW",
+                    "rationale": ["no known malicious indicators"],
+                    "trace_id": "risk-trace-1",
+                    "create_analysis_job": false
+                });
+                let body = serde_json::to_vec(&response).unwrap();
+                stream
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            body.len()
+                        )
+                        .as_bytes(),
+                    )
+                    .unwrap();
+                stream.write_all(&body).unwrap();
+            }
+        });
+
+        let exit_code = run([
+            OsString::from("aedo"),
+            OsString::from("risk"),
+            OsString::from("serde@1.0.0"),
+            OsString::from("--ecosystem"),
+            OsString::from("cargo"),
+        ])
+        .unwrap();
+
+        assert_eq!(exit_code, 0);
+
+        server.join().unwrap();
+        unsafe {
+            env::remove_var(CONFIG_OVERRIDE_ENV);
+        }
+    }
+
+    #[test]
+    fn risk_npm_uses_risk_route_with_scoped_coordinate() {
+        let _guard = env_lock().lock().unwrap();
+        let dir = tempdir().unwrap();
+        unsafe {
+            env::set_var(CONFIG_OVERRIDE_ENV, dir.path());
+        }
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        save_cli_config(&CliConfig {
+            api_url: format!("http://{address}"),
+            token: Some("risk-token".to_owned()),
+        tenant_id: None,
+        policy_profile_id: None,
+        })
+        .unwrap();
+
+        let server = thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buffer = [0_u8; 8192];
+                let bytes_read = stream.read(&mut buffer).unwrap();
+                let request = String::from_utf8_lossy(&buffer[..bytes_read]);
+                assert!(request.contains("POST /v1/cli/risk HTTP/1.1"));
+                assert!(request.contains("\"ecosystem\":\"npm\""));
+                assert!(request.contains("\"name\":\"pkg\""));
+                assert!(request.contains("\"namespace\":\"scope\""));
+                assert!(request.contains("\"version\":\"1.2.3\""));
+                assert!(request.contains("authorization: Bearer risk-token"));
+
+                let response = serde_json::json!({
+                    "tenant_id": "018f4a6f-55d0-7000-8000-000000000001",
+                    "registry_config_id": "018f4a6f-55d0-7000-8000-000000000201",
+                    "policy_profile_id": "018f4a6f-55d0-7000-8000-000000000301",
+                    "coordinate": {
+                        "ecosystem": "npm",
+                        "name": "pkg",
+                        "version": "1.2.3",
+                        "namespace": "scope"
+                    },
+                    "decision": "ALLOW",
+                    "rationale": ["no known malicious indicators"],
+                    "trace_id": "risk-trace-npm",
+                    "create_analysis_job": false
+                });
+                let body = serde_json::to_vec(&response).unwrap();
+                stream
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            body.len()
+                        )
+                        .as_bytes(),
+                    )
+                    .unwrap();
+                stream.write_all(&body).unwrap();
+            }
+        });
+
+        let exit_code = run([
+            OsString::from("aedo"),
+            OsString::from("risk"),
+            OsString::from("@scope/pkg@1.2.3"),
+            OsString::from("--ecosystem"),
+            OsString::from("npm"),
+        ])
+        .unwrap();
+
+        assert_eq!(exit_code, 0);
+
+        server.join().unwrap();
+        unsafe {
+            env::remove_var(CONFIG_OVERRIDE_ENV);
+        }
+    }
+
+    #[test]
+    fn risk_exits_1_when_blocking_decision_and_fail_on_block() {
+        let _guard = env_lock().lock().unwrap();
+        let dir = tempdir().unwrap();
+        unsafe {
+            env::set_var(CONFIG_OVERRIDE_ENV, dir.path());
+        }
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        save_cli_config(&CliConfig {
+            api_url: format!("http://{address}"),
+            token: None,
+        tenant_id: None,
+        policy_profile_id: None,
+        })
+        .unwrap();
+
+        let server = thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buffer = [0_u8; 8192];
+                let _ = stream.read(&mut buffer).unwrap();
+
+                let response = serde_json::json!({
+                    "tenant_id": "018f4a6f-55d0-7000-8000-000000000001",
+                    "registry_config_id": "018f4a6f-55d0-7000-8000-000000000201",
+                    "policy_profile_id": "018f4a6f-55d0-7000-8000-000000000301",
+                    "coordinate": {
+                        "ecosystem": "maven",
+                        "name": "log4j-core",
+                        "version": "2.14.0",
+                        "namespace": "org.apache.logging.log4j"
+                    },
+                    "decision": "BLOCK_KNOWN_MALICIOUS",
+                    "rationale": ["known-malicious indicator"],
+                    "trace_id": "risk-trace-blocked",
+                    "create_analysis_job": false
+                });
+                let body = serde_json::to_vec(&response).unwrap();
+                stream
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            body.len()
+                        )
+                        .as_bytes(),
+                    )
+                    .unwrap();
+                stream.write_all(&body).unwrap();
+            }
+        });
+
+        let exit_code = run([
+            OsString::from("aedo"),
+            OsString::from("risk"),
+            OsString::from("org.apache.logging.log4j:log4j-core@2.14.0"),
+            OsString::from("--ecosystem"),
+            OsString::from("maven"),
+            OsString::from("--fail-on"),
+            OsString::from("block"),
+        ])
+        .unwrap();
+
+        assert_eq!(exit_code, 1);
+
+        server.join().unwrap();
+        unsafe {
+            env::remove_var(CONFIG_OVERRIDE_ENV);
+        }
+    }
+
+    #[test]
+    fn risk_rejects_sarif_output_format() {
+        // SARIF is rejected before any coordinate parsing or API call.
+        let error = run([
+            OsString::from("aedo"),
+            OsString::from("risk"),
+            OsString::from("serde@1.0.0"),
+            OsString::from("--ecosystem"),
+            OsString::from("cargo"),
+            OsString::from("--output-format"),
+            OsString::from("sarif"),
+        ])
+        .unwrap_err();
+
+        assert!(error.to_string().contains("SARIF"));
+    }
+
+    #[test]
+    fn risk_exits_1_when_fail_on_warn_and_allow_with_warning() {
+        let _guard = env_lock().lock().unwrap();
+        let dir = tempdir().unwrap();
+        unsafe {
+            env::set_var(CONFIG_OVERRIDE_ENV, dir.path());
+        }
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        save_cli_config(&CliConfig {
+            api_url: format!("http://{address}"),
+            token: None,
+        tenant_id: None,
+        policy_profile_id: None,
+        })
+        .unwrap();
+
+        let server = thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buffer = [0_u8; 4096];
+                let _ = stream.read(&mut buffer).unwrap();
+
+                let response = serde_json::json!({
+                    "tenant_id": "018f4a6f-55d0-7000-8000-000000000001",
+                    "registry_config_id": "018f4a6f-55d0-7000-8000-000000000201",
+                    "policy_profile_id": "018f4a6f-55d0-7000-8000-000000000301",
+                    "coordinate": {
+                        "ecosystem": "npm",
+                        "name": "left-pad",
+                        "version": "1.3.0"
+                    },
+                    "decision": "ALLOW_WITH_WARNING",
+                    "rationale": ["scorecard_branch_protection_risk"],
+                    "trace_id": "risk-trace-warn",
+                    "create_analysis_job": false
+                });
+                let body = serde_json::to_vec(&response).unwrap();
+                stream
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            body.len()
+                        )
+                        .as_bytes(),
+                    )
+                    .unwrap();
+                stream.write_all(&body).unwrap();
+            }
+        });
+
+        let exit_code = run([
+            OsString::from("aedo"),
+            OsString::from("risk"),
+            OsString::from("left-pad@1.3.0"),
+            OsString::from("--ecosystem"),
+            OsString::from("npm"),
+            OsString::from("--fail-on"),
+            OsString::from("warn"),
+        ])
+        .unwrap();
+
+        // AllowWithWarning is not Allow — fail-on warn exits 1.
+        assert_eq!(exit_code, 1);
+
+        server.join().unwrap();
+        unsafe {
+            env::remove_var(CONFIG_OVERRIDE_ENV);
+        }
+    }
+
+    #[test]
+    fn risk_exits_0_when_fail_on_block_and_allow_with_warning() {
+        let _guard = env_lock().lock().unwrap();
+        let dir = tempdir().unwrap();
+        unsafe {
+            env::set_var(CONFIG_OVERRIDE_ENV, dir.path());
+        }
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        save_cli_config(&CliConfig {
+            api_url: format!("http://{address}"),
+            token: None,
+        tenant_id: None,
+        policy_profile_id: None,
+        })
+        .unwrap();
+
+        let server = thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buffer = [0_u8; 4096];
+                let _ = stream.read(&mut buffer).unwrap();
+
+                let response = serde_json::json!({
+                    "tenant_id": "018f4a6f-55d0-7000-8000-000000000001",
+                    "registry_config_id": "018f4a6f-55d0-7000-8000-000000000201",
+                    "policy_profile_id": "018f4a6f-55d0-7000-8000-000000000301",
+                    "coordinate": {
+                        "ecosystem": "pypi",
+                        "name": "requests",
+                        "version": "2.31.0"
+                    },
+                    "decision": "ALLOW_WITH_WARNING",
+                    "rationale": ["scorecard_low_score"],
+                    "trace_id": "risk-trace-warn-2",
+                    "create_analysis_job": true
+                });
+                let body = serde_json::to_vec(&response).unwrap();
+                stream
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            body.len()
+                        )
+                        .as_bytes(),
+                    )
+                    .unwrap();
+                stream.write_all(&body).unwrap();
+            }
+        });
+
+        let exit_code = run([
+            OsString::from("aedo"),
+            OsString::from("risk"),
+            OsString::from("requests@2.31.0"),
+            OsString::from("--ecosystem"),
+            OsString::from("pypi"),
+            OsString::from("--fail-on"),
+            OsString::from("block"),
+        ])
+        .unwrap();
+
+        // AllowWithWarning is not blocking — fail-on block exits 0.
+        assert_eq!(exit_code, 0);
+
+        server.join().unwrap();
+        unsafe {
+            env::remove_var(CONFIG_OVERRIDE_ENV);
+        }
+    }
+
+    #[test]
     fn explain_uses_remote_summary_from_api() {
         let _guard = env_lock().lock().unwrap();
         let dir = tempdir().unwrap();
@@ -4371,6 +5504,8 @@ version = "0.1.0"
         save_cli_config(&CliConfig {
             api_url: format!("http://{address}"),
             token: Some("fixture-token".to_owned()),
+        tenant_id: None,
+        policy_profile_id: None,
         })
         .unwrap();
 
@@ -4454,6 +5589,8 @@ version = "0.1.0"
         save_cli_config(&CliConfig {
             api_url: format!("http://{address}"),
             token: Some("fixture-token".to_owned()),
+        tenant_id: None,
+        policy_profile_id: None,
         })
         .unwrap();
 
@@ -4642,6 +5779,26 @@ version = "0.1.0"
     }
 
     #[test]
+    fn merge_scan_findings_preserves_stricter_local_decision_when_remote_allows() {
+        let merged = merge_scan_findings(
+            vec![github_actions_finding("actions", "checkout", "v4")],
+            vec![CliScanApiFinding {
+                coordinate: PackageCoordinate::new(
+                    PackageEcosystem::GithubActions,
+                    "checkout",
+                    Some("v4"),
+                    Some("actions"),
+                ),
+                decision: PolicyDecision::Allow,
+                decision_timestamp: None,
+            }],
+        )
+        .expect("merge should succeed");
+
+        assert_eq!(merged[0].decision, PolicyDecision::AllowWithWarning);
+    }
+
+    #[test]
     #[ignore = "requires live local aegiscudo-api process"]
     fn auth_login_works_against_live_local_api() {
         let _guard = env_lock().lock().unwrap();
@@ -4670,6 +5827,8 @@ version = "0.1.0"
             Some(CliConfig {
                 api_url,
                 token: Some("fixture-token".to_owned()),
+                tenant_id: None,
+                policy_profile_id: None,
             })
         );
 
@@ -4712,6 +5871,8 @@ version = "0.1.0"
         save_cli_config(&CliConfig {
             api_url: format!("http://{address}"),
             token: Some("fixture-token".to_owned()),
+        tenant_id: None,
+        policy_profile_id: None,
         })
         .unwrap();
 
@@ -4810,6 +5971,8 @@ version = "0.1.0"
         save_cli_config(&CliConfig {
             api_url: format!("http://{address}"),
             token: None,
+        tenant_id: None,
+        policy_profile_id: None,
         })
         .unwrap();
 
@@ -4880,6 +6043,8 @@ version = "0.1.0"
         save_cli_config(&CliConfig {
             api_url,
             token: Some("fixture-token".to_owned()),
+            tenant_id: None,
+            policy_profile_id: None,
         })
         .unwrap();
 
@@ -4919,6 +6084,8 @@ version = "0.1.0"
         save_cli_config(&CliConfig {
             api_url,
             token: Some("fixture-token".to_owned()),
+            tenant_id: None,
+            policy_profile_id: None,
         })
         .unwrap();
 
@@ -4954,6 +6121,8 @@ version = "0.1.0"
         save_cli_config(&CliConfig {
             api_url,
             token: Some("fixture-token".to_owned()),
+            tenant_id: None,
+            policy_profile_id: None,
         })
         .unwrap();
 
@@ -4987,6 +6156,8 @@ version = "0.1.0"
         save_cli_config(&CliConfig {
             api_url,
             token: Some("fixture-token".to_owned()),
+            tenant_id: None,
+            policy_profile_id: None,
         })
         .unwrap();
 
@@ -6123,6 +7294,228 @@ checksum = "deadbeef0000000000000000000000000000000000000000000000000000000000"
 
         // AllowWithWarning is not blocking — exit 0 with default fail-on block
         assert_eq!(exit_code, 0);
+    }
+
+    #[test]
+    fn scan_github_actions_uses_github_actions_enrichment_route() {
+        let _guard = env_lock().lock().unwrap();
+        let dir = tempdir().unwrap();
+        let tenant_id = Uuid::now_v7();
+        let policy_profile_id = Uuid::now_v7();
+        unsafe {
+            env::set_var(CONFIG_OVERRIDE_ENV, dir.path());
+        }
+        fs::write(
+            dir.path().join("ci.yml"),
+            "name: CI\njobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n",
+        )
+        .unwrap();
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        save_cli_config(&CliConfig {
+            api_url: format!("http://{address}"),
+            token: Some("gha-token".to_owned()),
+            tenant_id: Some(tenant_id),
+            policy_profile_id: Some(policy_profile_id),
+        })
+        .unwrap();
+
+        let server = thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buffer = [0_u8; 4096];
+                let bytes_read = stream.read(&mut buffer).unwrap();
+                let request = String::from_utf8_lossy(&buffer[..bytes_read]);
+                assert!(request.contains("POST /v1/cli/github-actions/enrich HTTP/1.1"));
+                assert!(request.contains("\"ecosystem\":\"githubactions\""));
+                assert!(request.contains("\"namespace\":\"actions\""));
+                assert!(request.contains("\"name\":\"checkout\""));
+                assert!(request.contains(&format!("\"tenant_id\":\"{tenant_id}\"")));
+                assert!(request.contains(&format!(
+                    "\"policy_profile_id\":\"{policy_profile_id}\""
+                )));
+                assert!(request.contains("authorization: Bearer gha-token"));
+
+                let response = serde_json::json!({
+                    "tenant_id": "018f4a6f-55d0-7000-8000-000000000001",
+                    "policy_profile_id": "018f4a6f-55d0-7000-8000-000000000101",
+                    "findings": [{
+                        "coordinate": {
+                            "ecosystem": "githubactions",
+                            "name": "checkout",
+                            "version": "v4",
+                            "namespace": "actions"
+                        },
+                        "decision": "BLOCK_KNOWN_MALICIOUS",
+                        "trace_id": "cli-trace-1",
+                        "rationale": ["fixture block"],
+                        "create_analysis_job": false
+                    }]
+                });
+                let body = serde_json::to_vec(&response).unwrap();
+                stream
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            body.len()
+                        )
+                        .as_bytes(),
+                    )
+                    .unwrap();
+                stream.write_all(&body).unwrap();
+            }
+        });
+
+        let exit_code = run([
+            OsString::from("aedo"),
+            OsString::from("scan"),
+            OsString::from("github-actions"),
+            OsString::from("--workflow-dir"),
+            dir.path().as_os_str().to_os_string(),
+            OsString::from("--fail-on"),
+            OsString::from("block"),
+        ])
+        .unwrap();
+
+        assert_eq!(exit_code, 1);
+
+        server.join().unwrap();
+        unsafe {
+            env::remove_var(CONFIG_OVERRIDE_ENV);
+        }
+    }
+
+    #[test]
+    fn scan_github_actions_requires_explicit_policy_profile_for_remote_enrichment() {
+        let _guard = env_lock().lock().unwrap();
+        let dir = tempdir().unwrap();
+        unsafe {
+            env::set_var(CONFIG_OVERRIDE_ENV, dir.path());
+        }
+        fs::write(
+            dir.path().join("ci.yml"),
+            "name: CI\njobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n",
+        )
+        .unwrap();
+
+        save_cli_config(&CliConfig {
+            api_url: "http://127.0.0.1:9".to_owned(),
+            token: Some("gha-token".to_owned()),
+            tenant_id: None,
+            policy_profile_id: None,
+        })
+        .unwrap();
+
+        let error = run([
+            OsString::from("aedo"),
+            OsString::from("scan"),
+            OsString::from("github-actions"),
+            OsString::from("--workflow-dir"),
+            dir.path().as_os_str().to_os_string(),
+        ])
+        .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("requires an explicit policy profile"));
+
+        unsafe {
+            env::remove_var(CONFIG_OVERRIDE_ENV);
+        }
+    }
+
+    #[test]
+    fn scan_github_actions_flags_override_saved_policy_context() {
+        let _guard = env_lock().lock().unwrap();
+        let dir = tempdir().unwrap();
+        let saved_tenant_id = Uuid::now_v7();
+        let saved_policy_profile_id = Uuid::now_v7();
+        let override_tenant_id = Uuid::now_v7();
+        let override_policy_profile_id = Uuid::now_v7();
+        unsafe {
+            env::set_var(CONFIG_OVERRIDE_ENV, dir.path());
+        }
+        fs::write(
+            dir.path().join("ci.yml"),
+            "name: CI\njobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n",
+        )
+        .unwrap();
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        save_cli_config(&CliConfig {
+            api_url: format!("http://{address}"),
+            token: Some("gha-token".to_owned()),
+            tenant_id: Some(saved_tenant_id),
+            policy_profile_id: Some(saved_policy_profile_id),
+        })
+        .unwrap();
+
+        let server = thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buffer = [0_u8; 4096];
+                let bytes_read = stream.read(&mut buffer).unwrap();
+                let request = String::from_utf8_lossy(&buffer[..bytes_read]);
+                assert!(request.contains(&format!("\"tenant_id\":\"{override_tenant_id}\"")));
+                assert!(!request.contains(&format!("\"tenant_id\":\"{saved_tenant_id}\"")));
+                assert!(request.contains(&format!(
+                    "\"policy_profile_id\":\"{override_policy_profile_id}\""
+                )));
+                assert!(!request.contains(&format!(
+                    "\"policy_profile_id\":\"{saved_policy_profile_id}\""
+                )));
+
+                let response = serde_json::json!({
+                    "tenant_id": override_tenant_id,
+                    "policy_profile_id": override_policy_profile_id,
+                    "findings": [{
+                        "coordinate": {
+                            "ecosystem": "githubactions",
+                            "name": "checkout",
+                            "version": "v4",
+                            "namespace": "actions"
+                        },
+                        "decision": "BLOCK_KNOWN_MALICIOUS",
+                        "trace_id": "cli-trace-override",
+                        "rationale": ["fixture block"],
+                        "create_analysis_job": false
+                    }]
+                });
+                let body = serde_json::to_vec(&response).unwrap();
+                stream
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            body.len()
+                        )
+                        .as_bytes(),
+                    )
+                    .unwrap();
+                stream.write_all(&body).unwrap();
+            }
+        });
+
+        let exit_code = run([
+            OsString::from("aedo"),
+            OsString::from("scan"),
+            OsString::from("github-actions"),
+            OsString::from("--workflow-dir"),
+            dir.path().as_os_str().to_os_string(),
+            OsString::from("--tenant-id"),
+            OsString::from(override_tenant_id.to_string()),
+            OsString::from("--policy-profile-id"),
+            OsString::from(override_policy_profile_id.to_string()),
+            OsString::from("--fail-on"),
+            OsString::from("block"),
+        ])
+        .unwrap();
+
+        assert_eq!(exit_code, 1);
+
+        server.join().unwrap();
+        unsafe {
+            env::remove_var(CONFIG_OVERRIDE_ENV);
+        }
     }
 
     #[test]

@@ -112,10 +112,13 @@ Use this matrix as the canonical summary for phase-gated platform support. Compo
 
 - [Authentication and identity](auth-and-identity.md)
 - [Policy and decisions](policy-and-decisions.md)
+- [Policy DSL migration notes](policy-dsl-migration-notes.md)
 - [Data and storage](data-and-storage.md)
+- [Vector store scale-out path](vector-store-scale-out.md)
 - [External integrations and feeds](external-integrations.md)
 - [Security boundaries](security-boundaries.md)
 - [Deployment and operations](deployment-and-operations.md)
+- [LLM-as-judge Langfuse evaluation](llm-as-judge-langfuse-evaluation.md)
 
 ## Architecture Decisions
 

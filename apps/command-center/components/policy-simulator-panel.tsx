@@ -2,17 +2,20 @@
 
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { motion } from "framer-motion";
-import { AlertTriangle, Gauge, RefreshCw, Sparkles } from "lucide-react";
+import { AlertTriangle, FileText, Gauge, RefreshCw, ShieldCheck, Sparkles } from "lucide-react";
 import { useMemo, useState } from "react";
 
 import type {
   PolicyDecisionCounts,
   PolicyProfileSummary,
   PolicySimulationRequest,
+  PolicyScorecardThresholds,
 } from "@aegiscudo/shared-types";
 
 import {
+  fetchPolicyScorecardThresholds,
   fetchPolicyProfiles,
+  fetchTenantOpenVexDocuments,
   getDefaultTenantId,
   simulatePolicyReplay,
 } from "@/lib/control-plane";
@@ -31,6 +34,18 @@ const ECOSYSTEM_OPTIONS: Array<{ value: SimulatorEcosystem; label: string }> = [
 
 const LOOKBACK_OPTIONS = [7, 14, 30] as const;
 const EMPTY_PROFILES: PolicyProfileSummary[] = [];
+
+const SCORECARD_CHECK_LABELS: Record<keyof Omit<PolicyScorecardThresholds, "policy_profile_id" | "policy_version_id">, string> = {
+  code_review: "Code Review",
+  branch_protection: "Branch Protection",
+  ci_cd: "CI / CD",
+  maintained: "Maintained",
+  signed_releases: "Signed Releases",
+};
+
+const SCORECARD_CHECK_KEYS = Object.keys(SCORECARD_CHECK_LABELS) as Array<
+  keyof typeof SCORECARD_CHECK_LABELS
+>;
 
 function aggregateCounts(counts: PolicyDecisionCounts) {
   return {
@@ -95,6 +110,21 @@ export function PolicySimulatorPanel() {
     () => profiles.find((profile) => profile.id === activeProfileId) ?? null,
     [activeProfileId, profiles],
   );
+
+  const scorecardQuery = useQuery({
+    queryKey: ["scorecard-thresholds", tenantId, activeProfileId],
+    queryFn: () => fetchPolicyScorecardThresholds(tenantId, activeProfileId),
+    staleTime: 60_000,
+    enabled: Boolean(activeProfileId),
+  });
+
+  const vexQuery = useQuery({
+    queryKey: ["openvex-documents", tenantId],
+    queryFn: () => fetchTenantOpenVexDocuments(tenantId),
+    staleTime: 60_000,
+  });
+  const vexDocumentCount = vexQuery.data?.length ?? 0;
+  const vexStatementCount = vexQuery.data?.reduce((acc, doc) => acc + doc.statement_count, 0) ?? 0;
 
   const summary = replayMutation.data
     ? {
@@ -233,6 +263,65 @@ export function PolicySimulatorPanel() {
                 <span className="font-mono">{selectedProfile.latest_version}</span>.
               </div>
             ) : null}
+
+            {/* Scorecard thresholds context */}
+            {scorecardQuery.data ? (
+              <div
+                aria-label="Scorecard thresholds in effect for this simulation"
+                className="mt-3 rounded-md border border-(--color-border) bg-white/3 px-4 py-3"
+              >
+                <div className="mb-2 flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.15em] text-(--color-muted)">
+                  <ShieldCheck aria-hidden="true" size={13} className="text-green-400" />
+                  Scorecard thresholds in effect
+                </div>
+                <div className="flex flex-wrap gap-3">
+                  {SCORECARD_CHECK_KEYS
+                    .filter((key) => scorecardQuery.data![key].enabled)
+                    .map((key) => {
+                      const threshold = scorecardQuery.data![key];
+                      return (
+                        <div
+                          key={key}
+                          className="rounded border border-(--color-border) bg-white/4 px-2.5 py-1.5 text-xs"
+                        >
+                          <span className="font-medium text-(--color-text)">{SCORECARD_CHECK_LABELS[key]}</span>
+                          <span className="ml-1.5 text-(--color-muted)">
+                            min {threshold.min_score} · {threshold.action}
+                          </span>
+                        </div>
+                      );
+                    })}
+                  {SCORECARD_CHECK_KEYS.every((key) => !scorecardQuery.data![key].enabled) ? (
+                    <span className="text-xs text-(--color-muted)">No Scorecard checks are enabled for this profile.</span>
+                  ) : null}
+                </div>
+              </div>
+            ) : null}
+
+            {/* VEX suppression advisory */}
+            <div
+              aria-label="VEX suppression status"
+              className="mt-3 rounded-md border border-(--color-border) bg-white/3 px-4 py-3 text-xs text-(--color-muted)"
+            >
+              <div className="mb-1 flex items-center gap-2 font-semibold uppercase tracking-[0.15em]">
+                <FileText aria-hidden="true" size={13} className="text-yellow-400" />
+                VEX suppression
+              </div>
+              {vexQuery.isLoading ? (
+                <span>Loading VEX state…</span>
+              ) : vexQuery.error ? (
+                <span>Could not load VEX documents.</span>
+              ) : vexDocumentCount === 0 ? (
+                <span>No OpenVEX documents are imported for this tenant. VEX suppression is inactive.</span>
+              ) : (
+                <span>
+                  <span className="font-medium text-(--color-text)">{vexDocumentCount}</span> document{vexDocumentCount !== 1 ? "s" : ""} imported
+                  {" "}({vexStatementCount} statement{vexStatementCount !== 1 ? "s" : ""}).
+                  {" "}Suppression is <span className="font-medium text-yellow-400">not yet active</span> in this simulation —
+                  {" "}component identity matching is pending.
+                </span>
+              )}
+            </div>
 
             {replayMutation.error ? (
               <div className="mt-4 flex items-center gap-2 rounded-md border border-red-900/30 bg-red-900/10 px-4 py-3 text-sm status-block">

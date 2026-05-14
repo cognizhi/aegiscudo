@@ -13,6 +13,7 @@ from ai_analyst.finalizer import (
     ProcessNextFinalizationJobResponse,
     build_final_analysis_summary,
     process_next_finalization_job,
+    summarize_historical_case,
 )
 
 
@@ -133,6 +134,85 @@ def test_build_final_analysis_summary_treats_failed_only_sandbox_run_as_missing_
 
     assert summary.recommended_action == PolicyDecision.ALLOW_WITH_WARNING
     assert "Sandbox evidence is missing for this artifact." in summary.payload["limitations"]
+
+
+def test_build_final_analysis_summary_includes_historical_similar_cases() -> None:
+    similar_case = {
+        "artifact_id": str(uuid4()),
+        "analysis_job_id": str(uuid4()),
+        "distance": 0.1182,
+        "package_coordinate": {
+            "ecosystem": "npm",
+            "namespace": None,
+            "name": "left-pad",
+            "version": "1.3.0",
+        },
+        "recommended_action": PolicyDecision.REQUIRE_HITL_APPROVAL.value,
+        "confidence": "medium",
+        "indicator_summaries": ["curl download before shell execution"],
+        "created_at": "2026-05-14T12:00:00+00:00",
+    }
+
+    summary = build_final_analysis_summary(
+        {
+            "static_reports": [],
+            "sandbox_runs": [],
+            "ai_explanation": None,
+            "vulnerabilities": [],
+            "malware_matches": [],
+            "similar_cases": [similar_case],
+        }
+    )
+
+    assert summary.payload["historical_similar_cases"] == [similar_case]
+
+
+def test_summarize_historical_case_extracts_indicator_preview() -> None:
+    artifact_id = uuid4()
+    analysis_job_id = uuid4()
+
+    summary = summarize_historical_case(
+        {
+            "artifact_id": artifact_id,
+            "analysis_job_id": analysis_job_id,
+            "distance": 0.0314159,
+            "ecosystem": "cargo",
+            "namespace": None,
+            "package_name": "suspicious-crate",
+            "package_version": "0.4.2",
+            "recommended_action": PolicyDecision.BLOCK_POLICY_VIOLATION.value,
+            "confidence": "high",
+            "created_at": "2026-05-14T13:00:00+00:00",
+            "report": {
+                "indicators": [
+                    {"summary": "spawns hidden shell"},
+                    {"summary": "downloads payload from pastebin"},
+                    {"summary": "writes persistence marker"},
+                    {"summary": "extra indicator that should be dropped"},
+                ]
+            },
+        }
+    )
+
+    assert summary == {
+        "artifact_id": str(artifact_id),
+        "analysis_job_id": str(analysis_job_id),
+        "distance": 0.0314,
+        "package_coordinate": {
+            "ecosystem": "cargo",
+            "namespace": None,
+            "name": "suspicious-crate",
+            "version": "0.4.2",
+        },
+        "recommended_action": PolicyDecision.BLOCK_POLICY_VIOLATION.value,
+        "confidence": "high",
+        "indicator_summaries": [
+            "spawns hidden shell",
+            "downloads payload from pastebin",
+            "writes persistence marker",
+        ],
+        "created_at": "2026-05-14T13:00:00+00:00",
+    }
 
 
 @pytest.mark.asyncio

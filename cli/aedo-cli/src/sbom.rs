@@ -194,16 +194,70 @@ pub(crate) fn load_sbom_document(
     lockfile: Option<&Path>,
     requirements: Option<&Path>,
 ) -> anyhow::Result<SbomDocument> {
-    match (lockfile, requirements) {
-        (Some(_), Some(_)) => {
-            anyhow::bail!("choose either --lockfile or --requirements when generating an SBOM")
-        }
-        (Some(path), None) => load_lockfile_sbom(path),
-        (None, Some(path)) => load_requirements_sbom(path),
-        (None, None) => {
-            anyhow::bail!("aedo sbom generate requires either --lockfile or --requirements")
-        }
+    load_sbom_document_from_inputs(lockfile, requirements, None)
+}
+
+pub(crate) fn load_sbom_document_from_inputs(
+    lockfile: Option<&Path>,
+    requirements: Option<&Path>,
+    dependency_tree: Option<&Path>,
+) -> anyhow::Result<SbomDocument> {
+    let selected_inputs = [
+        lockfile.is_some(),
+        requirements.is_some(),
+        dependency_tree.is_some(),
+    ]
+    .into_iter()
+    .filter(|selected| *selected)
+    .count();
+
+    if selected_inputs > 1 {
+        anyhow::bail!(
+            "choose exactly one of --lockfile, --requirements, or --dependency-tree when generating an SBOM"
+        );
     }
+
+    match (lockfile, requirements, dependency_tree) {
+        (Some(path), None, None) => load_lockfile_sbom(path),
+        (None, Some(path), None) => load_requirements_sbom(path),
+        (None, None, Some(path)) => load_maven_dependency_tree_sbom(path),
+        (None, None, None) => anyhow::bail!(
+            "aedo sbom generate requires either --lockfile, --requirements, or --dependency-tree"
+        ),
+        _ => unreachable!("multiple SBOM input modes should be rejected above"),
+    }
+}
+
+pub(crate) fn parse_maven_coordinate(coord: &str) -> Option<(String, String, String)> {
+    let parts: Vec<&str> = coord.splitn(7, ':').collect();
+    // Expected formats:
+    //   groupId:artifactId:type:version                      (4 parts, root)
+    //   groupId:artifactId:type:version:scope                (5 parts)
+    //   groupId:artifactId:type:classifier:version:scope     (6 parts)
+    if parts.len() < 4 {
+        return None;
+    }
+    let group_id = parts[0].trim();
+    let artifact_id = parts[1].trim();
+    let version = if parts.len() >= 6 {
+        parts[4].trim()
+    } else {
+        parts[3].trim()
+    };
+    if group_id.is_empty() || artifact_id.is_empty() || version.is_empty() {
+        return None;
+    }
+    Some((group_id.to_owned(), artifact_id.to_owned(), version.to_owned()))
+}
+
+fn maven_coordinate_has_classifier(coord: &str) -> bool {
+    let parts: Vec<&str> = coord.splitn(7, ':').collect();
+    parts.len() >= 6 && !parts[3].trim().is_empty()
+}
+
+fn maven_coordinate_has_default_dependency_type(coord: &str) -> bool {
+    let parts: Vec<&str> = coord.splitn(7, ':').collect();
+    parts.get(2).is_some_and(|value| value.trim() == "jar")
 }
 
 pub(crate) fn render_sbom(document: &SbomDocument, format: SbomFormat) -> anyhow::Result<String> {
@@ -740,6 +794,196 @@ fn load_requirements_sbom(path: &Path) -> anyhow::Result<SbomDocument> {
     dependency_map.insert(root.bom_ref.clone(), root_dependencies);
 
     Ok(finalize_document(path, root, components, dependency_map))
+}
+
+fn load_maven_dependency_tree_sbom(path: &Path) -> anyhow::Result<SbomDocument> {
+    let contents =
+        fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    let mut root: Option<SbomRoot> = None;
+    let mut components = BTreeMap::new();
+    let mut dependency_map = BTreeMap::new();
+    let mut parent_stack = Vec::new();
+
+    for raw_line in contents.lines() {
+        let Some(line) = normalize_maven_dependency_tree_line(raw_line) else {
+            continue;
+        };
+
+        if line.is_empty()
+            || line.starts_with("BUILD")
+            || line.starts_with("--------")
+            || line.starts_with("Total time")
+            || line.starts_with("Finished at")
+            || line.starts_with("Scanning for projects")
+            || line.starts_with("--- ")
+        {
+            continue;
+        }
+
+        let Some((depth, coordinate_text)) = maven_dependency_tree_entry(line) else {
+            let trimmed = line.trim();
+            if !is_bare_maven_coordinate_line(trimmed) {
+                continue;
+            }
+            if !maven_coordinate_has_default_dependency_type(trimmed) {
+                anyhow::bail!(
+                    "unsupported Maven non-jar root type in {}: {}",
+                    path.display(),
+                    trimmed
+                );
+            }
+            if maven_coordinate_has_classifier(trimmed) {
+                anyhow::bail!(
+                    "unsupported Maven classifier-bearing root in {}: {}",
+                    path.display(),
+                    trimmed
+                );
+            }
+            let Some((group_id, artifact_id, version)) = parse_maven_coordinate(trimmed) else {
+                continue;
+            };
+
+            if let Some(existing_root) = root.as_ref() {
+                anyhow::bail!(
+                    "unsupported multi-module Maven dependency tree in {}: encountered additional top-level module {} after root {}",
+                    path.display(),
+                    PackageCoordinate::new(
+                        PackageEcosystem::Maven,
+                        artifact_id,
+                        Some(version),
+                        Some(group_id),
+                    )
+                    .purl(),
+                    existing_root.bom_ref,
+                );
+            }
+
+            let sbom_root = build_maven_root(path, &group_id, &artifact_id, &version);
+            dependency_map.insert(sbom_root.bom_ref.clone(), BTreeSet::new());
+            parent_stack.push(sbom_root.bom_ref.clone());
+            root = Some(sbom_root);
+            continue;
+        };
+
+        let Some(root_ref) = root.as_ref().map(|root| root.bom_ref.clone()) else {
+            continue;
+        };
+        if is_conflict_omitted_maven_dependency_tree_entry(coordinate_text) {
+            continue;
+        }
+        if !maven_coordinate_has_default_dependency_type(coordinate_text) {
+            anyhow::bail!(
+                "unsupported Maven non-jar dependency type in {}: {}",
+                path.display(),
+                coordinate_text
+            );
+        }
+        if maven_coordinate_has_classifier(coordinate_text) {
+            anyhow::bail!(
+                "unsupported Maven classifier-bearing dependency in {}: {}",
+                path.display(),
+                coordinate_text
+            );
+        }
+        let Some((group_id, artifact_id, version)) = parse_maven_coordinate(coordinate_text) else {
+            continue;
+        };
+        let coordinate = PackageCoordinate::new(
+            PackageEcosystem::Maven,
+            artifact_id,
+            Some(version),
+            Some(group_id),
+        );
+        let reference = coordinate.purl();
+        components
+            .entry(reference.clone())
+            .or_insert_with(|| build_maven_component(reference.clone(), coordinate.clone()));
+        dependency_map.entry(reference.clone()).or_insert_with(BTreeSet::new);
+
+        if depth > parent_stack.len() {
+            anyhow::bail!(
+                "malformed Maven dependency tree in {}: dependency depth skipped a parent",
+                path.display()
+            );
+        }
+
+        let parent_ref = if depth == 1 {
+            root_ref
+        } else {
+            parent_stack[depth - 1].clone()
+        };
+        dependency_map
+            .entry(parent_ref)
+            .or_insert_with(BTreeSet::new)
+            .insert(reference.clone());
+
+        parent_stack.truncate(depth);
+        parent_stack.push(reference);
+    }
+
+    let root = root.ok_or_else(|| {
+        anyhow::anyhow!(
+            "no Maven project coordinate found in dependency tree {}",
+            path.display()
+        )
+    })?;
+
+    Ok(finalize_document(
+        path,
+        root,
+        components.into_values().collect(),
+        dependency_map,
+    ))
+}
+
+fn normalize_maven_dependency_tree_line(raw_line: &str) -> Option<&str> {
+    let trimmed = raw_line.trim_end();
+    if trimmed.starts_with("[WARNING]")
+        || trimmed.starts_with("[ERROR]")
+        || trimmed.starts_with("[DEBUG]")
+    {
+        return None;
+    }
+
+    Some(
+        trimmed
+            .strip_prefix("[INFO]")
+            .map(|value| value.strip_prefix(' ').unwrap_or(value))
+            .unwrap_or(trimmed),
+    )
+}
+
+fn is_bare_maven_coordinate_line(line: &str) -> bool {
+    !line.chars().any(char::is_whitespace) && parse_maven_coordinate(line).is_some()
+}
+
+fn is_conflict_omitted_maven_dependency_tree_entry(line: &str) -> bool {
+    line.contains("omitted for conflict")
+}
+
+fn maven_dependency_tree_entry(line: &str) -> Option<(usize, &str)> {
+    let mut depth_segments = 0usize;
+    let mut remainder = line;
+
+    loop {
+        if let Some(next) = remainder.strip_prefix("|  ") {
+            depth_segments += 1;
+            remainder = next;
+            continue;
+        }
+        if let Some(next) = remainder.strip_prefix("   ") {
+            depth_segments += 1;
+            remainder = next;
+            continue;
+        }
+        if let Some(next) = remainder.strip_prefix("+- ") {
+            return Some((depth_segments + 1, next.trim()));
+        }
+        if let Some(next) = remainder.strip_prefix("\\- ") {
+            return Some((depth_segments + 1, next.trim()));
+        }
+        return None;
+    }
 }
 
 fn dedupe_requirements_entries(entries: Vec<RequirementsEntry>) -> Vec<RequirementsEntry> {
@@ -1410,7 +1654,7 @@ fn collect_requirements_entries(
                 })?;
             continue;
         }
-        if let Some(name) = parse_requirements_editable_name(trimmed) {
+        if let Some(name) = parse_requirements_editable_name(trimmed, path) {
             entries.push(RequirementsEntry {
                 name,
                 version: None,
@@ -1678,7 +1922,7 @@ fn parse_requirements_constraint(line: &str) -> Option<&str> {
     (!include.is_empty()).then_some(include)
 }
 
-fn parse_requirements_editable_name(line: &str) -> Option<String> {
+fn parse_requirements_editable_name(line: &str, requirements_path: &Path) -> Option<String> {
     let spec = if let Some(value) = line.strip_prefix("-e") {
         value
     } else if let Some(value) = line.strip_prefix("--editable") {
@@ -1691,9 +1935,146 @@ fn parse_requirements_editable_name(line: &str) -> Option<String> {
     let egg = spec
         .split("#egg=")
         .nth(1)
-        .or_else(|| spec.split("&egg=").nth(1))?;
-    let egg = egg.split(['&', ' ', '\t']).next().unwrap_or(egg).trim();
-    normalize_requirements_name(egg)
+        .or_else(|| spec.split("&egg=").nth(1));
+    if let Some(egg) = egg {
+        let egg = egg.split(['&', ' ', '\t']).next().unwrap_or(egg).trim();
+        return normalize_requirements_name(egg);
+    }
+
+    editable_local_project_name(spec, requirements_path)
+}
+
+fn editable_local_project_name(spec: &str, requirements_path: &Path) -> Option<String> {
+    let spec = spec.split([' ', '\t']).next().unwrap_or(spec).trim();
+    let spec = spec.split(';').next().unwrap_or(spec).trim();
+    let spec = normalize_local_editable_spec(spec)?;
+    let candidate = if spec.is_absolute() {
+        spec
+    } else {
+        requirements_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join(spec)
+    };
+    if !candidate.is_dir() {
+        return None;
+    }
+
+    editable_project_name_from_pyproject(&candidate)
+        .or_else(|| editable_project_name_from_setup_cfg(&candidate))
+}
+
+fn normalize_local_editable_spec(spec: &str) -> Option<PathBuf> {
+    if spec.is_empty() {
+        return None;
+    }
+
+    let spec = strip_local_editable_path_extras(spec).trim();
+    if spec.is_empty() {
+        return None;
+    }
+
+    if spec.starts_with("file://") {
+        return reqwest::Url::parse(spec).ok()?.to_file_path().ok();
+    }
+
+    let raw_spec = if let Some(path) = spec.strip_prefix("file:") {
+        percent_decode_local_editable_path(path)?
+    } else {
+        if spec.contains("://")
+            || spec.starts_with("git+")
+            || spec.starts_with("hg+")
+            || spec.starts_with("svn+")
+            || spec.starts_with("bzr+")
+        {
+            return None;
+        }
+        spec.to_owned()
+    };
+
+    Some(PathBuf::from(raw_spec))
+}
+
+fn percent_decode_local_editable_path(path: &str) -> Option<String> {
+    let bytes = path.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0usize;
+
+    while index < bytes.len() {
+        if bytes[index] == b'%' {
+            if index + 2 >= bytes.len() {
+                return None;
+            }
+            let hex = std::str::from_utf8(&bytes[index + 1..index + 3]).ok()?;
+            let value = u8::from_str_radix(hex, 16).ok()?;
+            decoded.push(value);
+            index += 3;
+            continue;
+        }
+
+        decoded.push(bytes[index]);
+        index += 1;
+    }
+
+    String::from_utf8(decoded).ok()
+}
+
+fn strip_local_editable_path_extras(spec: &str) -> &str {
+    if spec.ends_with(']') {
+        if let Some(index) = spec.rfind('[') {
+            return &spec[..index];
+        }
+    }
+    spec
+}
+
+fn editable_project_name_from_pyproject(project_root: &Path) -> Option<String> {
+    let contents = fs::read_to_string(project_root.join("pyproject.toml")).ok()?;
+    let document: toml::Value = toml::from_str(&contents).ok()?;
+
+    document
+        .get("project")
+        .and_then(|project| project.get("name"))
+        .and_then(|value| value.as_str())
+        .and_then(normalize_requirements_name)
+        .or_else(|| {
+            document
+                .get("tool")
+                .and_then(|tool| tool.get("poetry"))
+                .and_then(|poetry| poetry.get("name"))
+                .and_then(|value| value.as_str())
+                .and_then(normalize_requirements_name)
+        })
+}
+
+fn editable_project_name_from_setup_cfg(project_root: &Path) -> Option<String> {
+    let contents = fs::read_to_string(project_root.join("setup.cfg")).ok()?;
+    let mut in_metadata = false;
+
+    for raw_line in contents.lines() {
+        let trimmed = raw_line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with(';') {
+            continue;
+        }
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            in_metadata = trimmed.eq_ignore_ascii_case("[metadata]");
+            continue;
+        }
+        if !in_metadata {
+            continue;
+        }
+        let Some((key, value)) = trimmed
+            .split_once('=')
+            .or_else(|| trimmed.split_once(':'))
+        else {
+            continue;
+        };
+        if key.trim().eq_ignore_ascii_case("name") {
+            return normalize_requirements_name(value.trim());
+        }
+    }
+
+    None
 }
 
 fn build_npm_root(path: &Path, raw_name: Option<String>, version: Option<String>) -> SbomRoot {
@@ -2005,6 +2386,24 @@ fn build_generic_root(path: &Path, ecosystem: Option<PackageEcosystem>) -> SbomR
     )
 }
 
+fn build_maven_root(path: &Path, group_id: &str, artifact_id: &str, version: &str) -> SbomRoot {
+    let coordinate = PackageCoordinate::new(
+        PackageEcosystem::Maven,
+        artifact_id.to_owned(),
+        Some(version.to_owned()),
+        Some(group_id.to_owned()),
+    );
+    let purl = coordinate.purl();
+    build_root(
+        coordinate.name,
+        coordinate.namespace,
+        coordinate.version,
+        Some(purl),
+        Some(PackageEcosystem::Maven),
+        path,
+    )
+}
+
 fn build_root(
     name: String,
     namespace: Option<String>,
@@ -2072,6 +2471,18 @@ fn build_cargo_component(
         source: source.map(str::to_owned),
         integrity,
         hash,
+        decision: None,
+        decision_timestamp: None,
+    }
+}
+
+fn build_maven_component(reference: String, coordinate: PackageCoordinate) -> SbomComponent {
+    SbomComponent {
+        reference,
+        coordinate,
+        source: None,
+        integrity: None,
+        hash: None,
         decision: None,
         decision_timestamp: None,
     }
@@ -2497,6 +2908,26 @@ checksum = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
         .unwrap();
 
         let document = load_sbom_document(Some(path.as_path()), None).unwrap();
+        serde_json::from_str(&render_sbom(&document, format).unwrap()).unwrap()
+    }
+
+    fn render_sample_maven_dependency_tree(format: SbomFormat) -> Value {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("dependency-tree.txt");
+        fs::write(
+            &path,
+            r#"[INFO] com.example:demo-app:jar:1.0.0
+[INFO] +- org.springframework:spring-core:jar:6.1.0:compile
+[INFO] |  \- org.springframework:spring-jcl:jar:6.1.0:compile
+[INFO] \- com.fasterxml.jackson.core:jackson-databind:jar:2.17.2:compile
+[INFO]    +- com.fasterxml.jackson.core:jackson-annotations:jar:2.17.2:compile
+[INFO]    \- com.fasterxml.jackson.core:jackson-core:jar:2.17.2:compile
+"#,
+        )
+        .unwrap();
+
+        let document =
+            load_sbom_document_from_inputs(None, None, Some(path.as_path())).unwrap();
         serde_json::from_str(&render_sbom(&document, format).unwrap()).unwrap()
     }
 
@@ -3398,6 +3829,272 @@ checksum = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
     }
 
     #[test]
+    fn maven_sbom_preserves_dependency_tree_relationships() {
+        let rendered = render_sample_maven_dependency_tree(SbomFormat::CyclonedxJson);
+        let components = rendered["components"].as_array().unwrap();
+        let root = &rendered["metadata"]["component"];
+        let root_ref = root["bom-ref"].as_str().unwrap();
+        let dependencies = rendered["dependencies"].as_array().unwrap();
+        let spring_core_ref =
+            find_component_ref_by_purl(components, "pkg:maven/org.springframework/spring-core@6.1.0");
+        let spring_jcl_ref =
+            find_component_ref_by_purl(components, "pkg:maven/org.springframework/spring-jcl@6.1.0");
+        let databind_ref = find_component_ref_by_purl(
+            components,
+            "pkg:maven/com.fasterxml.jackson.core/jackson-databind@2.17.2",
+        );
+        let annotations_ref = find_component_ref_by_purl(
+            components,
+            "pkg:maven/com.fasterxml.jackson.core/jackson-annotations@2.17.2",
+        );
+        let core_ref = find_component_ref_by_purl(
+            components,
+            "pkg:maven/com.fasterxml.jackson.core/jackson-core@2.17.2",
+        );
+
+        assert_eq!(root["purl"], "pkg:maven/com.example/demo-app@1.0.0");
+        assert_dependency(dependencies, root_ref, &[databind_ref, spring_core_ref]);
+        assert_dependency(dependencies, spring_core_ref, &[spring_jcl_ref]);
+        assert_dependency(dependencies, databind_ref, &[annotations_ref, core_ref]);
+    }
+
+    #[test]
+    fn maven_sbom_output_validates_against_official_schemas() {
+        let cyclonedx_17 = render_sample_maven_dependency_tree(SbomFormat::CyclonedxJson);
+        let cyclonedx_16 = render_sample_maven_dependency_tree(SbomFormat::Cyclonedx16Json);
+        let spdx_23 = render_sample_maven_dependency_tree(SbomFormat::Spdx23Json);
+
+        validate_instance_against_schema(cyclonedx_17_schema(), &cyclonedx_17, "CycloneDX 1.7");
+        validate_instance_against_schema(cyclonedx_16_schema(), &cyclonedx_16, "CycloneDX 1.6");
+        validate_instance_against_schema(spdx_23_schema(), &spdx_23, "SPDX 2.3");
+    }
+
+    #[test]
+    fn maven_sbom_rejects_missing_root_coordinate() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("dependency-tree.txt");
+        fs::write(
+            &path,
+            "[INFO] Scanning for projects...\n[INFO] +- org.springframework:spring-core:jar:6.1.0:compile\n",
+        )
+        .unwrap();
+
+        let error = load_sbom_document_from_inputs(None, None, Some(path.as_path())).unwrap_err();
+
+        assert!(error.to_string().contains("no Maven project coordinate found"));
+    }
+
+    #[test]
+    fn maven_sbom_rejects_multi_module_reactor_output() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("dependency-tree.txt");
+        fs::write(
+            &path,
+            "[INFO] com.example:module-a:jar:1.0.0\n[INFO] \\- org.springframework:spring-core:jar:6.1.0:compile\n[INFO] com.example:module-b:jar:1.0.0\n[INFO] \\- com.fasterxml.jackson.core:jackson-databind:jar:2.17.2:compile\n",
+        )
+        .unwrap();
+
+        let error = load_sbom_document_from_inputs(None, None, Some(path.as_path())).unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("unsupported multi-module Maven dependency tree"));
+    }
+
+    #[test]
+    fn maven_sbom_ignores_warning_lines_before_root_coordinate() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("dependency-tree.txt");
+        fs::write(
+            &path,
+            "[WARNING] The POM for org.example:broken:jar:1.2.3 is missing, no dependency information available\n[INFO] com.example:demo-app:jar:1.0.0\n[INFO] \\- org.springframework:spring-core:jar:6.1.0:compile\n",
+        )
+        .unwrap();
+
+        let document = load_sbom_document_from_inputs(None, None, Some(path.as_path())).unwrap();
+        let rendered: Value =
+            serde_json::from_str(&render_sbom(&document, SbomFormat::CyclonedxJson).unwrap())
+                .unwrap();
+        let components = rendered["components"].as_array().unwrap();
+
+        assert_eq!(
+            rendered["metadata"]["component"]["purl"],
+            "pkg:maven/com.example/demo-app@1.0.0"
+        );
+        assert!(components
+            .iter()
+            .any(|component| component["purl"] == "pkg:maven/org.springframework/spring-core@6.1.0"));
+    }
+
+    #[test]
+    fn maven_sbom_ignores_error_lines_before_root_coordinate() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("dependency-tree.txt");
+        fs::write(
+            &path,
+            "[ERROR] Failed to resolve plugin descriptor for org.example:broken-plugin:jar:1.2.3\n[INFO] com.example:demo-app:jar:1.0.0\n[INFO] \\- org.springframework:spring-core:jar:6.1.0:compile\n",
+        )
+        .unwrap();
+
+        let document = load_sbom_document_from_inputs(None, None, Some(path.as_path())).unwrap();
+        let rendered: Value =
+            serde_json::from_str(&render_sbom(&document, SbomFormat::CyclonedxJson).unwrap())
+                .unwrap();
+
+        assert_eq!(
+            rendered["metadata"]["component"]["purl"],
+            "pkg:maven/com.example/demo-app@1.0.0"
+        );
+    }
+
+    #[test]
+    fn maven_sbom_ignores_debug_lines_before_root_coordinate() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("dependency-tree.txt");
+        fs::write(
+            &path,
+            "[DEBUG] Using mirror central (https://repo1.maven.org/maven2) for org.example:broken:jar:1.2.3\n[INFO] com.example:demo-app:jar:1.0.0\n[INFO] \\- org.springframework:spring-core:jar:6.1.0:compile\n",
+        )
+        .unwrap();
+
+        let document = load_sbom_document_from_inputs(None, None, Some(path.as_path())).unwrap();
+        let rendered: Value =
+            serde_json::from_str(&render_sbom(&document, SbomFormat::CyclonedxJson).unwrap())
+                .unwrap();
+
+        assert_eq!(
+            rendered["metadata"]["component"]["purl"],
+            "pkg:maven/com.example/demo-app@1.0.0"
+        );
+    }
+
+    #[test]
+    fn maven_sbom_ignores_omitted_verbose_entries() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("dependency-tree.txt");
+        fs::write(
+            &path,
+            "[INFO] com.example:demo-app:jar:1.0.0\n[INFO] \\- org.springframework:spring-core:jar:6.1.0:compile\n[INFO]    \\- commons-logging:commons-logging:jar:1.1.1:compile (omitted for conflict with 1.2)\n",
+        )
+        .unwrap();
+
+        let document = load_sbom_document_from_inputs(None, None, Some(path.as_path())).unwrap();
+        let rendered: Value =
+            serde_json::from_str(&render_sbom(&document, SbomFormat::CyclonedxJson).unwrap())
+                .unwrap();
+        let components = rendered["components"].as_array().unwrap();
+        let spring_core_ref =
+            find_component_ref_by_purl(components, "pkg:maven/org.springframework/spring-core@6.1.0");
+        let dependencies = rendered["dependencies"].as_array().unwrap();
+
+        assert!(components
+            .iter()
+            .all(|component| component["purl"] != "pkg:maven/commons-logging/commons-logging@1.1.1"));
+        assert_dependency(dependencies, spring_core_ref, &[]);
+    }
+
+    #[test]
+    fn maven_sbom_preserves_duplicate_marker_edges() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("dependency-tree.txt");
+        fs::write(
+            &path,
+            "[INFO] com.example:demo-app:jar:1.0.0\n[INFO] +- commons-logging:commons-logging:jar:1.2:compile\n[INFO] \\- org.springframework:spring-core:jar:6.1.0:compile\n[INFO]    \\- commons-logging:commons-logging:jar:1.2:compile (*)\n",
+        )
+        .unwrap();
+
+        let document = load_sbom_document_from_inputs(None, None, Some(path.as_path())).unwrap();
+        let rendered: Value =
+            serde_json::from_str(&render_sbom(&document, SbomFormat::CyclonedxJson).unwrap())
+                .unwrap();
+        let components = rendered["components"].as_array().unwrap();
+        let commons_logging_ref = find_component_ref_by_purl(
+            components,
+            "pkg:maven/commons-logging/commons-logging@1.2",
+        );
+        let spring_core_ref =
+            find_component_ref_by_purl(components, "pkg:maven/org.springframework/spring-core@6.1.0");
+        let root_ref = rendered["metadata"]["component"]["bom-ref"]
+            .as_str()
+            .unwrap();
+        let dependencies = rendered["dependencies"].as_array().unwrap();
+
+        assert_dependency(dependencies, root_ref, &[commons_logging_ref, spring_core_ref]);
+        assert_dependency(dependencies, spring_core_ref, &[commons_logging_ref]);
+    }
+
+    #[test]
+    fn maven_sbom_rejects_classifier_bearing_dependencies() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("dependency-tree.txt");
+        fs::write(
+            &path,
+            "[INFO] com.example:demo-app:jar:1.0.0\n[INFO] \\- com.example:demo-lib:jar:sources:1.0.0:compile\n",
+        )
+        .unwrap();
+
+        let error = load_sbom_document_from_inputs(None, None, Some(path.as_path())).unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("unsupported Maven classifier-bearing dependency"));
+    }
+
+    #[test]
+    fn maven_sbom_rejects_non_jar_dependency_types() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("dependency-tree.txt");
+        fs::write(
+            &path,
+            "[INFO] com.example:demo-app:jar:1.0.0\n[INFO] \\- com.example:demo-bom:pom:1.0.0:compile\n",
+        )
+        .unwrap();
+
+        let error = load_sbom_document_from_inputs(None, None, Some(path.as_path())).unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("unsupported Maven non-jar dependency type"));
+    }
+
+    #[test]
+    fn maven_sbom_rejects_non_jar_root_types() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("dependency-tree.txt");
+        fs::write(
+            &path,
+            "[INFO] com.example:demo-parent:pom:1.0.0\n[INFO] \\- org.springframework:spring-core:jar:6.1.0:compile\n",
+        )
+        .unwrap();
+
+        let error = load_sbom_document_from_inputs(None, None, Some(path.as_path())).unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("unsupported Maven non-jar root type"));
+    }
+
+    #[test]
+    fn maven_sbom_rejects_multiple_input_modes() {
+        let dir = tempdir().unwrap();
+        let lockfile = dir.path().join("Cargo.lock");
+        let dependency_tree = dir.path().join("dependency-tree.txt");
+        fs::write(&lockfile, "version = 4\n").unwrap();
+        fs::write(&dependency_tree, "[INFO] com.example:demo-app:jar:1.0.0\n").unwrap();
+
+        let error = load_sbom_document_from_inputs(
+            Some(lockfile.as_path()),
+            None,
+            Some(dependency_tree.as_path()),
+        )
+        .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("choose exactly one of --lockfile, --requirements, or --dependency-tree"));
+    }
+
+    #[test]
     fn virtual_workspace_cargo_lock_output_validates_against_official_schemas() {
         let cyclonedx_17 = render_sample_virtual_workspace_cargo_lock(SbomFormat::CyclonedxJson);
         let cyclonedx_16 = render_sample_virtual_workspace_cargo_lock(SbomFormat::Cyclonedx16Json);
@@ -3974,6 +4671,256 @@ source = "git+https://example.invalid/serde?rev=deadbeef#deadbeef"
             .collect::<Vec<_>>();
 
         assert_eq!(purls, vec!["pkg:pypi/demo"]);
+    }
+
+    #[test]
+    fn editable_local_requirements_use_pyproject_name_for_sbom() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("requirements.txt");
+        fs::write(
+            dir.path().join("pyproject.toml"),
+            "[project]\nname = \"Demo-App\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        fs::write(&root, "-e .\n").unwrap();
+
+        let document = load_sbom_document(None, Some(root.as_path())).unwrap();
+        let rendered: Value =
+            serde_json::from_str(&render_sbom(&document, SbomFormat::CyclonedxJson).unwrap())
+                .unwrap();
+        let purls = rendered["components"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|component| component["purl"].as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(purls, vec!["pkg:pypi/demo-app"]);
+    }
+
+    #[test]
+    fn editable_local_requirements_with_extras_use_setup_cfg_name_for_sbom() {
+        let dir = tempdir().unwrap();
+        let package_dir = dir.path().join("pkg");
+        let root = dir.path().join("requirements.txt");
+        fs::create_dir_all(&package_dir).unwrap();
+        fs::write(package_dir.join("setup.cfg"), "[metadata]\nname = Demo_Sbom_Extras\n").unwrap();
+        fs::write(&root, "--editable ./pkg[test]\n").unwrap();
+
+        let document = load_sbom_document(None, Some(root.as_path())).unwrap();
+        let rendered: Value =
+            serde_json::from_str(&render_sbom(&document, SbomFormat::CyclonedxJson).unwrap())
+                .unwrap();
+        let purls = rendered["components"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|component| component["purl"].as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(purls, vec!["pkg:pypi/demo-sbom-extras"]);
+    }
+
+    #[test]
+    fn editable_local_requirements_use_setup_cfg_name_for_sbom_plain_path() {
+        let dir = tempdir().unwrap();
+        let package_dir = dir.path().join("pkg");
+        let root = dir.path().join("requirements.txt");
+        fs::create_dir_all(&package_dir).unwrap();
+        fs::write(package_dir.join("setup.cfg"), "[metadata]\nname = Demo_Sbom_Plain\n").unwrap();
+        fs::write(&root, "--editable ./pkg\n").unwrap();
+
+        let document = load_sbom_document(None, Some(root.as_path())).unwrap();
+        let rendered: Value =
+            serde_json::from_str(&render_sbom(&document, SbomFormat::CyclonedxJson).unwrap())
+                .unwrap();
+        let purls = rendered["components"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|component| component["purl"].as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(purls, vec!["pkg:pypi/demo-sbom-plain"]);
+    }
+
+    #[test]
+    fn editable_local_requirements_use_setup_cfg_colon_name_for_sbom() {
+        let dir = tempdir().unwrap();
+        let package_dir = dir.path().join("pkg");
+        let root = dir.path().join("requirements.txt");
+        fs::create_dir_all(&package_dir).unwrap();
+        fs::write(package_dir.join("setup.cfg"), "[metadata]\nname: Demo_Sbom_Colon\n").unwrap();
+        fs::write(&root, "--editable ./pkg\n").unwrap();
+
+        let document = load_sbom_document(None, Some(root.as_path())).unwrap();
+        let rendered: Value =
+            serde_json::from_str(&render_sbom(&document, SbomFormat::CyclonedxJson).unwrap())
+                .unwrap();
+        let purls = rendered["components"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|component| component["purl"].as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(purls, vec!["pkg:pypi/demo-sbom-colon"]);
+    }
+
+    #[test]
+    fn editable_file_url_requirements_use_pyproject_name_for_sbom() {
+        let dir = tempdir().unwrap();
+        let package_dir = dir.path().join("pkg");
+        let root = dir.path().join("requirements.txt");
+        fs::create_dir_all(&package_dir).unwrap();
+        fs::write(
+            package_dir.join("pyproject.toml"),
+            "[project]\nname = \"demo-sbom-file-url\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        fs::write(&root, format!("-e file://{}\n", package_dir.display())).unwrap();
+
+        let document = load_sbom_document(None, Some(root.as_path())).unwrap();
+        let rendered: Value =
+            serde_json::from_str(&render_sbom(&document, SbomFormat::CyclonedxJson).unwrap())
+                .unwrap();
+        let purls = rendered["components"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|component| component["purl"].as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(purls, vec!["pkg:pypi/demo-sbom-file-url"]);
+    }
+
+    #[test]
+    fn editable_file_relative_requirements_use_setup_cfg_name_for_sbom() {
+        let dir = tempdir().unwrap();
+        let package_dir = dir.path().join("pkg");
+        let root = dir.path().join("requirements.txt");
+        fs::create_dir_all(&package_dir).unwrap();
+        fs::write(package_dir.join("setup.cfg"), "[metadata]\nname = Demo_Sbom_File_Relative\n").unwrap();
+        fs::write(&root, "-e file:./pkg\n").unwrap();
+
+        let document = load_sbom_document(None, Some(root.as_path())).unwrap();
+        let rendered: Value =
+            serde_json::from_str(&render_sbom(&document, SbomFormat::CyclonedxJson).unwrap())
+                .unwrap();
+        let purls = rendered["components"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|component| component["purl"].as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(purls, vec!["pkg:pypi/demo-sbom-file-relative"]);
+    }
+
+    #[test]
+    fn editable_file_url_requirements_decode_percent_escapes_for_sbom() {
+        let dir = tempdir().unwrap();
+        let package_dir = dir.path().join("demo pkg");
+        let root = dir.path().join("requirements.txt");
+        fs::create_dir_all(&package_dir).unwrap();
+        fs::write(
+            package_dir.join("pyproject.toml"),
+            "[project]\nname = \"demo-sbom-percent\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        let encoded_path = package_dir.display().to_string().replace(' ', "%20");
+        fs::write(&root, format!("-e file://{}\n", encoded_path)).unwrap();
+
+        let document = load_sbom_document(None, Some(root.as_path())).unwrap();
+        let rendered: Value =
+            serde_json::from_str(&render_sbom(&document, SbomFormat::CyclonedxJson).unwrap())
+                .unwrap();
+        let purls = rendered["components"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|component| component["purl"].as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(purls, vec!["pkg:pypi/demo-sbom-percent"]);
+    }
+
+    #[test]
+    fn remote_editable_requirements_without_egg_are_ignored_for_sbom() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("requirements.txt");
+        fs::write(&root, "-e git+https://example.invalid/demo.git\n").unwrap();
+
+        let document = load_sbom_document(None, Some(root.as_path())).unwrap();
+        let rendered: Value =
+            serde_json::from_str(&render_sbom(&document, SbomFormat::CyclonedxJson).unwrap())
+                .unwrap();
+        let purls = rendered["components"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|component| component["purl"].as_str())
+            .collect::<Vec<_>>();
+
+        assert!(purls.is_empty());
+    }
+
+    #[test]
+    fn editable_nested_include_paths_resolve_relative_for_sbom() {
+        let dir = tempdir().unwrap();
+        let sub_dir = dir.path().join("sub");
+        let package_dir = dir.path().join("pkg");
+        let root = dir.path().join("requirements.txt");
+        let nested = sub_dir.join("requirements.txt");
+        fs::create_dir_all(&sub_dir).unwrap();
+        fs::create_dir_all(&package_dir).unwrap();
+        fs::write(
+            package_dir.join("pyproject.toml"),
+            "[project]\nname = \"demo-nested-sbom\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        fs::write(&root, "-r sub/requirements.txt\n").unwrap();
+        fs::write(&nested, "-e ../pkg\n").unwrap();
+
+        let document = load_sbom_document(None, Some(root.as_path())).unwrap();
+        let rendered: Value =
+            serde_json::from_str(&render_sbom(&document, SbomFormat::CyclonedxJson).unwrap())
+                .unwrap();
+        let purls = rendered["components"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|component| component["purl"].as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(purls, vec!["pkg:pypi/demo-nested-sbom"]);
+    }
+
+    #[test]
+    fn editable_local_requirements_prefer_egg_name_for_sbom() {
+        let dir = tempdir().unwrap();
+        let package_dir = dir.path().join("pkg");
+        let root = dir.path().join("requirements.txt");
+        fs::create_dir_all(&package_dir).unwrap();
+        fs::write(
+            package_dir.join("pyproject.toml"),
+            "[project]\nname = \"metadata-name\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        fs::write(&root, "-e ./pkg#egg=override-name\n").unwrap();
+
+        let document = load_sbom_document(None, Some(root.as_path())).unwrap();
+        let rendered: Value =
+            serde_json::from_str(&render_sbom(&document, SbomFormat::CyclonedxJson).unwrap())
+                .unwrap();
+        let purls = rendered["components"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|component| component["purl"].as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(purls, vec!["pkg:pypi/override-name"]);
     }
 
     #[test]

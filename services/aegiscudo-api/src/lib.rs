@@ -5,12 +5,14 @@ use aegiscudo_core::{
     PolicyMode, validate_audit_metadata,
 };
 use aegiscudo_protocol::{
-    DecisionRequest, DecisionResponse, NormalizedPackageRequest, PackageRequestKind,
+    DecisionQueryRequest, DecisionRequest, DecisionResponse, NormalizedPackageRequest,
+    NormalizedQueryRequest, PackageRequestKind,
 };
 use aegiscudo_telemetry::health;
 use axum::{
+    body::Body,
     Json, Router,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::{HeaderMap, HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
     routing::{get, patch, post, put},
@@ -30,7 +32,11 @@ const ACTOR_HEADER: &str = "x-aegiscudo-actor-id";
 const TRACE_HEADER: &str = "x-aegiscudo-trace-id";
 const RELOAD_TIMEOUT: Duration = Duration::from_millis(750);
 const DECISION_TIMEOUT: Duration = Duration::from_millis(1_500);
+const SBOM_SERVICE_CONNECT_TIMEOUT: Duration = Duration::from_millis(1_500);
+const SBOM_SERVICE_LIST_TIMEOUT: Duration = Duration::from_millis(1_500);
+const MAX_SBOM_LIST_LIMIT: u32 = 50;
 const DEFAULT_TRIAGE_COUNTER_URL: &str = "http://127.0.0.1:18001";
+const DEFAULT_SBOM_SERVICE_URL: &str = "http://127.0.0.1:8086";
 const DEFAULT_LOCAL_AUTH_TENANT_ID: &str = "018f4a6f-55d0-7000-8000-000000000001";
 const DEFAULT_MOCK_IDENTITY_ID: &str = "platform-admin";
 
@@ -63,6 +69,7 @@ pub struct AppState {
     pool: PgPool,
     reload_client: Option<ReloadClient>,
     decision_client: DecisionClient,
+    sbom_client: SbomServiceClient,
     auth_mode: AuthMode,
     local_auth_tenant_id: Uuid,
 }
@@ -105,8 +112,13 @@ enum DecisionClientInner {
     },
     #[cfg(test)]
     Test {
-        handler: Arc<
+        evaluate_handler: Arc<
             dyn Fn(DecisionRequest) -> Result<DecisionResponse, DecisionClientError> + Send + Sync,
+        >,
+        query_handler: Arc<
+            dyn Fn(DecisionQueryRequest) -> Result<DecisionResponse, DecisionClientError>
+                + Send
+                + Sync,
         >,
     },
 }
@@ -151,6 +163,14 @@ impl DecisionClient {
             .await
     }
 
+    async fn query(
+        &self,
+        request: DecisionQueryRequest,
+    ) -> Result<DecisionResponse, DecisionClientError> {
+        self.execute_query_request("/v1/decisions/query", request)
+            .await
+    }
+
     async fn execute_request(
         &self,
         path: &str,
@@ -184,7 +204,46 @@ impl DecisionClient {
                 }
             }
             #[cfg(test)]
-            DecisionClientInner::Test { handler } => handler(request),
+            DecisionClientInner::Test {
+                evaluate_handler, ..
+            } => evaluate_handler(request),
+        }
+    }
+
+    async fn execute_query_request(
+        &self,
+        path: &str,
+        request: DecisionQueryRequest,
+    ) -> Result<DecisionResponse, DecisionClientError> {
+        match &self.inner {
+            DecisionClientInner::Http { client, url } => {
+                let response = client
+                    .post(format!("{}{}", url.trim_end_matches('/'), path))
+                    .json(&request)
+                    .send()
+                    .await
+                    .map_err(|error| {
+                        tracing::warn!(error = %error, "triage-counter decision query failed");
+                        DecisionClientError::Unavailable
+                    })?;
+                if response.status().is_success() {
+                    return response.json().await.map_err(|error| {
+                        tracing::warn!(error = %error, "triage-counter decision query response was invalid");
+                        DecisionClientError::Unavailable
+                    });
+                }
+
+                let status = response.status();
+                let body = response.text().await.unwrap_or_default();
+                tracing::warn!(%status, body, "triage-counter rejected decision query");
+                match status {
+                    StatusCode::BAD_REQUEST => Err(DecisionClientError::InvalidRequest),
+                    StatusCode::NOT_FOUND => Err(DecisionClientError::NotFound),
+                    _ => Err(DecisionClientError::Unavailable),
+                }
+            }
+            #[cfg(test)]
+            DecisionClientInner::Test { query_handler, .. } => query_handler(request),
         }
     }
 
@@ -198,7 +257,28 @@ impl DecisionClient {
     {
         Self {
             inner: DecisionClientInner::Test {
-                handler: Arc::new(handler),
+                evaluate_handler: Arc::new(handler),
+                query_handler: Arc::new(|_| {
+                    panic!("decision client query should not be called in this test")
+                }),
+            },
+        }
+    }
+
+    #[cfg(test)]
+    fn new_query_test<F>(handler: F) -> Self
+    where
+        F: Fn(DecisionQueryRequest) -> Result<DecisionResponse, DecisionClientError>
+            + Send
+            + Sync
+            + 'static,
+    {
+        Self {
+            inner: DecisionClientInner::Test {
+                evaluate_handler: Arc::new(|_| {
+                    panic!("decision client evaluate should not be called in this test")
+                }),
+                query_handler: Arc::new(handler),
             },
         }
     }
@@ -211,6 +291,195 @@ pub enum DecisionClientError {
     #[error("policy profile or snapshot was not found")]
     NotFound,
     #[error("triage counter is unavailable")]
+    Unavailable,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct SbomServiceNtiaValidation {
+    valid: bool,
+    issues: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct SbomServiceDocumentSummary {
+    id: Uuid,
+    analysis_job_id: Option<Uuid>,
+    tenant_id: Option<Uuid>,
+    format: String,
+    source: String,
+    component_count: i32,
+    storage_size_bytes: i64,
+    created_at: DateTime<Utc>,
+    ntia_validation: SbomServiceNtiaValidation,
+}
+
+#[derive(Debug)]
+struct SbomServiceDownload {
+    body: Body,
+    headers: HeaderMap,
+}
+
+#[derive(Clone)]
+struct SbomServiceClient {
+    inner: SbomServiceClientInner,
+}
+
+#[derive(Clone)]
+enum SbomServiceClientInner {
+    Http {
+        client: reqwest::Client,
+        url: String,
+    },
+    #[cfg(test)]
+    Test {
+        list_handler: Arc<
+            dyn Fn(Uuid, Option<u32>) -> Result<Vec<SbomServiceDocumentSummary>, SbomServiceClientError>
+                + Send
+                + Sync,
+        >,
+        download_handler: Arc<
+            dyn Fn(Uuid, Uuid) -> Result<SbomServiceDownload, SbomServiceClientError>
+                + Send
+                + Sync,
+        >,
+    },
+}
+
+impl std::fmt::Debug for SbomServiceClient {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("SbomServiceClient(..)")
+    }
+}
+
+impl SbomServiceClient {
+    fn new(url: impl Into<String>) -> Result<Self, reqwest::Error> {
+        let client = reqwest::Client::builder()
+            .connect_timeout(SBOM_SERVICE_CONNECT_TIMEOUT)
+            .build()?;
+        Ok(Self {
+            inner: SbomServiceClientInner::Http {
+                client,
+                url: url.into(),
+            },
+        })
+    }
+
+    fn default_local() -> Self {
+        Self::new(DEFAULT_SBOM_SERVICE_URL)
+            .expect("default sbom-service client must initialize")
+    }
+
+    async fn list_tenant_sboms(
+        &self,
+        tenant_id: Uuid,
+        limit: Option<u32>,
+    ) -> Result<Vec<SbomServiceDocumentSummary>, SbomServiceClientError> {
+        match &self.inner {
+            SbomServiceClientInner::Http { client, url } => {
+                let mut endpoint = format!(
+                    "{}/v1/tenants/{tenant_id}/sboms",
+                    url.trim_end_matches('/')
+                );
+                if let Some(limit) = limit {
+                    endpoint.push_str(&format!("?limit={limit}"));
+                }
+                let request = client.get(endpoint).timeout(SBOM_SERVICE_LIST_TIMEOUT);
+                let response = request.send().await.map_err(|error| {
+                    tracing::warn!(error = %error, "sbom-service list request failed");
+                    SbomServiceClientError::Unavailable
+                })?;
+                if response.status().is_success() {
+                    return response.json().await.map_err(|error| {
+                        tracing::warn!(error = %error, "sbom-service list response was invalid");
+                        SbomServiceClientError::Unavailable
+                    });
+                }
+
+                let status = response.status();
+                let body = response.text().await.unwrap_or_default();
+                tracing::warn!(%status, body, "sbom-service rejected list request");
+                match status {
+                    StatusCode::BAD_REQUEST => Err(SbomServiceClientError::InvalidRequest),
+                    StatusCode::NOT_FOUND => Err(SbomServiceClientError::NotFound),
+                    _ => Err(SbomServiceClientError::Unavailable),
+                }
+            }
+            #[cfg(test)]
+            SbomServiceClientInner::Test { list_handler, .. } => list_handler(tenant_id, limit),
+        }
+    }
+
+    async fn download_tenant_sbom(
+        &self,
+        tenant_id: Uuid,
+        sbom_id: Uuid,
+    ) -> Result<SbomServiceDownload, SbomServiceClientError> {
+        match &self.inner {
+            SbomServiceClientInner::Http { client, url } => {
+                let response = client
+                    .get(format!(
+                        "{}/v1/tenants/{tenant_id}/sboms/{sbom_id}",
+                        url.trim_end_matches('/')
+                    ))
+                    .send()
+                    .await
+                    .map_err(|error| {
+                        tracing::warn!(error = %error, "sbom-service download request failed");
+                        SbomServiceClientError::Unavailable
+                    })?;
+                if response.status().is_success() {
+                    let headers = forwarded_download_headers(response.headers());
+                    let body = Body::from_stream(response.bytes_stream());
+                    return Ok(SbomServiceDownload {
+                        body,
+                        headers,
+                    });
+                }
+
+                let status = response.status();
+                let body = response.text().await.unwrap_or_default();
+                tracing::warn!(%status, body, "sbom-service rejected download request");
+                match status {
+                    StatusCode::BAD_REQUEST => Err(SbomServiceClientError::InvalidRequest),
+                    StatusCode::NOT_FOUND => Err(SbomServiceClientError::NotFound),
+                    _ => Err(SbomServiceClientError::Unavailable),
+                }
+            }
+            #[cfg(test)]
+            SbomServiceClientInner::Test {
+                download_handler, ..
+            } => download_handler(tenant_id, sbom_id),
+        }
+    }
+
+    #[cfg(test)]
+    fn new_test<FL, FD>(list_handler: FL, download_handler: FD) -> Self
+    where
+        FL: Fn(Uuid, Option<u32>) -> Result<Vec<SbomServiceDocumentSummary>, SbomServiceClientError>
+            + Send
+            + Sync
+            + 'static,
+        FD: Fn(Uuid, Uuid) -> Result<SbomServiceDownload, SbomServiceClientError>
+            + Send
+            + Sync
+            + 'static,
+    {
+        Self {
+            inner: SbomServiceClientInner::Test {
+                list_handler: Arc::new(list_handler),
+                download_handler: Arc::new(download_handler),
+            },
+        }
+    }
+}
+
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
+enum SbomServiceClientError {
+    #[error("sbom request is invalid")]
+    InvalidRequest,
+    #[error("sbom document was not found")]
+    NotFound,
+    #[error("sbom service is unavailable")]
     Unavailable,
 }
 
@@ -234,10 +503,25 @@ pub fn app_with_clients(
     reload_client: Option<ReloadClient>,
     decision_client: DecisionClient,
 ) -> Router {
+    app_with_clients_and_sbom_client(
+        pool,
+        reload_client,
+        decision_client,
+        SbomServiceClient::default_local(),
+    )
+}
+
+fn app_with_clients_and_sbom_client(
+    pool: PgPool,
+    reload_client: Option<ReloadClient>,
+    decision_client: DecisionClient,
+    sbom_client: SbomServiceClient,
+) -> Router {
     app_with_clients_and_auth_config(
         pool,
         reload_client,
         decision_client,
+        sbom_client,
         configured_auth_mode(),
         configured_local_auth_tenant_id(),
     )
@@ -247,6 +531,7 @@ fn app_with_clients_and_auth_config(
     pool: PgPool,
     reload_client: Option<ReloadClient>,
     decision_client: DecisionClient,
+    sbom_client: SbomServiceClient,
     auth_mode: AuthMode,
     local_auth_tenant_id: Uuid,
 ) -> Router {
@@ -254,6 +539,7 @@ fn app_with_clients_and_auth_config(
         pool,
         reload_client,
         decision_client,
+        sbom_client,
         auth_mode,
         local_auth_tenant_id,
     };
@@ -267,7 +553,12 @@ fn app_with_clients_and_auth_config(
         .route("/v1/auth/session/mock", put(set_mock_auth_session))
         .route("/v1/auth/mock-identities", get(list_mock_auth_identities))
         .route("/v1/decisions/evaluate", post(evaluate_decision))
+        .route(
+            "/v1/cli/github-actions/enrich",
+            post(enrich_cli_github_actions),
+        )
         .route("/v1/cli/scans", post(submit_cli_scan))
+        .route("/v1/cli/risk", post(submit_cli_risk))
         .route("/v1/cli/explain", post(explain_cli_package))
         .route(
             "/v1/tenants/{tenant_id}/analysis/request-timeline",
@@ -282,12 +573,33 @@ fn app_with_clients_and_auth_config(
             get(list_policy_profiles),
         )
         .route(
+            "/v1/tenants/{tenant_id}/policy-profiles/{policy_profile_id}/scorecard-thresholds",
+            get(get_policy_scorecard_thresholds),
+        )
+        .route(
             "/v1/tenants/{tenant_id}/policy-simulator/replay",
             post(simulate_policy_replay),
         )
         .route(
             "/v1/tenants/{tenant_id}/analysis/quarantine-queue",
             get(list_quarantine_queue),
+        )
+        .route("/v1/tenants/{tenant_id}/sboms", get(list_tenant_sboms))
+        .route(
+            "/v1/tenants/{tenant_id}/sboms/{sbom_id}",
+            get(download_tenant_sbom),
+        )
+        .route(
+            "/v1/tenants/{tenant_id}/deps-dev/packages",
+            get(list_deps_dev_packages),
+        )
+        .route(
+            "/v1/tenants/{tenant_id}/ioc-records",
+            get(list_ioc_records),
+        )
+        .route(
+            "/v1/tenants/{tenant_id}/github-actions/scan-results",
+            get(list_github_actions_scan_results),
         )
         .route(
             "/v1/tenants/{tenant_id}/artifacts/{artifact_id}/evidence",
@@ -645,6 +957,25 @@ struct ValidatedOpenVexStatement {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CliRiskRequest {
+    #[serde(default)]
+    pub tenant_id: Option<Uuid>,
+    pub coordinate: PackageCoordinate,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CliRiskResponse {
+    pub tenant_id: Uuid,
+    pub registry_config_id: Uuid,
+    pub policy_profile_id: Uuid,
+    pub coordinate: PackageCoordinate,
+    pub decision: PolicyDecision,
+    pub rationale: Vec<String>,
+    pub trace_id: String,
+    pub create_analysis_job: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CliScanRequest {
     #[serde(default)]
     pub tenant_id: Option<Uuid>,
@@ -658,10 +989,31 @@ pub struct CliScanPackageRequest {
     pub artifact_sha256: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CliGithubActionsEnrichmentRequest {
+    #[serde(default)]
+    pub tenant_id: Option<Uuid>,
+    #[serde(default)]
+    pub policy_profile_id: Option<Uuid>,
+    pub packages: Vec<CliGithubActionsEnrichmentPackageRequest>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CliGithubActionsEnrichmentPackageRequest {
+    pub coordinate: PackageCoordinate,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CliScanResponse {
     pub tenant_id: Uuid,
     pub registry_config_id: Uuid,
+    pub policy_profile_id: Uuid,
+    pub findings: Vec<CliScanFindingResponse>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CliGithubActionsEnrichmentResponse {
+    pub tenant_id: Uuid,
     pub policy_profile_id: Uuid,
     pub findings: Vec<CliScanFindingResponse>,
 }
@@ -871,6 +1223,52 @@ pub struct PolicyProfileSummaryResponse {
     pub request_count_last_30_days: i64,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SignalPolicyAction {
+    Allow,
+    Warn,
+    Block,
+    Hitl,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScorecardCheckThresholdResponse {
+    pub min_score: f64,
+    pub action: SignalPolicyAction,
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DepsDdevPackageSummaryResponse {
+    pub purl: String,
+    pub ecosystem: String,
+    pub namespace: Option<String>,
+    pub package_name: String,
+    pub package_version: Option<String>,
+    pub licenses: Vec<String>,
+    pub dependency_count: i64,
+    pub source_repo_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DepsDdevPackagesResponse {
+    pub packages: Vec<DepsDdevPackageSummaryResponse>,
+    pub snapshot_taken_at: Option<DateTime<Utc>>,
+    pub total: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PolicyScorecardThresholdsResponse {
+    pub policy_profile_id: Uuid,
+    pub policy_version_id: Uuid,
+    pub code_review: ScorecardCheckThresholdResponse,
+    pub branch_protection: ScorecardCheckThresholdResponse,
+    pub ci_cd: ScorecardCheckThresholdResponse,
+    pub maintained: ScorecardCheckThresholdResponse,
+    pub signed_releases: ScorecardCheckThresholdResponse,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PolicySimulationRequest {
     pub policy_profile_id: Uuid,
@@ -940,6 +1338,25 @@ pub struct OverrideQueueItemResponse {
     pub created_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SbomNtiaValidationResponse {
+    pub valid: bool,
+    pub issues: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SbomDocumentSummaryResponse {
+    pub id: Uuid,
+    pub analysis_job_id: Option<Uuid>,
+    pub tenant_id: Option<Uuid>,
+    pub format: String,
+    pub source: String,
+    pub component_count: i32,
+    pub storage_size_bytes: i64,
+    pub created_at: DateTime<Utc>,
+    pub ntia_validation: SbomNtiaValidationResponse,
+}
+
 #[derive(Debug, Clone, Serialize)]
 struct CredentialTestResponse {
     credential_id: Uuid,
@@ -959,6 +1376,12 @@ struct CliScanRegistryContext {
     policy_profile_id: Uuid,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct CliPolicyContext {
+    tenant_id: Uuid,
+    policy_profile_id: Uuid,
+}
+
 #[derive(Debug, Error)]
 pub enum ApiError {
     #[error("request actor is required")]
@@ -975,6 +1398,8 @@ pub enum ApiError {
     InvalidRequest(String),
     #[error(transparent)]
     DecisionClient(#[from] DecisionClientError),
+    #[error(transparent)]
+    SbomClient(#[from] SbomServiceClientError),
     #[error("database unavailable")]
     Database(#[from] sqlx::Error),
     #[error("reload notification failed")]
@@ -993,6 +1418,11 @@ impl IntoResponse for ApiError {
             Self::DecisionClient(DecisionClientError::InvalidRequest) => StatusCode::BAD_REQUEST,
             Self::DecisionClient(DecisionClientError::NotFound) => StatusCode::NOT_FOUND,
             Self::DecisionClient(DecisionClientError::Unavailable) => {
+                StatusCode::SERVICE_UNAVAILABLE
+            }
+            Self::SbomClient(SbomServiceClientError::InvalidRequest) => StatusCode::BAD_REQUEST,
+            Self::SbomClient(SbomServiceClientError::NotFound) => StatusCode::NOT_FOUND,
+            Self::SbomClient(SbomServiceClientError::Unavailable) => {
                 StatusCode::SERVICE_UNAVAILABLE
             }
             Self::Database(_) | Self::Reload(_) => StatusCode::SERVICE_UNAVAILABLE,
@@ -1136,6 +1566,213 @@ async fn submit_cli_scan(
             findings,
         }),
     ))
+}
+
+fn validate_cli_risk_request(request: &CliRiskRequest) -> Result<(), ApiError> {
+    if request.coordinate.name.trim().is_empty() {
+        return Err(ApiError::InvalidRequest(
+            "coordinate name must not be empty".to_owned(),
+        ));
+    }
+    let version_ok = request
+        .coordinate
+        .version
+        .as_deref()
+        .map(|v| !v.trim().is_empty())
+        .unwrap_or(false);
+    if !version_ok {
+        return Err(ApiError::InvalidRequest(
+            "coordinate version must not be empty".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+async fn submit_cli_risk(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<CliRiskRequest>,
+) -> Result<Json<CliRiskResponse>, ApiError> {
+    validate_cli_risk_request(&request)?;
+    let ecosystem = request.coordinate.ecosystem.clone();
+    let context =
+        resolve_cli_scan_registry_context(&state.pool, request.tenant_id, ecosystem).await?;
+    let risk_trace_id = format!("{}-risk", trace_id(&headers));
+    let decision = state
+        .decision_client
+        .evaluate(DecisionRequest {
+            tenant_id: context.tenant_id,
+            registry_config_id: context.registry_config_id,
+            policy_profile_id: context.policy_profile_id,
+            request: NormalizedPackageRequest {
+                kind: PackageRequestKind::Metadata,
+                tenant_id: context.tenant_id,
+                registry_config_id: context.registry_config_id,
+                policy_profile_id: context.policy_profile_id,
+                coordinate: request.coordinate.clone(),
+                trace_id: risk_trace_id,
+                requested_digest: None,
+                source_url: None,
+                explicit_version_or_integrity: false,
+            },
+        })
+        .await?;
+
+    Ok(Json(CliRiskResponse {
+        tenant_id: context.tenant_id,
+        registry_config_id: context.registry_config_id,
+        policy_profile_id: context.policy_profile_id,
+        coordinate: request.coordinate,
+        decision: decision.decision,
+        rationale: decision.rationale,
+        trace_id: decision.trace_id,
+        create_analysis_job: decision.create_analysis_job,
+    }))
+}
+
+fn validate_cli_github_actions_request(
+    request: &CliGithubActionsEnrichmentRequest,
+) -> Result<(), ApiError> {
+    if request.policy_profile_id.is_none() {
+        return Err(ApiError::InvalidRequest(
+            "cli GitHub Actions enrichment requires policy_profile_id to avoid ambiguous profile selection"
+                .to_owned(),
+        ));
+    }
+    let first = request.packages.first().ok_or_else(|| {
+        ApiError::InvalidRequest(
+            "cli GitHub Actions enrichment request must include at least one package".to_owned(),
+        )
+    })?;
+    if first.coordinate.ecosystem != PackageEcosystem::GithubActions {
+        return Err(ApiError::InvalidRequest(
+            "cli GitHub Actions enrichment only supports githubactions packages".to_owned(),
+        ));
+    }
+    for package in &request.packages {
+        if package.coordinate.ecosystem != PackageEcosystem::GithubActions {
+            return Err(ApiError::InvalidRequest(
+                "cli GitHub Actions enrichment request packages must all share the githubactions ecosystem"
+                    .to_owned(),
+            ));
+        }
+        if package.coordinate.namespace.as_deref().map(str::trim).unwrap_or("").is_empty()
+            || package.coordinate.name.trim().is_empty()
+            || package.coordinate.version.as_deref().map(str::trim).unwrap_or("").is_empty()
+        {
+            return Err(ApiError::InvalidRequest(
+                "githubactions coordinates must include owner, repo, and ref".to_owned(),
+            ));
+        }
+        let owner = package.coordinate.namespace.as_deref().map(str::trim).unwrap_or("");
+        let repo = package.coordinate.name.trim();
+        let reference = package.coordinate.version.as_deref().map(str::trim).unwrap_or("");
+        if owner.contains('/')
+            || repo.contains('/')
+            || owner.chars().any(char::is_whitespace)
+            || repo.chars().any(char::is_whitespace)
+            || reference.chars().any(char::is_whitespace)
+        {
+            return Err(ApiError::InvalidRequest(
+                "githubactions coordinates must be formatted as owner/repo@ref without whitespace"
+                    .to_owned(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+async fn enrich_cli_github_actions(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<CliGithubActionsEnrichmentRequest>,
+) -> Result<Json<CliGithubActionsEnrichmentResponse>, ApiError> {
+    validate_cli_github_actions_request(&request)?;
+    let context = resolve_cli_policy_context(&state.pool, request.tenant_id, request.policy_profile_id)
+        .await?;
+    let trace_prefix = trace_id(&headers);
+    let mut findings = Vec::with_capacity(request.packages.len());
+
+    for (index, package) in request.packages.into_iter().enumerate() {
+        let decision = state
+            .decision_client
+            .query(DecisionQueryRequest {
+                tenant_id: context.tenant_id,
+                policy_profile_id: context.policy_profile_id,
+                request: NormalizedQueryRequest {
+                    kind: PackageRequestKind::Metadata,
+                    tenant_id: context.tenant_id,
+                    policy_profile_id: context.policy_profile_id,
+                    coordinate: package.coordinate.clone(),
+                    trace_id: format!("{trace_prefix}-{}", index + 1),
+                    requested_digest: None,
+                    explicit_version_or_integrity: true,
+                },
+            })
+            .await?;
+        let decision_timestamp = Utc::now();
+
+        // Capture values needed for persistence before moving them into the finding.
+        let decision_str: String = serde_json::to_value(&decision.decision)
+            .ok()
+            .and_then(|v| v.as_str().map(str::to_owned))
+            .unwrap_or_else(|| "ALLOW".to_owned());
+        let persist_trace_id = decision.trace_id.clone();
+        let persist_rationale = decision.rationale.clone();
+        let owner = package.coordinate.namespace.clone().unwrap_or_default();
+        let repo = package.coordinate.name.clone();
+        let ref_ = package.coordinate.version.clone().unwrap_or_default();
+        let fallback_ref: Option<String> = decision
+            .fallback_coordinate
+            .as_ref()
+            .and_then(|c| c.version.clone());
+
+        findings.push(CliScanFindingResponse {
+            coordinate: package.coordinate,
+            artifact_sha256: None,
+            decision: decision.decision,
+            decision_timestamp: Some(decision_timestamp),
+            trace_id: decision.trace_id,
+            rationale: decision.rationale,
+            fallback_coordinate: decision.fallback_coordinate,
+            create_analysis_job: decision.create_analysis_job,
+        });
+
+        // Persist the scan result for the Command Center dashboard.
+        // Failures are logged as warnings so the enrichment response is unaffected.
+        if let Err(err) = sqlx::query(
+            r#"
+            INSERT INTO github_actions_scan_results
+                (tenant_id, policy_profile_id, owner, repo, "ref", decision, rationale, trace_id, fallback_ref)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            "#,
+        )
+        .bind(context.tenant_id)
+        .bind(context.policy_profile_id)
+        .bind(&owner)
+        .bind(&repo)
+        .bind(&ref_)
+        .bind(&decision_str)
+        .bind(&persist_rationale)
+        .bind(&persist_trace_id)
+        .bind(fallback_ref.as_deref())
+        .execute(&state.pool)
+        .await
+        {
+            tracing::warn!(
+                tenant_id = %context.tenant_id,
+                trace_id = %persist_trace_id,
+                error = %err,
+                "failed to persist github actions scan result; enrichment response unaffected"
+            );
+        }
+    }
+
+    Ok(Json(CliGithubActionsEnrichmentResponse {
+        tenant_id: context.tenant_id,
+        policy_profile_id: context.policy_profile_id,
+        findings,
+    }))
 }
 
 async fn explain_cli_package(
@@ -1317,6 +1954,106 @@ async fn list_quarantine_queue(
         .map(quarantine_queue_item_from_row)
         .collect::<Result<Vec<_>, _>>()?;
     Ok(Json(items))
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct SbomListQuery {
+    limit: Option<u32>,
+}
+
+async fn list_tenant_sboms(
+    State(state): State<AppState>,
+    Path(tenant_id): Path<Uuid>,
+    headers: HeaderMap,
+    axum::extract::Query(query): axum::extract::Query<SbomListQuery>,
+) -> Result<Json<Vec<SbomDocumentSummaryResponse>>, ApiError> {
+    let actor_id = actor_id_from_headers(&headers).ok_or(ApiError::MissingActor)?;
+    ensure_tenant_user(&state.pool, tenant_id, actor_id).await?;
+    let limit = validate_sbom_list_limit(query.limit)?;
+
+    let documents = state
+        .sbom_client
+        .list_tenant_sboms(tenant_id, limit)
+        .await?;
+
+    Ok(Json(
+        documents
+            .into_iter()
+            .map(sbom_document_summary_response)
+            .collect(),
+    ))
+}
+
+async fn download_tenant_sbom(
+    State(state): State<AppState>,
+    Path((tenant_id, sbom_id)): Path<(Uuid, Uuid)>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    let actor_id = actor_id_from_headers(&headers).ok_or(ApiError::MissingActor)?;
+    ensure_tenant_user(&state.pool, tenant_id, actor_id).await?;
+
+    let document = state.sbom_client.download_tenant_sbom(tenant_id, sbom_id).await?;
+    let mut response = document.body.into_response();
+    for (header_name, header_value) in &document.headers {
+        response
+            .headers_mut()
+            .insert(header_name, header_value.clone());
+    }
+
+    if !response.headers().contains_key(header::CONTENT_TYPE) {
+        response.headers_mut().insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("application/json"),
+        );
+    }
+
+    Ok(response)
+}
+
+fn sbom_document_summary_response(
+    document: SbomServiceDocumentSummary,
+) -> SbomDocumentSummaryResponse {
+    SbomDocumentSummaryResponse {
+        id: document.id,
+        analysis_job_id: document.analysis_job_id,
+        tenant_id: document.tenant_id,
+        format: document.format,
+        source: document.source,
+        component_count: document.component_count,
+        storage_size_bytes: document.storage_size_bytes,
+        created_at: document.created_at,
+        ntia_validation: SbomNtiaValidationResponse {
+            valid: document.ntia_validation.valid,
+            issues: document.ntia_validation.issues,
+        },
+    }
+}
+
+fn forwarded_download_headers(source: &HeaderMap) -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    for header_name in [
+        header::CONTENT_TYPE,
+        header::CONTENT_DISPOSITION,
+        header::CONTENT_LENGTH,
+        header::CACHE_CONTROL,
+        header::ETAG,
+        header::CONTENT_ENCODING,
+    ] {
+        if let Some(value) = source.get(&header_name) {
+            headers.insert(header_name, value.clone());
+        }
+    }
+    headers
+}
+
+fn validate_sbom_list_limit(limit: Option<u32>) -> Result<Option<u32>, ApiError> {
+    match limit {
+        Some(limit) if (1..=MAX_SBOM_LIST_LIMIT).contains(&limit) => Ok(Some(limit)),
+        Some(_) => Err(ApiError::InvalidRequest(format!(
+            "sbom list limit must be between 1 and {MAX_SBOM_LIST_LIMIT}"
+        ))),
+        None => Ok(None),
+    }
 }
 
 async fn list_request_timeline(
@@ -1511,6 +2248,407 @@ async fn list_policy_profiles(
         .map(policy_profile_summary_from_row)
         .collect::<Result<Vec<_>, _>>()
         .map(Json)
+}
+
+async fn get_policy_scorecard_thresholds(
+    State(state): State<AppState>,
+    Path((tenant_id, policy_profile_id)): Path<(Uuid, Uuid)>,
+) -> Result<Json<PolicyScorecardThresholdsResponse>, ApiError> {
+    let row = sqlx::query(
+        r#"
+        SELECT versions.id AS version_id,
+               versions.document
+        FROM policy_versions versions
+        JOIN policy_profiles profiles ON profiles.id = versions.policy_profile_id
+        WHERE profiles.tenant_id = $1
+          AND profiles.id = $2
+        ORDER BY versions.effective_at DESC, versions.version DESC, versions.id DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(tenant_id)
+    .bind(policy_profile_id)
+    .fetch_optional(&state.pool)
+    .await?
+    .ok_or(ApiError::NotFound)?;
+
+    let version_id: Uuid = row.try_get("version_id")?;
+    let document: Value = row.try_get::<SqlJson<Value>, _>("document").map(|v| v.0)?;
+
+    let thresholds = document
+        .get("scorecard_thresholds")
+        .cloned()
+        .unwrap_or_default();
+
+    fn check_min_score(thresholds: &Value, key: &str) -> f64 {
+        thresholds
+            .get(key)
+            .and_then(Value::as_f64)
+            .unwrap_or(10.0)
+    }
+
+    let rules = document
+        .get("rules")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+
+    fn rule_action(rules: &[Value], signal: &str) -> (SignalPolicyAction, bool) {
+        for rule in rules {
+            if rule.get("signal").and_then(Value::as_str) == Some(signal) {
+                let enabled = rule
+                    .get("enabled")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(true);
+                let action = match rule.get("action").and_then(Value::as_str) {
+                    Some("allow") => SignalPolicyAction::Allow,
+                    Some("block") => SignalPolicyAction::Block,
+                    Some("hitl") => SignalPolicyAction::Hitl,
+                    _ => SignalPolicyAction::Warn,
+                };
+                return (action, enabled);
+            }
+        }
+        (SignalPolicyAction::Warn, true)
+    }
+
+    let (cr_action, cr_enabled) = rule_action(&rules, "scorecard_code_review_risk");
+    let (bp_action, bp_enabled) = rule_action(&rules, "scorecard_branch_protection_risk");
+    let (cicd_action, cicd_enabled) = rule_action(&rules, "scorecard_ci_cd_risk");
+    let (mt_action, mt_enabled) = rule_action(&rules, "scorecard_maintained_risk");
+    let (sr_action, sr_enabled) = rule_action(&rules, "scorecard_signed_releases_risk");
+
+    Ok(Json(PolicyScorecardThresholdsResponse {
+        policy_profile_id,
+        policy_version_id: version_id,
+        code_review: ScorecardCheckThresholdResponse {
+            min_score: check_min_score(&thresholds, "code_review"),
+            action: cr_action,
+            enabled: cr_enabled,
+        },
+        branch_protection: ScorecardCheckThresholdResponse {
+            min_score: check_min_score(&thresholds, "branch_protection"),
+            action: bp_action,
+            enabled: bp_enabled,
+        },
+        ci_cd: ScorecardCheckThresholdResponse {
+            min_score: check_min_score(&thresholds, "ci_cd"),
+            action: cicd_action,
+            enabled: cicd_enabled,
+        },
+        maintained: ScorecardCheckThresholdResponse {
+            min_score: check_min_score(&thresholds, "maintained"),
+            action: mt_action,
+            enabled: mt_enabled,
+        },
+        signed_releases: ScorecardCheckThresholdResponse {
+            min_score: check_min_score(&thresholds, "signed_releases"),
+            action: sr_action,
+            enabled: sr_enabled,
+        },
+    }))
+}
+
+/// Query parameters for the deps.dev packages list endpoint.
+#[derive(Debug, serde::Deserialize)]
+struct DepsDdevPackagesQuery {
+    #[serde(default)]
+    limit: Option<i64>,
+    #[serde(default)]
+    ecosystem: Option<String>,
+}
+
+/// Query parameters for the cross-ecosystem IOC records list endpoint.
+#[derive(Debug, serde::Deserialize)]
+struct IocRecordsQuery {
+    #[serde(default)]
+    limit: Option<i64>,
+    #[serde(default)]
+    indicator_type: Option<String>,
+}
+
+const VALID_INDICATOR_TYPES: &[&str] = &[
+    "maintainer-identity",
+    "domain",
+    "ip",
+    "url",
+    "package-name",
+    "behavioral-fingerprint",
+];
+
+async fn list_deps_dev_packages(
+    State(state): State<AppState>,
+    Path(_tenant_id): Path<Uuid>,
+    Query(params): Query<DepsDdevPackagesQuery>,
+) -> Result<Json<DepsDdevPackagesResponse>, ApiError> {
+    let limit = params.limit.unwrap_or(25).max(1).min(100);
+
+    let rows = sqlx::query(
+        r#"
+        SELECT ddp.purl,
+               ddp.ecosystem,
+               ddp.namespace,
+               ddp.package_name,
+               ddp.package_version,
+               ddp.licenses,
+               ddp.dependency_count::bigint AS dependency_count,
+               ddp.project_links,
+               fs.created_at AS snapshot_taken_at
+        FROM deps_dev_packages ddp
+        JOIN feed_snapshots fs ON fs.id = ddp.snapshot_id
+        WHERE fs.feed_name = 'deps.dev'
+          AND fs.id = (
+              SELECT id FROM feed_snapshots
+              WHERE feed_name = 'deps.dev'
+              ORDER BY created_at DESC
+              LIMIT 1
+          )
+          AND ($1::text IS NULL OR ddp.ecosystem = $1)
+        ORDER BY ddp.package_name ASC, ddp.package_version DESC
+        LIMIT $2
+        "#,
+    )
+    .bind(params.ecosystem.as_deref())
+    .bind(limit)
+    .fetch_all(&state.pool)
+    .await?;
+
+    let snapshot_taken_at = rows
+        .first()
+        .and_then(|row| row.try_get::<DateTime<Utc>, _>("snapshot_taken_at").ok());
+
+    let packages = rows
+        .iter()
+        .map(|row| {
+            let purl: String = row.try_get("purl")?;
+            let ecosystem: String = row.try_get("ecosystem")?;
+            let namespace: Option<String> = row.try_get("namespace")?;
+            let package_name: String = row.try_get("package_name")?;
+            let package_version: Option<String> = row.try_get("package_version")?;
+            let dependency_count: i64 = row.try_get("dependency_count")?;
+            let licenses_json: Option<SqlJson<Value>> = row.try_get("licenses")?;
+            let project_links_json: Option<SqlJson<Value>> = row.try_get("project_links")?;
+
+            let licenses: Vec<String> = licenses_json
+                .and_then(|j| {
+                    j.0.as_array().map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| {
+                                v.as_str()
+                                    .map(ToString::to_string)
+                                    .or_else(|| v.get("id").and_then(Value::as_str).map(ToString::to_string))
+                            })
+                            .collect()
+                    })
+                })
+                .unwrap_or_default();
+
+            let source_repo_url: Option<String> = project_links_json
+                .and_then(|j| {
+                    j.0.as_array().and_then(|arr| {
+                        arr.iter().find_map(|link| {
+                            let label = link.get("label").and_then(Value::as_str)?;
+                            if label.eq_ignore_ascii_case("SOURCE_REPO") {
+                                link.get("url").and_then(Value::as_str).map(ToString::to_string)
+                            } else {
+                                None
+                            }
+                        })
+                    })
+                });
+
+            Ok::<_, sqlx::Error>(DepsDdevPackageSummaryResponse {
+                purl,
+                ecosystem,
+                namespace,
+                package_name,
+                package_version,
+                licenses,
+                dependency_count,
+                source_repo_url,
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let total = packages.len() as i64;
+    Ok(Json(DepsDdevPackagesResponse {
+        packages,
+        snapshot_taken_at,
+        total,
+    }))
+}
+
+#[derive(Debug, serde::Serialize)]
+struct IocRecordSummary {
+    id: Uuid,
+    ecosystem: String,
+    namespace: Option<String>,
+    package_name: String,
+    package_version: Option<String>,
+    indicator_type: String,
+    indicator_value: String,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct IocRecordsResponse {
+    records: Vec<IocRecordSummary>,
+    snapshot_taken_at: Option<DateTime<Utc>>,
+    total: i64,
+}
+
+async fn list_ioc_records(
+    State(state): State<AppState>,
+    Path(_tenant_id): Path<Uuid>,
+    Query(params): Query<IocRecordsQuery>,
+) -> Result<Json<IocRecordsResponse>, ApiError> {
+    let limit = params.limit.unwrap_or(25).max(1).min(100);
+
+    if let Some(ref it) = params.indicator_type {
+        if !VALID_INDICATOR_TYPES.contains(&it.as_str()) {
+            return Err(ApiError::InvalidRequest("invalid indicator_type".into()));
+        }
+    }
+
+    let rows = sqlx::query(
+        r#"
+        SELECT ioc.id,
+               ioc.ecosystem,
+               ioc.namespace,
+               ioc.package_name,
+               ioc.package_version,
+               ioc.indicator_type,
+               ioc.indicator_value,
+               fs.created_at AS snapshot_taken_at
+        FROM cross_ecosystem_ioc_records ioc
+        JOIN feed_snapshots fs ON fs.id = ioc.snapshot_id
+        WHERE fs.id IN (
+              SELECT DISTINCT ON (feed_name) id FROM feed_snapshots
+              WHERE feed_name IN ('openssf-malicious-packages', 'openssf-package-analysis')
+              ORDER BY feed_name, created_at DESC
+          )
+          AND ($1::text IS NULL OR ioc.indicator_type = $1)
+        ORDER BY ioc.indicator_type ASC, ioc.package_name ASC
+        LIMIT $2
+        "#,
+    )
+    .bind(params.indicator_type.as_deref())
+    .bind(limit)
+    .fetch_all(&state.pool)
+    .await?;
+
+    let snapshot_taken_at = rows
+        .iter()
+        .filter_map(|row| row.try_get::<DateTime<Utc>, _>("snapshot_taken_at").ok())
+        .max();
+
+    let records = rows
+        .iter()
+        .map(|row| {
+            let id: Uuid = row.try_get("id")?;
+            let ecosystem: String = row.try_get("ecosystem")?;
+            let namespace: Option<String> = row.try_get("namespace")?;
+            let package_name: String = row.try_get("package_name")?;
+            let package_version: Option<String> = row.try_get("package_version")?;
+            let indicator_type: String = row.try_get("indicator_type")?;
+            let indicator_value: String = row.try_get("indicator_value")?;
+            Ok::<_, sqlx::Error>(IocRecordSummary {
+                id,
+                ecosystem,
+                namespace,
+                package_name,
+                package_version,
+                indicator_type,
+                indicator_value,
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let total = records.len() as i64;
+    Ok(Json(IocRecordsResponse {
+        records,
+        snapshot_taken_at,
+        total,
+    }))
+}
+
+#[derive(Debug, serde::Serialize)]
+struct GithubActionsScanResultResponse {
+    id: Uuid,
+    tenant_id: Uuid,
+    policy_profile_id: Uuid,
+    owner: String,
+    repo: String,
+    #[serde(rename = "ref")]
+    ref_: String,
+    decision: String,
+    rationale: Vec<String>,
+    trace_id: String,
+    fallback_ref: Option<String>,
+    scanned_at: DateTime<Utc>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct GithubActionsScanResultsQuery {
+    #[serde(default)]
+    limit: Option<i64>,
+}
+
+async fn list_github_actions_scan_results(
+    State(state): State<AppState>,
+    Path(tenant_id): Path<Uuid>,
+    headers: HeaderMap,
+    Query(params): Query<GithubActionsScanResultsQuery>,
+) -> Result<Json<Vec<GithubActionsScanResultResponse>>, ApiError> {
+    let actor_id = actor_id_from_headers(&headers).ok_or(ApiError::MissingActor)?;
+    ensure_tenant_user(&state.pool, tenant_id, actor_id).await?;
+    let limit = params.limit.unwrap_or(50).max(1).min(100);
+
+    let rows = sqlx::query(
+        r#"
+        SELECT id, tenant_id, policy_profile_id, owner, repo,
+               "ref" AS action_ref, decision, rationale, trace_id, fallback_ref, scanned_at
+        FROM github_actions_scan_results
+        WHERE tenant_id = $1
+        ORDER BY scanned_at DESC
+        LIMIT $2
+        "#,
+    )
+    .bind(tenant_id)
+    .bind(limit)
+    .fetch_all(&state.pool)
+    .await?;
+
+    let results = rows
+        .iter()
+        .map(|row| {
+            let id: Uuid = row.try_get("id")?;
+            let tenant_id: Uuid = row.try_get("tenant_id")?;
+            let policy_profile_id: Uuid = row.try_get("policy_profile_id")?;
+            let owner: String = row.try_get("owner")?;
+            let repo: String = row.try_get("repo")?;
+            let ref_: String = row.try_get("action_ref")?;
+            let decision: String = row.try_get("decision")?;
+            let rationale: Vec<String> = row.try_get("rationale")?;
+            let trace_id: String = row.try_get("trace_id")?;
+            let fallback_ref: Option<String> = row.try_get("fallback_ref")?;
+            let scanned_at: DateTime<Utc> = row.try_get("scanned_at")?;
+            Ok::<_, sqlx::Error>(GithubActionsScanResultResponse {
+                id,
+                tenant_id,
+                policy_profile_id,
+                owner,
+                repo,
+                ref_,
+                decision,
+                rationale,
+                trace_id,
+                fallback_ref,
+                scanned_at,
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(Json(results))
 }
 
 async fn simulate_policy_replay(
@@ -3772,6 +4910,52 @@ async fn resolve_cli_scan_registry_context(
     })
 }
 
+async fn resolve_cli_policy_context(
+    pool: &PgPool,
+    tenant_id: Option<Uuid>,
+    policy_profile_id: Option<Uuid>,
+) -> Result<CliPolicyContext, ApiError> {
+    let policy_profile_id = policy_profile_id.ok_or_else(|| {
+        ApiError::InvalidRequest(
+            "cli GitHub Actions enrichment requires policy_profile_id to avoid ambiguous profile selection"
+                .to_owned(),
+        )
+    })?;
+
+    let row = if let Some(tenant_id) = tenant_id {
+        sqlx::query(
+            r#"
+                SELECT id, tenant_id
+                FROM policy_profiles
+                WHERE id = $1 AND tenant_id = $2
+                LIMIT 1
+                "#,
+        )
+        .bind(policy_profile_id)
+        .bind(tenant_id)
+        .fetch_optional(pool)
+        .await?
+    } else {
+        sqlx::query(
+            r#"
+                SELECT id, tenant_id
+                FROM policy_profiles
+                WHERE id = $1
+                LIMIT 1
+                "#,
+        )
+        .bind(policy_profile_id)
+        .fetch_optional(pool)
+        .await?
+    }
+    .ok_or(ApiError::NotFound)?;
+
+    Ok(CliPolicyContext {
+        tenant_id: row.try_get("tenant_id")?,
+        policy_profile_id: row.try_get("id")?,
+    })
+}
+
 fn validate_mount_path(mount_path: &str) -> Result<(), ApiError> {
     let trimmed = mount_path.trim();
     if !trimmed.starts_with("/proxy/")
@@ -5764,6 +6948,212 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires migrated postgres contract database"]
+    async fn github_actions_enrichment_route_resolves_policy_context_and_returns_decisions() {
+        let pool = connect(&test_database_url())
+            .await
+            .expect("connect test db");
+        let fixture = InvestigationRouteFixture::insert(&pool).await;
+
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let captured_requests = captured.clone();
+        let decision_client = DecisionClient::new_query_test(move |request| {
+            captured_requests
+                .lock()
+                .expect("capture request")
+                .push(request.clone());
+            Ok(DecisionResponse {
+                decision: PolicyDecision::BlockKnownMalicious,
+                tenant_id: request.tenant_id,
+                policy_profile_id: request.policy_profile_id,
+                policy_snapshot_id: Uuid::now_v7(),
+                mode: PolicyMode::Enforce,
+                feed_state: FeedState::Fresh,
+                feed_snapshot_age_seconds: 7,
+                trace_id: request.request.trace_id.clone(),
+                rationale: vec!["fixture github action decision".to_owned()],
+                fallback_coordinate: None,
+                create_analysis_job: false,
+            })
+        });
+
+        let result = async {
+            let response = app_with_clients(pool.clone(), None, decision_client)
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/v1/cli/github-actions/enrich")
+                        .header("content-type", "application/json")
+                        .header(TRACE_HEADER, "cli-trace")
+                        .body(Body::from(
+                            serde_json::to_vec(&CliGithubActionsEnrichmentRequest {
+                                tenant_id: Some(fixture.tenant_id),
+                                policy_profile_id: Some(fixture.policy_profile_id),
+                                packages: vec![CliGithubActionsEnrichmentPackageRequest {
+                                    coordinate: PackageCoordinate::new(
+                                        PackageEcosystem::GithubActions,
+                                        "checkout",
+                                        Some("f".repeat(40)),
+                                        Some("actions"),
+                                    ),
+                                }],
+                            })
+                            .expect("serialize github actions enrichment request"),
+                        ))
+                        .expect("github actions enrichment request"),
+                )
+                .await
+                .expect("github actions enrichment response");
+
+            assert_eq!(response.status(), StatusCode::OK);
+            let body: CliGithubActionsEnrichmentResponse = read_json_body(response).await;
+            assert_eq!(body.tenant_id, fixture.tenant_id);
+            assert_eq!(body.policy_profile_id, fixture.policy_profile_id);
+            assert_eq!(body.findings.len(), 1);
+            assert_eq!(body.findings[0].decision, PolicyDecision::BlockKnownMalicious);
+            assert!(body.findings[0].decision_timestamp.is_some());
+            assert_eq!(body.findings[0].trace_id, "cli-trace-1");
+
+            let captured = captured.lock().expect("captured requests");
+            assert_eq!(captured.len(), 1);
+            assert_eq!(captured[0].tenant_id, fixture.tenant_id);
+            assert_eq!(captured[0].policy_profile_id, fixture.policy_profile_id);
+            assert_eq!(captured[0].request.trace_id, "cli-trace-1");
+            assert_eq!(
+                captured[0].request.coordinate,
+                PackageCoordinate::new(
+                    PackageEcosystem::GithubActions,
+                    "checkout",
+                    Some("f".repeat(40)),
+                    Some("actions"),
+                )
+            );
+            Ok::<(), anyhow::Error>(())
+        }
+        .await;
+
+        fixture.cleanup(&pool).await;
+        result.expect("github actions enrichment assertions");
+    }
+
+    #[tokio::test]
+    async fn github_actions_enrichment_route_rejects_missing_policy_profile() {
+        let pool = PgPoolOptions::new()
+            .connect_lazy(&test_database_url())
+            .expect("create lazy test db pool");
+
+        let response = app_with_clients(pool, None, DecisionClient::new_query_test(|_| {
+            panic!("decision client query should not be called")
+        }))
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/cli/github-actions/enrich")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&CliGithubActionsEnrichmentRequest {
+                        tenant_id: None,
+                        policy_profile_id: None,
+                        packages: vec![CliGithubActionsEnrichmentPackageRequest {
+                            coordinate: PackageCoordinate::new(
+                                PackageEcosystem::GithubActions,
+                                "checkout",
+                                Some("f".repeat(40)),
+                                Some("actions"),
+                            ),
+                        }],
+                    })
+                    .expect("serialize request"),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("response");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body: ErrorBody = read_json_body(response).await;
+        assert!(body.message.contains("policy_profile_id"));
+    }
+
+    #[tokio::test]
+    async fn github_actions_enrichment_route_rejects_non_githubactions_packages() {
+        let pool = PgPoolOptions::new()
+            .connect_lazy(&test_database_url())
+            .expect("create lazy test db pool");
+
+        let response = app_with_clients(pool, None, DecisionClient::new_query_test(|_| {
+            panic!("decision client query should not be called")
+        }))
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/cli/github-actions/enrich")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&CliGithubActionsEnrichmentRequest {
+                        tenant_id: None,
+                        policy_profile_id: Some(Uuid::now_v7()),
+                        packages: vec![CliGithubActionsEnrichmentPackageRequest {
+                            coordinate: PackageCoordinate::new(
+                                PackageEcosystem::Npm,
+                                "left-pad",
+                                Some("1.3.0"),
+                                None::<String>,
+                            ),
+                        }],
+                    })
+                    .expect("serialize request"),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("response");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body: ErrorBody = read_json_body(response).await;
+        assert!(body.message.contains("githubactions"));
+    }
+
+    #[tokio::test]
+    async fn github_actions_enrichment_route_rejects_malformed_coordinates() {
+        let pool = PgPoolOptions::new()
+            .connect_lazy(&test_database_url())
+            .expect("create lazy test db pool");
+
+        let response = app_with_clients(pool, None, DecisionClient::new_query_test(|_| {
+            panic!("decision client query should not be called")
+        }))
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/cli/github-actions/enrich")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&CliGithubActionsEnrichmentRequest {
+                        tenant_id: None,
+                        policy_profile_id: Some(Uuid::now_v7()),
+                        packages: vec![CliGithubActionsEnrichmentPackageRequest {
+                            coordinate: PackageCoordinate::new(
+                                PackageEcosystem::GithubActions,
+                                "checkout/plugin",
+                                Some("release candidate"),
+                                Some("actions org"),
+                            ),
+                        }],
+                    })
+                    .expect("serialize request"),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("response");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body: ErrorBody = read_json_body(response).await;
+        assert!(body.message.contains("owner/repo@ref"));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires migrated postgres contract database"]
     async fn submit_cli_scan_route_rejects_mixed_ecosystems() {
         let pool = connect(&test_database_url())
             .await
@@ -5813,6 +7203,76 @@ mod tests {
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         let body: ErrorBody = read_json_body(response).await;
         assert!(body.message.contains("same ecosystem"));
+    }
+
+    #[tokio::test]
+    async fn cli_risk_rejects_empty_coordinate_name() {
+        // Validation fires before any DB access, so a lazy pool is sufficient.
+        let pool = PgPoolOptions::new()
+            .connect_lazy(&test_database_url())
+            .expect("create lazy test db pool");
+
+        let response = app_with_auth_mode(pool, AuthMode::MockOidc, Uuid::nil())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/cli/risk")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&CliRiskRequest {
+                            tenant_id: None,
+                            coordinate: PackageCoordinate::new(
+                                PackageEcosystem::Npm,
+                                "",
+                                Some("1.0.0"),
+                                None::<String>,
+                            ),
+                        })
+                        .expect("serialize request"),
+                    ))
+                    .expect("build request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body: ErrorBody = read_json_body(response).await;
+        assert!(body.message.contains("name"));
+    }
+
+    #[tokio::test]
+    async fn cli_risk_rejects_missing_coordinate_version() {
+        // Validation fires before any DB access, so a lazy pool is sufficient.
+        let pool = PgPoolOptions::new()
+            .connect_lazy(&test_database_url())
+            .expect("create lazy test db pool");
+
+        let response = app_with_auth_mode(pool, AuthMode::MockOidc, Uuid::nil())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/cli/risk")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&CliRiskRequest {
+                            tenant_id: None,
+                            coordinate: PackageCoordinate::new(
+                                PackageEcosystem::Cargo,
+                                "serde",
+                                None::<String>,
+                                None::<String>,
+                            ),
+                        })
+                        .expect("serialize request"),
+                    ))
+                    .expect("build request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body: ErrorBody = read_json_body(response).await;
+        assert!(body.message.contains("version"));
     }
 
     #[tokio::test]
@@ -7205,6 +8665,231 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires migrated postgres contract database"]
+    async fn tenant_sbom_list_route_requires_actor_and_omits_storage_metadata() {
+        let pool = connect(&test_database_url())
+            .await
+            .expect("connect test db");
+        let fixture = InvestigationRouteFixture::insert(&pool).await;
+        let sbom_id = Uuid::now_v7();
+
+        let result = async {
+            let app = app_with_auth_mode_and_sbom_client(
+                pool.clone(),
+                AuthMode::Oidc,
+                fixture.tenant_id,
+                SbomServiceClient::new_test(
+                    move |tenant_id, limit| {
+                        assert_eq!(tenant_id, fixture.tenant_id);
+                        assert_eq!(limit, Some(5));
+                        Ok(vec![SbomServiceDocumentSummary {
+                            id: sbom_id,
+                            analysis_job_id: Some(fixture.full_job_id),
+                            tenant_id: Some(fixture.tenant_id),
+                            format: "cyclonedx-1.7-json".to_owned(),
+                            source: "Cargo.lock".to_owned(),
+                            component_count: 42,
+                            storage_size_bytes: 4096,
+                            created_at: ts(2026, 5, 13, 18, 0, 0),
+                            ntia_validation: SbomServiceNtiaValidation {
+                                valid: false,
+                                issues: vec!["missing metadata.component.name".to_owned()],
+                            },
+                        }])
+                    },
+                    |_, _| panic!("sbom download should not be called in list test"),
+                ),
+            );
+
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("/v1/tenants/{}/sboms?limit=5", fixture.tenant_id))
+                        .header(ACTOR_HEADER, fixture.admin_user_id.to_string())
+                        .body(Body::empty())
+                        .expect("sbom list request"),
+                )
+                .await
+                .expect("sbom list response");
+
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = read_value_body(response).await;
+            let documents = body.as_array().expect("list response array");
+            assert_eq!(documents.len(), 1);
+            let expected_id = sbom_id.to_string();
+            assert_eq!(documents[0].get("id").and_then(Value::as_str), Some(expected_id.as_str()));
+            assert_eq!(
+                documents[0].get("source").and_then(Value::as_str),
+                Some("Cargo.lock")
+            );
+            assert_eq!(documents[0].get("storage_uri"), None);
+            assert_eq!(documents[0].get("storage_sha256"), None);
+
+            let missing_actor = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("/v1/tenants/{}/sboms", fixture.tenant_id))
+                        .body(Body::empty())
+                        .expect("missing actor request"),
+                )
+                .await
+                .expect("missing actor response");
+
+            assert_eq!(missing_actor.status(), StatusCode::UNAUTHORIZED);
+
+            let other_tenant_actor = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("/v1/tenants/{}/sboms?limit=5", fixture.tenant_id))
+                        .header(ACTOR_HEADER, fixture.other_admin_user_id.to_string())
+                        .body(Body::empty())
+                        .expect("cross-tenant actor request"),
+                )
+                .await
+                .expect("cross-tenant actor response");
+
+            assert_eq!(other_tenant_actor.status(), StatusCode::FORBIDDEN);
+
+            let invalid_limit = app
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("/v1/tenants/{}/sboms?limit=75", fixture.tenant_id))
+                        .header(ACTOR_HEADER, fixture.admin_user_id.to_string())
+                        .body(Body::empty())
+                        .expect("invalid limit request"),
+                )
+                .await
+                .expect("invalid limit response");
+
+            assert_eq!(invalid_limit.status(), StatusCode::BAD_REQUEST);
+            Ok::<(), anyhow::Error>(())
+        }
+        .await;
+
+        fixture.cleanup(&pool).await;
+        result.expect("tenant sbom list assertions");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires migrated postgres contract database"]
+    async fn tenant_sbom_download_route_requires_actor_and_preserves_headers() {
+        let pool = connect(&test_database_url())
+            .await
+            .expect("connect test db");
+        let fixture = InvestigationRouteFixture::insert(&pool).await;
+        let sbom_id = Uuid::now_v7();
+
+        let result = async {
+            let app = app_with_auth_mode_and_sbom_client(
+                pool.clone(),
+                AuthMode::Oidc,
+                fixture.tenant_id,
+                SbomServiceClient::new_test(
+                    |_, _| panic!("sbom list should not be called in download test"),
+                    move |tenant_id, requested_sbom_id| {
+                        assert_eq!(tenant_id, fixture.tenant_id);
+                        assert_eq!(requested_sbom_id, sbom_id);
+                        let mut headers = HeaderMap::new();
+                        headers.insert(
+                            header::CONTENT_TYPE,
+                            HeaderValue::from_static("application/json"),
+                        );
+                        headers.insert(
+                            header::CONTENT_DISPOSITION,
+                            HeaderValue::from_static(
+                                "attachment; filename=\"cargo-lock.json\"",
+                            ),
+                        );
+                        headers.insert(
+                            header::CACHE_CONTROL,
+                            HeaderValue::from_static("private, max-age=60"),
+                        );
+                        headers.insert(header::ETAG, HeaderValue::from_static("\"sbom-1\""));
+                        Ok(SbomServiceDownload {
+                            body: Body::from("{\"bomFormat\":\"CycloneDX\"}"),
+                            headers,
+                        })
+                    },
+                ),
+            );
+
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("/v1/tenants/{}/sboms/{sbom_id}", fixture.tenant_id))
+                        .header(ACTOR_HEADER, fixture.admin_user_id.to_string())
+                        .body(Body::empty())
+                        .expect("sbom download request"),
+                )
+                .await
+                .expect("sbom download response");
+
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(
+                response
+                    .headers()
+                    .get(header::CONTENT_DISPOSITION)
+                    .and_then(|value| value.to_str().ok()),
+                Some("attachment; filename=\"cargo-lock.json\"")
+            );
+            assert_eq!(
+                response
+                    .headers()
+                    .get(header::CACHE_CONTROL)
+                    .and_then(|value| value.to_str().ok()),
+                Some("private, max-age=60")
+            );
+            assert_eq!(
+                response
+                    .headers()
+                    .get(header::ETAG)
+                    .and_then(|value| value.to_str().ok()),
+                Some("\"sbom-1\"")
+            );
+            let body = to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("read sbom download body");
+            assert_eq!(body.as_ref(), b"{\"bomFormat\":\"CycloneDX\"}");
+
+            let missing_actor = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("/v1/tenants/{}/sboms/{sbom_id}", fixture.tenant_id))
+                        .body(Body::empty())
+                        .expect("missing actor download request"),
+                )
+                .await
+                .expect("missing actor download response");
+
+            assert_eq!(missing_actor.status(), StatusCode::UNAUTHORIZED);
+
+            let other_tenant_actor = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("/v1/tenants/{}/sboms/{sbom_id}", fixture.tenant_id))
+                        .header(ACTOR_HEADER, fixture.other_admin_user_id.to_string())
+                        .body(Body::empty())
+                        .expect("cross-tenant actor download request"),
+                )
+                .await
+                .expect("cross-tenant actor download response");
+
+            assert_eq!(other_tenant_actor.status(), StatusCode::FORBIDDEN);
+            Ok::<(), anyhow::Error>(())
+        }
+        .await;
+
+        fixture.cleanup(&pool).await;
+        result.expect("tenant sbom download assertions");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires migrated postgres contract database"]
     async fn artifact_evidence_route_returns_joined_evidence_and_enforces_tenant_scope() {
         let pool = connect(&test_database_url())
             .await
@@ -7531,6 +9216,56 @@ mod tests {
         );
     }
 
+    #[test]
+    fn validate_openvex_request_allows_already_expired_policy() {
+        let mut request = sample_openvex_import_request();
+        request.expiry_policy.expires_at = Some(ts(2024, 1, 1, 0, 0, 0));
+
+        let validated = validate_openvex_request(&request).expect("expired request should still validate");
+
+        assert_eq!(validated.document_id, "https://fixtures.aegiscudo.invalid/openvex/acme-2026-001");
+        assert_eq!(validated.statement_count, 2);
+    }
+
+    #[test]
+    fn validate_openvex_request_allows_statement_history_for_same_vulnerability_and_product() {
+        let mut request = sample_openvex_import_request();
+        request.document["version"] = json!(2);
+        request.document["statements"] = json!([
+            {
+                "vulnerability": { "name": "CVE-2026-0001" },
+                "products": [
+                    { "@id": "pkg:npm/left-pad@1.3.0" }
+                ],
+                "status": "under_investigation",
+                "timestamp": "2026-05-11T23:59:59Z"
+            },
+            {
+                "vulnerability": { "name": "CVE-2026-0001" },
+                "products": [
+                    { "@id": "pkg:npm/left-pad@1.3.0" }
+                ],
+                "status": "fixed",
+                "action_statement": "Patched in upstream release 1.3.0"
+            }
+        ]);
+
+        let validated = validate_openvex_request(&request).expect("statement history should validate");
+
+        assert_eq!(validated.statement_count, 2);
+        assert_eq!(validated.statements.len(), 2);
+        assert_eq!(validated.statements[0].status, "under_investigation");
+        assert_eq!(validated.statements[1].status, "fixed");
+        assert_eq!(
+            validated.statements[0].product_id,
+            validated.statements[1].product_id
+        );
+        assert_eq!(
+            validated.statements[0].vulnerability_id,
+            validated.statements[1].vulnerability_id
+        );
+    }
+
     #[tokio::test]
     #[ignore = "requires migrated postgres contract database"]
     async fn openvex_document_routes_require_override_manager() {
@@ -7745,6 +9480,154 @@ mod tests {
         result.expect("openvex tenant scoping assertions");
     }
 
+    #[tokio::test]
+    #[ignore = "requires migrated postgres contract database"]
+    async fn list_openvex_documents_is_tenant_scoped() {
+        let pool = connect(&test_database_url())
+            .await
+            .expect("connect test db");
+        let fixture = InvestigationRouteFixture::insert(&pool).await;
+
+        let result = async {
+            let create_response = app(pool.clone())
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(format!("/v1/tenants/{}/openvex-documents", fixture.tenant_id))
+                        .header(ACTOR_HEADER, fixture.admin_user_id.to_string())
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::to_vec(&sample_openvex_import_request())
+                                .expect("serialize openvex request"),
+                        ))
+                        .expect("create openvex request"),
+                )
+                .await
+                .expect("create openvex response");
+            assert_eq!(create_response.status(), StatusCode::OK);
+
+            let own_response = app(pool.clone())
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("/v1/tenants/{}/openvex-documents", fixture.tenant_id))
+                        .header(ACTOR_HEADER, fixture.admin_user_id.to_string())
+                        .body(Body::empty())
+                        .expect("own openvex list request"),
+                )
+                .await
+                .expect("own openvex list response");
+            assert_eq!(own_response.status(), StatusCode::OK);
+            let own_documents: Vec<OpenVexDocumentSummaryResponse> = read_json_body(own_response).await;
+            assert_eq!(own_documents.len(), 1);
+
+            let cross_tenant_response = app(pool.clone())
+                .oneshot(
+                    Request::builder()
+                        .uri(format!(
+                            "/v1/tenants/{}/openvex-documents",
+                            fixture.other_tenant_id
+                        ))
+                        .header(ACTOR_HEADER, fixture.other_admin_user_id.to_string())
+                        .body(Body::empty())
+                        .expect("cross-tenant openvex list request"),
+                )
+                .await
+                .expect("cross-tenant openvex list response");
+            assert_eq!(cross_tenant_response.status(), StatusCode::OK);
+            let cross_tenant_documents: Vec<OpenVexDocumentSummaryResponse> =
+                read_json_body(cross_tenant_response).await;
+            assert!(cross_tenant_documents.is_empty());
+
+            Ok::<(), anyhow::Error>(())
+        }
+        .await;
+
+        fixture.cleanup(&pool).await;
+        result.expect("openvex list tenant scoping assertions");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires migrated postgres contract database"]
+    async fn create_openvex_document_rejects_malformed_document() {
+        let pool = connect(&test_database_url())
+            .await
+            .expect("connect test db");
+        let fixture = InvestigationRouteFixture::insert(&pool).await;
+
+        let result = async {
+            let mut request = sample_openvex_import_request();
+            request.document["@context"] = Value::String("https://example.invalid/openvex".to_owned());
+
+            let response = app(pool.clone())
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(format!("/v1/tenants/{}/openvex-documents", fixture.tenant_id))
+                        .header(ACTOR_HEADER, fixture.admin_user_id.to_string())
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::to_vec(&request).expect("serialize malformed openvex request"),
+                        ))
+                        .expect("malformed openvex request"),
+                )
+                .await
+                .expect("malformed openvex response");
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+            let body: ErrorBody = read_json_body(response).await;
+            assert!(body
+                .message
+                .contains("document.@context must be https://openvex.dev/ns/v0.2.0"));
+
+            Ok::<(), anyhow::Error>(())
+        }
+        .await;
+
+        fixture.cleanup(&pool).await;
+        result.expect("openvex malformed route assertions");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires migrated postgres contract database"]
+    async fn create_openvex_document_preserves_expired_policy() {
+        let pool = connect(&test_database_url())
+            .await
+            .expect("connect test db");
+        let fixture = InvestigationRouteFixture::insert(&pool).await;
+
+        let result = async {
+            let mut request = sample_openvex_import_request();
+            let expired_at = ts(2024, 1, 1, 0, 0, 0);
+            request.expiry_policy.expires_at = Some(expired_at);
+
+            let response = app(pool.clone())
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(format!("/v1/tenants/{}/openvex-documents", fixture.tenant_id))
+                        .header(ACTOR_HEADER, fixture.admin_user_id.to_string())
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::to_vec(&request).expect("serialize expired openvex request"),
+                        ))
+                        .expect("expired openvex request"),
+                )
+                .await
+                .expect("expired openvex response");
+            assert_eq!(response.status(), StatusCode::OK);
+
+            let created: OpenVexDocumentResponse = read_json_body(response).await;
+            assert_eq!(created.summary.expiry_policy.mode, OpenVexExpiryMode::ExpiresAt);
+            assert_eq!(created.summary.expiry_policy.expires_at, Some(expired_at));
+
+            Ok::<(), anyhow::Error>(())
+        }
+        .await;
+
+        fixture.cleanup(&pool).await;
+        result.expect("openvex expired policy assertions");
+    }
+
     fn sample_openvex_import_request() -> CreateOpenVexDocumentRequest {
         CreateOpenVexDocumentRequest {
             source: "fixture-openvex.json".to_owned(),
@@ -7804,10 +9687,28 @@ mod tests {
     }
 
     fn app_with_auth_mode(pool: PgPool, auth_mode: AuthMode, local_auth_tenant_id: Uuid) -> Router {
+        app_with_auth_mode_and_sbom_client(
+            pool,
+            auth_mode,
+            local_auth_tenant_id,
+            SbomServiceClient::new_test(
+                |_, _| panic!("sbom client list should not be called in this test"),
+                |_, _| panic!("sbom client download should not be called in this test"),
+            ),
+        )
+    }
+
+    fn app_with_auth_mode_and_sbom_client(
+        pool: PgPool,
+        auth_mode: AuthMode,
+        local_auth_tenant_id: Uuid,
+        sbom_client: SbomServiceClient,
+    ) -> Router {
         app_with_clients_and_auth_config(
             pool,
             None,
             DecisionClient::new_test(|_| panic!("decision client should not be called")),
+            sbom_client,
             auth_mode,
             local_auth_tenant_id,
         )

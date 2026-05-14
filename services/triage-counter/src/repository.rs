@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeSet, HashMap, HashSet},
     sync::Arc,
 };
 
@@ -8,7 +8,9 @@ use aegiscudo_core::{
     PackageCoordinate, PolicyDecision, PolicyMode, PolicySnapshot, Severity, StaticEvidence,
 };
 use aegiscudo_policy::{PolicyInput, SignalPolicyAction, VulnerabilityPolicyAction};
-use aegiscudo_protocol::{DecisionRequest, DecisionResponse, PackageRequestKind};
+use aegiscudo_protocol::{
+    DecisionQueryRequest, DecisionRequest, DecisionResponse, PackageRequestKind,
+};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -23,6 +25,7 @@ const MVP_FEED_NAMES: &[&str] = &[
     "osv",
     "ghsa",
     "openssf-malicious-packages",
+    "openssf-package-analysis",
     "cisa-kev",
     "first-epss",
     "deps.dev",
@@ -245,6 +248,7 @@ struct PackageSignalStatus {
     artifact_digest_reputation_risk: bool,
     github_to_registry_publish_gap_risk: bool,
     trusted_publisher_identity_mismatch: bool,
+    cross_ecosystem_ioc_correlation_risk: bool,
     scorecard_code_review_risk: bool,
     scorecard_branch_protection_risk: bool,
     scorecard_ci_cd_risk: bool,
@@ -280,10 +284,30 @@ struct DepsDevPackageRecord {
     project_links: Vec<Value>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DepsDevDependencySnapshotRecord {
+    package_purls: HashSet<String>,
+    dependency_edges: HashMap<String, Vec<String>>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 struct ScorecardResultRecord {
     repo_name: String,
     checks: Vec<(String, f64)>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CrossEcosystemIocRecord {
+    coordinate: PackageCoordinate,
+    indicator_type: String,
+    indicator_value: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CrossEcosystemIocSnapshotRecord {
+    feed_name: String,
+    state: FeedState,
+    records: Vec<CrossEcosystemIocRecord>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -385,6 +409,14 @@ pub enum PolicyRepository {
     InMemory(InMemoryPolicyRepository),
 }
 
+struct RequestContextView<'a> {
+    kind: &'a PackageRequestKind,
+    coordinate: &'a PackageCoordinate,
+    trace_id: &'a str,
+    requested_digest: Option<&'a ArtifactDigest>,
+    explicit_version_or_integrity: bool,
+}
+
 impl PolicyRepository {
     pub async fn bind_decision_request(
         &self,
@@ -398,6 +430,30 @@ impl PolicyRepository {
         request: DecisionRequest,
     ) -> Result<PolicyInput, PolicyRepositoryError> {
         self.bind_request(request, true).await
+    }
+
+    pub async fn bind_query_request(
+        &self,
+        request: DecisionQueryRequest,
+    ) -> Result<PolicyInput, PolicyRepositoryError> {
+        if request.tenant_id != request.request.tenant_id
+            || request.policy_profile_id != request.request.policy_profile_id
+        {
+            return Err(PolicyRepositoryError::InconsistentDecisionRequest);
+        }
+
+        self.bind_request_for_profile(
+            request.tenant_id,
+            request.policy_profile_id,
+            RequestContextView {
+                kind: &request.request.kind,
+                coordinate: &request.request.coordinate,
+                trace_id: &request.request.trace_id,
+                requested_digest: request.request.requested_digest.as_ref(),
+                explicit_version_or_integrity: request.request.explicit_version_or_integrity,
+            },
+        )
+        .await
     }
 
     async fn bind_request(
@@ -417,99 +473,99 @@ impl PolicyRepository {
         if !allow_profile_override && binding.policy_profile_id != request.policy_profile_id {
             return Err(PolicyRepositoryError::RegistryPolicyMismatch);
         }
-        let profile = self
-            .load_profile(request.tenant_id, request.policy_profile_id)
-            .await?;
-        let artifact_exists = match &request.request.requested_digest {
-            Some(artifact_digest) => {
-                self.load_artifact_exists(request.tenant_id, artifact_digest)
-                    .await?
-            }
+        self.bind_request_for_profile(
+            request.tenant_id,
+            request.policy_profile_id,
+            RequestContextView {
+                kind: &request.request.kind,
+                coordinate: &request.request.coordinate,
+                trace_id: &request.request.trace_id,
+                requested_digest: request.request.requested_digest.as_ref(),
+                explicit_version_or_integrity: request.request.explicit_version_or_integrity,
+            },
+        )
+        .await
+    }
+
+    async fn bind_request_for_profile(
+        &self,
+        tenant_id: Uuid,
+        policy_profile_id: Uuid,
+        request: RequestContextView<'_>,
+    ) -> Result<PolicyInput, PolicyRepositoryError> {
+        let profile = self.load_profile(tenant_id, policy_profile_id).await?;
+        let artifact_exists = match request.requested_digest {
+            Some(artifact_digest) => self.load_artifact_exists(tenant_id, artifact_digest).await?,
             None => false,
         };
         let package_signal_status = self
             .load_package_signal_status(
-                request.tenant_id,
-                &request.request.coordinate,
-                request.request.requested_digest.as_ref(),
+                tenant_id,
+                request.coordinate,
+                request.requested_digest,
                 &profile.signal_configuration.scorecard,
             )
             .await?;
         let known_malicious = package_signal_status.known_malicious
             || self
-                .load_known_malicious_match(
-                    request.tenant_id,
-                    &request.request.coordinate,
-                    request.request.requested_digest.as_ref(),
-                )
+                .load_known_malicious_match(tenant_id, request.coordinate, request.requested_digest)
                 .await?;
-        let feed_snapshot_status = self.load_feed_snapshot_status(request.tenant_id).await?;
+        let feed_snapshot_status = self.load_feed_snapshot_status(tenant_id).await?;
         let known_safe_verdict = self
-            .load_known_safe_verdict(
-                request.tenant_id,
-                &request.request.coordinate,
-                request.request.requested_digest.as_ref(),
-            )
+            .load_known_safe_verdict(tenant_id, request.coordinate, request.requested_digest)
             .await?;
         let vulnerable_above_threshold = self
             .load_vulnerable_above_threshold(
-                request.tenant_id,
-                &request.request.coordinate,
-                request.request.requested_digest.as_ref(),
+                tenant_id,
+                request.coordinate,
+                request.requested_digest,
                 &profile.signal_configuration.known_vulnerability_threshold,
             )
             .await?;
         let attestation_signal_status = self
-            .load_attestation_signal_status(
-                request.tenant_id,
-                &request.request.coordinate,
-                request.request.requested_digest.as_ref(),
-            )
+            .load_attestation_signal_status(tenant_id, request.coordinate, request.requested_digest)
             .await?;
         let static_analysis_score_violation = self
             .load_static_analysis_score_violation(
-                request.tenant_id,
-                &request.request.coordinate,
-                request.request.requested_digest.as_ref(),
+                tenant_id,
+                request.coordinate,
+                request.requested_digest,
             )
             .await?;
         let dynamic_sandbox_policy_violation = self
             .load_dynamic_sandbox_policy_violation(
-                request.tenant_id,
-                &request.request.coordinate,
-                request.request.requested_digest.as_ref(),
+                tenant_id,
+                request.coordinate,
+                request.requested_digest,
             )
             .await?;
         let ai_agent_injection_indicator = self
-            .load_ai_agent_injection_indicator(
-                request.tenant_id,
-                &request.request.coordinate,
-                request.request.requested_digest.as_ref(),
-            )
+            .load_ai_agent_injection_indicator(tenant_id, request.coordinate, request.requested_digest)
             .await?;
         let override_signal_status = self
             .load_override_signal_status(
-                request.tenant_id,
-                &request.request.coordinate,
-                request.request.requested_digest.as_ref(),
-                &request.request.kind,
+                tenant_id,
+                request.coordinate,
+                request.requested_digest,
+                request.kind,
             )
             .await?;
-        let fallback_candidate = if matches!(request.request.kind, PackageRequestKind::Metadata)
-            && !request.request.explicit_version_or_integrity
-            && request.request.coordinate.ecosystem == aegiscudo_core::PackageEcosystem::Npm
+        let fallback_candidate = if matches!(*request.kind, PackageRequestKind::Metadata)
+            && !request.explicit_version_or_integrity
+            && request.coordinate.ecosystem == aegiscudo_core::PackageEcosystem::Npm
         {
-            self.load_fallback_candidate(request.tenant_id, &request.request.coordinate)
+            self.load_fallback_candidate(tenant_id, request.coordinate)
                 .await?
         } else {
             None
         };
+
         Ok(PolicyInput {
-            tenant_id: request.tenant_id,
-            policy_profile_id: request.policy_profile_id,
+            tenant_id,
+            policy_profile_id,
             policy_snapshot_id: profile.latest_snapshot.id,
-            coordinate: request.request.coordinate,
-            trace_id: request.request.trace_id,
+            coordinate: request.coordinate.clone(),
+            trace_id: request.trace_id.to_owned(),
             mode: profile.mode,
             known_safe_verdict,
             known_malicious,
@@ -522,7 +578,8 @@ impl PolicyRepository {
             dependency_confusion_risk: package_signal_status.dependency_confusion_risk,
             typosquat_risk: package_signal_status.typosquat_risk,
             artifact_digest_reputation_risk: package_signal_status.artifact_digest_reputation_risk,
-            cross_ecosystem_ioc_correlation_risk: false,
+            cross_ecosystem_ioc_correlation_risk: package_signal_status
+                .cross_ecosystem_ioc_correlation_risk,
             static_analysis_score_violation,
             dynamic_sandbox_policy_violation,
             github_to_registry_publish_gap_risk: package_signal_status
@@ -556,7 +613,7 @@ impl PolicyRepository {
             maintainer_account_age_risk: package_signal_status.maintainer_account_age_risk,
             recent_maintainer_change_risk: package_signal_status.recent_maintainer_change_risk,
             new_maintainer_ratio_risk: package_signal_status.new_maintainer_ratio_risk,
-            unknown_artifact: request.request.requested_digest.is_some() && !artifact_exists,
+            unknown_artifact: request.requested_digest.is_some() && !artifact_exists,
             hitl_required: override_signal_status.hitl_required,
             active_override: override_signal_status.active_override,
             emergency_bypass: override_signal_status.emergency_bypass,
@@ -1232,7 +1289,8 @@ impl PostgresPolicyRepository {
               AND a.namespace IS NOT DISTINCT FROM $3
               AND a.package_name = $4
               AND a.package_version IS NOT DISTINCT FROM $5
-              AND ($6::text IS NULL OR a.sha256 = $6)
+                            AND $6::text IS NOT NULL
+                            AND a.sha256 = $6
             LIMIT 1
             "#,
         )
@@ -1264,7 +1322,7 @@ impl PostgresPolicyRepository {
               AND namespace IS NOT DISTINCT FROM $3
               AND package_name = $4
               AND package_version IS NOT DISTINCT FROM $5
-              AND ($6::text IS NULL OR artifact_sha256 IS NULL OR artifact_sha256 = $6)
+                            AND (artifact_sha256 IS NULL OR ($6::text IS NOT NULL AND artifact_sha256 = $6))
               AND (expires_at IS NULL OR expires_at > now())
             ORDER BY observed_at DESC
             "#,
@@ -1277,11 +1335,18 @@ impl PostgresPolicyRepository {
         .bind(requested_digest_hex)
         .fetch_all(&self.pool)
         .await?;
-        let signals = rows
+        let mut signals = rows
             .into_iter()
             .map(|row| row.try_get::<String, _>("signal"))
             .collect::<Result<Vec<_>, _>>()?;
+        signals.extend(
+            self.load_transitive_dependency_signals(tenant_id, coordinate)
+                .await?,
+        );
         let mut status = package_signal_status_from_signals(signals.iter().map(String::as_str));
+        status.cross_ecosystem_ioc_correlation_risk |=
+            self.load_cross_ecosystem_ioc_risk(tenant_id, coordinate, artifact_digest)
+                .await?;
         merge_scorecard_signal_status(
             &mut status,
             self.load_scorecard_signal_status(coordinate, scorecard_policy)
@@ -1290,22 +1355,36 @@ impl PostgresPolicyRepository {
         Ok(status)
     }
 
-    async fn load_scorecard_signal_status(
+    async fn load_cross_ecosystem_ioc_risk(
         &self,
+        tenant_id: Uuid,
         coordinate: &PackageCoordinate,
-        scorecard_policy: &ScorecardPolicyConfiguration,
-    ) -> Result<ScorecardSignalStatus, PolicyRepositoryError> {
-        let project_links_row = sqlx::query(
+        artifact_digest: Option<&ArtifactDigest>,
+    ) -> Result<bool, PolicyRepositoryError> {
+        let package_name_match = sqlx::query(
             r#"
-            SELECT ddp.project_links
-            FROM deps_dev_packages ddp
-            JOIN feed_snapshots fs ON fs.id = ddp.snapshot_id
-            WHERE fs.feed_name = 'deps.dev'
-              AND ddp.ecosystem = $1::package_ecosystem
-              AND ddp.namespace IS NOT DISTINCT FROM $2
-              AND ddp.package_name = $3
-              AND ($4::text IS NULL OR ddp.package_version = $4)
-            ORDER BY fs.created_at DESC, ddp.created_at DESC
+            WITH latest_ioc_snapshots AS (
+                SELECT DISTINCT ON (fs.feed_name) fs.id, fs.feed_name
+                FROM feed_snapshots fs
+                WHERE fs.feed_name IN ('openssf-malicious-packages', 'openssf-package-analysis')
+                  AND fs.state <> 'unavailable'::feed_state
+                ORDER BY fs.feed_name, fs.created_at DESC, fs.id DESC
+            )
+            SELECT 1
+            FROM cross_ecosystem_ioc_records current
+            JOIN latest_ioc_snapshots latest_current ON latest_current.id = current.snapshot_id
+            WHERE current.ecosystem = $1
+              AND current.namespace IS NOT DISTINCT FROM $2
+              AND current.package_name = $3
+              AND ($4::text IS NULL OR current.package_version IS NULL OR current.package_version = $4)
+              AND EXISTS (
+                SELECT 1
+                FROM cross_ecosystem_ioc_records peer
+                JOIN latest_ioc_snapshots latest_peer ON latest_peer.id = peer.snapshot_id
+                WHERE peer.indicator_type = current.indicator_type
+                  AND peer.indicator_value = current.indicator_value
+                  AND peer.ecosystem <> current.ecosystem
+              )
             LIMIT 1
             "#,
         )
@@ -1314,16 +1393,318 @@ impl PostgresPolicyRepository {
         .bind(&coordinate.name)
         .bind(coordinate.version.clone())
         .fetch_optional(&self.pool)
+        .await?
+        .is_some();
+
+        if package_name_match {
+            return Ok(true);
+        }
+
+        if self
+            .load_sandbox_destination_ioc_risk(tenant_id, coordinate, artifact_digest)
+            .await?
+        {
+            return Ok(true);
+        }
+
+        self.load_behavioral_fingerprint_ioc_risk(tenant_id, coordinate, artifact_digest)
+            .await
+    }
+
+    async fn load_behavioral_fingerprint_ioc_risk(
+        &self,
+        tenant_id: Uuid,
+        coordinate: &PackageCoordinate,
+        artifact_digest: Option<&ArtifactDigest>,
+    ) -> Result<bool, PolicyRepositoryError> {
+        let requested_digest_hex = artifact_digest.map(|digest| digest.hex.clone());
+        let static_rows = sqlx::query(
+            r#"
+            SELECT sar.report
+            FROM static_analysis_reports sar
+            JOIN artifacts a ON a.id = sar.artifact_id
+            WHERE a.tenant_id = $1
+              AND a.ecosystem = $2::package_ecosystem
+              AND a.namespace IS NOT DISTINCT FROM $3
+              AND a.package_name = $4
+              AND a.package_version IS NOT DISTINCT FROM $5
+              AND ($6::text IS NULL OR a.sha256 = $6)
+            "#,
+        )
+        .bind(tenant_id)
+        .bind(coordinate.ecosystem.to_string())
+        .bind(coordinate.namespace.clone())
+        .bind(&coordinate.name)
+        .bind(coordinate.version.clone())
+        .bind(requested_digest_hex.clone())
+        .fetch_all(&self.pool)
+        .await?;
+        let static_component_sets = static_rows
+            .into_iter()
+            .filter_map(|row| row.try_get::<Json<Value>, _>("report").ok())
+            .filter_map(|report| serde_json::from_value::<StaticEvidence>(report.0).ok())
+            .map(|report| static_behavioral_fingerprint_components(&report))
+            .filter(|components| !components.is_empty())
+            .collect::<Vec<_>>();
+
+        let sandbox_rows = sqlx::query(
+            r#"
+            SELECT sr.telemetry
+            FROM sandbox_runs sr
+            JOIN artifacts a ON a.id = sr.artifact_id
+            WHERE a.tenant_id = $1
+              AND a.ecosystem = $2::package_ecosystem
+              AND a.namespace IS NOT DISTINCT FROM $3
+              AND a.package_name = $4
+              AND a.package_version IS NOT DISTINCT FROM $5
+              AND ($6::text IS NULL OR a.sha256 = $6)
+              AND sr.state = 'completed'
+            "#,
+        )
+        .bind(tenant_id)
+        .bind(coordinate.ecosystem.to_string())
+        .bind(coordinate.namespace.clone())
+        .bind(&coordinate.name)
+        .bind(coordinate.version.clone())
+        .bind(requested_digest_hex)
+        .fetch_all(&self.pool)
+        .await?;
+        let sandbox_component_sets = sandbox_rows
+            .into_iter()
+            .filter_map(|row| row.try_get::<Json<Value>, _>("telemetry").ok())
+            .map(|telemetry| sandbox_behavioral_fingerprint_components(&telemetry.0))
+            .filter(|components| !components.is_empty())
+            .collect::<Vec<_>>();
+
+        let candidates = combined_behavioral_fingerprint_candidates(
+            static_component_sets,
+            sandbox_component_sets,
+        );
+        if candidates.is_empty() {
+            return Ok(false);
+        }
+
+        Ok(sqlx::query(
+            r#"
+            WITH latest_ioc_snapshots AS (
+                SELECT DISTINCT ON (fs.feed_name) fs.id, fs.feed_name
+                FROM feed_snapshots fs
+                WHERE fs.feed_name IN ('openssf-malicious-packages', 'openssf-package-analysis')
+                  AND fs.state <> 'unavailable'::feed_state
+                ORDER BY fs.feed_name, fs.created_at DESC, fs.id DESC
+            ),
+            fingerprint_candidates AS (
+                SELECT DISTINCT candidate.indicator_value
+                FROM unnest($1::text[]) AS candidate(indicator_value)
+            )
+            SELECT 1
+            FROM fingerprint_candidates candidate
+            JOIN cross_ecosystem_ioc_records current
+              ON current.indicator_type = 'behavioral-fingerprint'
+             AND current.indicator_value = candidate.indicator_value
+            JOIN latest_ioc_snapshots latest_current ON latest_current.id = current.snapshot_id
+            WHERE EXISTS (
+                SELECT 1
+                FROM cross_ecosystem_ioc_records peer
+                JOIN latest_ioc_snapshots latest_peer ON latest_peer.id = peer.snapshot_id
+                WHERE peer.indicator_type = current.indicator_type
+                  AND peer.indicator_value = current.indicator_value
+                  AND peer.ecosystem <> current.ecosystem
+            )
+            LIMIT 1
+            "#,
+        )
+        .bind(candidates)
+        .fetch_optional(&self.pool)
+        .await?
+        .is_some())
+    }
+
+    async fn load_sandbox_destination_ioc_risk(
+        &self,
+        tenant_id: Uuid,
+        coordinate: &PackageCoordinate,
+        artifact_digest: Option<&ArtifactDigest>,
+    ) -> Result<bool, PolicyRepositoryError> {
+        let requested_digest_hex = artifact_digest.map(|digest| digest.hex.clone());
+        let rows = sqlx::query(
+            r#"
+            SELECT sr.telemetry
+            FROM sandbox_runs sr
+            JOIN artifacts a ON a.id = sr.artifact_id
+            WHERE a.tenant_id = $1
+              AND a.ecosystem = $2::package_ecosystem
+              AND a.namespace IS NOT DISTINCT FROM $3
+              AND a.package_name = $4
+              AND a.package_version IS NOT DISTINCT FROM $5
+              AND ($6::text IS NULL OR a.sha256 = $6)
+              AND sr.state = 'completed'
+            "#,
+        )
+        .bind(tenant_id)
+        .bind(coordinate.ecosystem.to_string())
+        .bind(coordinate.namespace.clone())
+        .bind(&coordinate.name)
+        .bind(coordinate.version.clone())
+        .bind(requested_digest_hex)
+        .fetch_all(&self.pool)
         .await?;
 
-        let Some(project_links_row) = project_links_row else {
-            return Ok(ScorecardSignalStatus::default());
-        };
-        let project_links = project_links_row.try_get::<Json<Value>, _>("project_links")?.0;
-        let Some(repo_name) = project_links
-            .as_array()
-            .and_then(|links| scorecard_repo_name_from_project_links(links))
-        else {
+        let candidates = rows
+            .into_iter()
+            .filter_map(|row| row.try_get::<Json<Value>, _>("telemetry").ok())
+            .flat_map(|telemetry| sandbox_destination_ioc_candidates(&telemetry.0))
+            .collect::<HashSet<_>>();
+        if candidates.is_empty() {
+            return Ok(false);
+        }
+
+        let (indicator_types, indicator_values): (Vec<_>, Vec<_>) = candidates.into_iter().unzip();
+        Ok(sqlx::query(
+            r#"
+            WITH latest_ioc_snapshots AS (
+                SELECT DISTINCT ON (fs.feed_name) fs.id, fs.feed_name
+                FROM feed_snapshots fs
+                WHERE fs.feed_name IN ('openssf-malicious-packages', 'openssf-package-analysis')
+                  AND fs.state <> 'unavailable'::feed_state
+                ORDER BY fs.feed_name, fs.created_at DESC, fs.id DESC
+            ),
+            sandbox_candidates AS (
+                SELECT DISTINCT candidate.indicator_type, candidate.indicator_value
+                FROM unnest($1::text[], $2::text[]) AS candidate(indicator_type, indicator_value)
+            )
+            SELECT 1
+            FROM sandbox_candidates candidate
+            JOIN cross_ecosystem_ioc_records current
+              ON current.indicator_type = candidate.indicator_type
+             AND current.indicator_value = candidate.indicator_value
+            JOIN latest_ioc_snapshots latest_current ON latest_current.id = current.snapshot_id
+            WHERE EXISTS (
+                SELECT 1
+                FROM cross_ecosystem_ioc_records peer
+                JOIN latest_ioc_snapshots latest_peer ON latest_peer.id = peer.snapshot_id
+                WHERE peer.indicator_type = current.indicator_type
+                  AND peer.indicator_value = current.indicator_value
+                  AND peer.ecosystem <> current.ecosystem
+            )
+            LIMIT 1
+            "#,
+        )
+        .bind(indicator_types)
+        .bind(indicator_values)
+        .fetch_optional(&self.pool)
+        .await?
+        .is_some())
+    }
+
+    async fn load_transitive_dependency_signals(
+        &self,
+        tenant_id: Uuid,
+        coordinate: &PackageCoordinate,
+    ) -> Result<Vec<String>, PolicyRepositoryError> {
+        if coordinate.version.is_none() {
+            return Ok(Vec::new());
+        }
+
+        let package_purl = coordinate.purl();
+        let rows = sqlx::query(
+            r#"
+                        WITH RECURSIVE latest_graph_snapshot AS (
+                                SELECT snapshot_id
+                                FROM (
+                                        SELECT ddp.snapshot_id, fs.created_at AS snapshot_created_at, ddp.created_at AS row_created_at
+                                        FROM deps_dev_packages ddp
+                                        JOIN feed_snapshots fs ON fs.id = ddp.snapshot_id
+                                        WHERE fs.feed_name = 'deps.dev'
+                                            AND ddp.purl = $1
+
+                                        UNION ALL
+
+                                        SELECT dde.snapshot_id, fs.created_at AS snapshot_created_at, dde.created_at AS row_created_at
+                                        FROM deps_dev_dependency_edges dde
+                                        JOIN feed_snapshots fs ON fs.id = dde.snapshot_id
+                                        WHERE fs.feed_name = 'deps.dev'
+                                            AND dde.package_purl = $1
+                                ) candidates
+                                ORDER BY snapshot_created_at DESC, row_created_at DESC
+                                LIMIT 1
+                        ),
+                        reachable_dependencies AS (
+                                SELECT dde.dependency_purl
+                                FROM deps_dev_dependency_edges dde
+                                JOIN latest_graph_snapshot latest ON latest.snapshot_id = dde.snapshot_id
+                                WHERE dde.package_purl = $1
+
+                                UNION
+
+                                SELECT dde.dependency_purl
+                                FROM deps_dev_dependency_edges dde
+                                JOIN latest_graph_snapshot latest ON latest.snapshot_id = dde.snapshot_id
+                                JOIN reachable_dependencies reachable
+                                    ON dde.package_purl = reachable.dependency_purl
+                        )
+            SELECT DISTINCT pso.signal
+                        FROM reachable_dependencies reachable
+            JOIN package_signal_observations pso
+              ON pso.tenant_id = $2
+             AND pso.artifact_sha256 IS NULL
+             AND (pso.expires_at IS NULL OR pso.expires_at > now())
+                         AND reachable.dependency_purl = (
+                'pkg:' || pso.ecosystem::text || '/' ||
+                COALESCE(NULLIF(pso.namespace, '') || '/', '') ||
+                pso.package_name ||
+                COALESCE('@' || NULLIF(pso.package_version, ''), '')
+             )
+            "#,
+        )
+        .bind(&package_purl)
+        .bind(tenant_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.into_iter()
+            .map(|row| row.try_get::<String, _>("signal"))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(PolicyRepositoryError::from)
+    }
+
+    async fn load_scorecard_signal_status(
+        &self,
+        coordinate: &PackageCoordinate,
+        scorecard_policy: &ScorecardPolicyConfiguration,
+    ) -> Result<ScorecardSignalStatus, PolicyRepositoryError> {
+        let project_links_rows = sqlx::query(
+            r#"
+            SELECT ddp.project_links
+            FROM deps_dev_packages ddp
+            JOIN feed_snapshots fs ON fs.id = ddp.snapshot_id
+            WHERE fs.feed_name = 'deps.dev'
+                            AND ddp.ecosystem = $1
+              AND ddp.namespace IS NOT DISTINCT FROM $2
+              AND ddp.package_name = $3
+              AND ($4::text IS NULL OR ddp.package_version = $4)
+            ORDER BY fs.created_at DESC, ddp.created_at DESC
+            "#,
+        )
+        .bind(coordinate.ecosystem.to_string())
+        .bind(coordinate.namespace.clone())
+        .bind(&coordinate.name)
+        .bind(coordinate.version.clone())
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut repo_name = None;
+        for project_links_row in project_links_rows {
+            let project_links = project_links_row.try_get::<Json<Value>, _>("project_links")?.0;
+            if let Some(candidate) = project_links
+                .as_array()
+                .and_then(|links| scorecard_repo_name_from_project_links(links))
+            {
+                repo_name = Some(candidate);
+                break;
+            }
+        }
+        let Some(repo_name) = repo_name else {
             return Ok(ScorecardSignalStatus::default());
         };
 
@@ -1814,7 +2195,9 @@ pub struct InMemoryPolicyRepository {
     override_records: Arc<RwLock<Vec<OverrideRecord>>>,
     package_signal_records: Arc<RwLock<Vec<PackageSignalRecord>>>,
     deps_dev_package_records: Arc<RwLock<Vec<DepsDevPackageRecord>>>,
+    deps_dev_dependency_snapshots: Arc<RwLock<Vec<DepsDevDependencySnapshotRecord>>>,
     scorecard_result_records: Arc<RwLock<Vec<ScorecardResultRecord>>>,
+    cross_ecosystem_ioc_snapshots: Arc<RwLock<Vec<CrossEcosystemIocSnapshotRecord>>>,
     feed_snapshot_records: Arc<RwLock<Vec<FeedSnapshotRecord>>>,
     analysis_jobs: Arc<RwLock<Vec<AnalysisJob>>>,
 }
@@ -1825,7 +2208,7 @@ impl InMemoryPolicyRepository {
     }
 
     #[cfg(test)]
-    async fn remember_package_signal(
+    pub(crate) async fn remember_package_signal(
         &self,
         tenant_id: Uuid,
         coordinate: PackageCoordinate,
@@ -1880,6 +2263,35 @@ impl InMemoryPolicyRepository {
     }
 
     #[cfg(test)]
+    async fn remember_deps_dev_dependency_snapshot(
+        &self,
+        package_coordinates: Vec<PackageCoordinate>,
+        dependency_edges: Vec<(PackageCoordinate, Vec<PackageCoordinate>)>,
+    ) {
+        self.deps_dev_dependency_snapshots
+            .write()
+            .await
+            .push(DepsDevDependencySnapshotRecord {
+                package_purls: package_coordinates
+                    .into_iter()
+                    .map(|coordinate| coordinate.purl())
+                    .collect(),
+                dependency_edges: dependency_edges
+                    .into_iter()
+                    .map(|(coordinate, dependencies)| {
+                        (
+                            coordinate.purl(),
+                            dependencies
+                                .into_iter()
+                                .map(|dependency| dependency.purl())
+                                .collect(),
+                        )
+                    })
+                    .collect(),
+            });
+    }
+
+    #[cfg(test)]
     async fn remember_scorecard_result(
         &self,
         repo_name: impl Into<String>,
@@ -1891,6 +2303,23 @@ impl InMemoryPolicyRepository {
             .push(ScorecardResultRecord {
                 repo_name: repo_name.into(),
                 checks,
+            });
+    }
+
+    #[cfg(test)]
+    async fn remember_cross_ecosystem_ioc_snapshot(
+        &self,
+        feed_name: impl Into<String>,
+        state: FeedState,
+        records: Vec<CrossEcosystemIocRecord>,
+    ) {
+        self.cross_ecosystem_ioc_snapshots
+            .write()
+            .await
+            .push(CrossEcosystemIocSnapshotRecord {
+                feed_name: feed_name.into(),
+                state,
+                records,
             });
     }
 
@@ -2125,9 +2554,10 @@ impl InMemoryPolicyRepository {
         Ok(signals.iter().any(|record| {
             record.tenant_id == tenant_id
                 && record.coordinate == *coordinate
-                && artifact_digest
-                    .map(|digest| record.artifact_digest.as_ref() == Some(digest))
-                    .unwrap_or(true)
+                && record
+                    .artifact_digest
+                    .as_ref()
+                    .is_none_or(|record_digest| artifact_digest == Some(record_digest))
                 && record.signal == "known-malicious"
                 && record
                     .expires_at
@@ -2144,18 +2574,27 @@ impl InMemoryPolicyRepository {
     ) -> Result<PackageSignalStatus, PolicyRepositoryError> {
         let now = Utc::now();
         let records = self.package_signal_records.read().await;
-        let signals = records
+        let mut signals = records
             .iter()
             .filter(|record| {
                 record.tenant_id == tenant_id
                     && record.coordinate == *coordinate
-                    && artifact_digest
-                        .map(|digest| record.artifact_digest.as_ref() == Some(digest))
-                        .unwrap_or(true)
+                    && record
+                        .artifact_digest
+                        .as_ref()
+                        .is_none_or(|record_digest| artifact_digest == Some(record_digest))
                     && record.expires_at.is_none_or(|expires_at| expires_at > now)
             })
-            .map(|record| record.signal.as_str());
-        let mut status = package_signal_status_from_signals(signals);
+            .map(|record| record.signal.clone())
+            .collect::<Vec<_>>();
+        signals.extend(
+            self.load_transitive_dependency_signals(tenant_id, coordinate)
+                .await,
+        );
+        let mut status = package_signal_status_from_signals(signals.iter().map(String::as_str));
+        status.cross_ecosystem_ioc_correlation_risk |=
+            self.load_cross_ecosystem_ioc_risk(tenant_id, coordinate, artifact_digest)
+                .await;
         merge_scorecard_signal_status(
             &mut status,
             self.load_scorecard_signal_status(coordinate, scorecard_policy)
@@ -2164,21 +2603,217 @@ impl InMemoryPolicyRepository {
         Ok(status)
     }
 
+    async fn load_cross_ecosystem_ioc_risk(
+        &self,
+        tenant_id: Uuid,
+        coordinate: &PackageCoordinate,
+        artifact_digest: Option<&ArtifactDigest>,
+    ) -> bool {
+        let latest_records = {
+            let snapshots = self.cross_ecosystem_ioc_snapshots.read().await;
+            let mut latest_by_feed = HashMap::new();
+            for snapshot in snapshots.iter().rev() {
+                if snapshot.state == FeedState::Unavailable {
+                    continue;
+                }
+                latest_by_feed
+                    .entry(snapshot.feed_name.clone())
+                    .or_insert_with(|| snapshot.records.clone());
+            }
+            latest_by_feed
+                .into_values()
+                .flat_map(|records| records.into_iter())
+                .collect::<Vec<_>>()
+        };
+
+        latest_records.iter().any(|current| {
+            current.coordinate.ecosystem == coordinate.ecosystem
+                && current.coordinate.namespace == coordinate.namespace
+                && current.coordinate.name == coordinate.name
+                && (coordinate.version.is_none()
+                    || current.coordinate.version.is_none()
+                    || current.coordinate.version == coordinate.version)
+                && latest_records.iter().any(|peer| {
+                    peer.coordinate.ecosystem != current.coordinate.ecosystem
+                        && peer.indicator_type == current.indicator_type
+                        && peer.indicator_value == current.indicator_value
+                })
+        }) || self
+            .load_sandbox_destination_ioc_risk(tenant_id, coordinate, artifact_digest, &latest_records)
+            .await
+            || self
+                .load_behavioral_fingerprint_ioc_risk(
+                    tenant_id,
+                    coordinate,
+                    artifact_digest,
+                    &latest_records,
+                )
+            .await
+    }
+
+    async fn load_sandbox_destination_ioc_risk(
+        &self,
+        tenant_id: Uuid,
+        coordinate: &PackageCoordinate,
+        artifact_digest: Option<&ArtifactDigest>,
+        latest_records: &[CrossEcosystemIocRecord],
+    ) -> bool {
+        let sandbox_runs = self.sandbox_runs.read().await;
+        let candidates = sandbox_runs
+            .iter()
+            .filter(|(match_tenant_id, match_coordinate, match_digest, _)| {
+                *match_tenant_id == tenant_id
+                    && *match_coordinate == *coordinate
+                    && artifact_digest
+                        .map(|digest| match_digest.as_ref() == Some(digest))
+                        .unwrap_or(true)
+            })
+            .flat_map(|(_, _, _, telemetry)| sandbox_destination_ioc_candidates(telemetry))
+            .collect::<HashSet<_>>();
+
+        candidates.into_iter().any(|(indicator_type, indicator_value)| {
+            latest_records.iter().any(|current| {
+                current.indicator_type == indicator_type
+                    && current.indicator_value == indicator_value
+                    && latest_records.iter().any(|peer| {
+                        peer.indicator_type == current.indicator_type
+                            && peer.indicator_value == current.indicator_value
+                            && peer.coordinate.ecosystem != current.coordinate.ecosystem
+                    })
+            })
+        })
+    }
+
+    async fn load_behavioral_fingerprint_ioc_risk(
+        &self,
+        tenant_id: Uuid,
+        coordinate: &PackageCoordinate,
+        artifact_digest: Option<&ArtifactDigest>,
+        latest_records: &[CrossEcosystemIocRecord],
+    ) -> bool {
+        let static_component_sets = {
+            let reports = self.static_analysis_reports.read().await;
+            reports
+                .iter()
+                .filter(|(match_tenant_id, match_coordinate, match_digest, _)| {
+                    *match_tenant_id == tenant_id
+                        && *match_coordinate == *coordinate
+                        && artifact_digest
+                            .map(|digest| match_digest.as_ref() == Some(digest))
+                            .unwrap_or(true)
+                })
+                .map(|(_, _, _, report)| static_behavioral_fingerprint_components(report))
+                .filter(|components| !components.is_empty())
+                .collect::<Vec<_>>()
+        };
+        let sandbox_component_sets = {
+            let sandbox_runs = self.sandbox_runs.read().await;
+            sandbox_runs
+                .iter()
+                .filter(|(match_tenant_id, match_coordinate, match_digest, _)| {
+                    *match_tenant_id == tenant_id
+                        && *match_coordinate == *coordinate
+                        && artifact_digest
+                            .map(|digest| match_digest.as_ref() == Some(digest))
+                            .unwrap_or(true)
+                })
+                .map(|(_, _, _, telemetry)| sandbox_behavioral_fingerprint_components(telemetry))
+                .filter(|components| !components.is_empty())
+                .collect::<Vec<_>>()
+        };
+        let candidates = combined_behavioral_fingerprint_candidates(
+            static_component_sets,
+            sandbox_component_sets,
+        );
+
+        candidates.into_iter().any(|fingerprint| {
+            latest_records.iter().any(|current| {
+                current.indicator_type == "behavioral-fingerprint"
+                    && current.indicator_value == fingerprint
+                    && latest_records.iter().any(|peer| {
+                        peer.indicator_type == current.indicator_type
+                            && peer.indicator_value == current.indicator_value
+                            && peer.coordinate.ecosystem != current.coordinate.ecosystem
+                    })
+            })
+        })
+    }
+
+    async fn load_transitive_dependency_signals(
+        &self,
+        tenant_id: Uuid,
+        coordinate: &PackageCoordinate,
+    ) -> Vec<String> {
+        if coordinate.version.is_none() {
+            return Vec::new();
+        }
+
+        let package_purl = coordinate.purl();
+        let snapshot = {
+            let snapshots = self.deps_dev_dependency_snapshots.read().await;
+            snapshots
+                .iter()
+                .rev()
+                .find(|snapshot| {
+                    snapshot.package_purls.contains(&package_purl)
+                        || snapshot.dependency_edges.contains_key(&package_purl)
+                })
+                .cloned()
+        };
+        let Some(snapshot) = snapshot else {
+            return Vec::new();
+        };
+
+        let mut reachable_dependency_purls = HashSet::new();
+        let mut pending = snapshot
+            .dependency_edges
+            .get(&package_purl)
+            .cloned()
+            .unwrap_or_default();
+        while let Some(dependency_purl) = pending.pop() {
+            if !reachable_dependency_purls.insert(dependency_purl.clone()) {
+                continue;
+            }
+            if let Some(children) = snapshot.dependency_edges.get(&dependency_purl) {
+                pending.extend(children.iter().cloned());
+            }
+        }
+        if reachable_dependency_purls.is_empty() {
+            return Vec::new();
+        }
+
+        let now = Utc::now();
+        self.package_signal_records
+            .read()
+            .await
+            .iter()
+            .filter(|record| {
+                record.tenant_id == tenant_id
+                    && record.artifact_digest.is_none()
+                    && record.expires_at.is_none_or(|expires_at| expires_at > now)
+                    && reachable_dependency_purls.contains(&record.coordinate.purl())
+            })
+            .map(|record| record.signal.clone())
+            .collect()
+    }
+
     async fn load_scorecard_signal_status(
         &self,
         coordinate: &PackageCoordinate,
         scorecard_policy: &ScorecardPolicyConfiguration,
     ) -> ScorecardSignalStatus {
         let package_records = self.deps_dev_package_records.read().await;
-        let Some(package_record) = package_records.iter().rev().find(|record| {
-            record.coordinate.ecosystem == coordinate.ecosystem
-                && record.coordinate.namespace == coordinate.namespace
-                && record.coordinate.name == coordinate.name
-                && (coordinate.version.is_none() || record.coordinate.version == coordinate.version)
-        }) else {
-            return ScorecardSignalStatus::default();
-        };
-        let Some(repo_name) = scorecard_repo_name_from_project_links(&package_record.project_links)
+        let Some(repo_name) = package_records
+            .iter()
+            .rev()
+            .filter(|record| {
+                record.coordinate.ecosystem == coordinate.ecosystem
+                    && record.coordinate.namespace == coordinate.namespace
+                    && record.coordinate.name == coordinate.name
+                    && (coordinate.version.is_none()
+                        || record.coordinate.version == coordinate.version)
+            })
+            .find_map(|record| scorecard_repo_name_from_project_links(&record.project_links))
         else {
             return ScorecardSignalStatus::default();
         };
@@ -2684,6 +3319,108 @@ fn sandbox_event_exceeds_policy_threshold(event: &Value) -> bool {
     }
 }
 
+fn static_behavioral_fingerprint_components(report: &StaticEvidence) -> BTreeSet<&'static str> {
+    report
+        .indicators
+        .iter()
+        .filter_map(|indicator| {
+            static_indicator_behavioral_fingerprint_component(&indicator.indicator_type)
+        })
+        .collect()
+}
+
+fn static_indicator_behavioral_fingerprint_component(
+    indicator_type: &str,
+) -> Option<&'static str> {
+    match indicator_type {
+        "node-outbound-http"
+        | "python-outbound-http"
+        | "java-outbound-http"
+        | "python-import-time-network"
+        | "rust-raw-network" => Some("network_access"),
+        "node-child-process" | "python-subprocess" | "shell-exec-sync" => {
+            Some("exec_binary")
+        }
+        _ => None,
+    }
+}
+
+fn sandbox_behavioral_fingerprint_components(telemetry: &Value) -> BTreeSet<&'static str> {
+    let mut components = BTreeSet::new();
+    for phase in sandbox_telemetry_phases(telemetry) {
+        let Some(events) = phase.get("events").and_then(Value::as_array) else {
+            continue;
+        };
+        for event in events {
+            if let Some(component) = event
+                .get("type")
+                .and_then(Value::as_str)
+                .and_then(sandbox_event_behavioral_fingerprint_component)
+            {
+                components.insert(component);
+            }
+        }
+    }
+    components
+}
+
+fn sandbox_event_behavioral_fingerprint_component(event_type: &str) -> Option<&'static str> {
+    match event_type {
+        "outbound-network-attempt" => Some("network_access"),
+        _ => None,
+    }
+}
+
+fn combined_behavioral_fingerprint_candidates(
+    static_component_sets: Vec<BTreeSet<&'static str>>,
+    sandbox_component_sets: Vec<BTreeSet<&'static str>>,
+) -> Vec<String> {
+    let mut fingerprints = BTreeSet::new();
+    for static_components in &static_component_sets {
+        for sandbox_components in &sandbox_component_sets {
+            let mut combined = static_components.clone();
+            combined.extend(sandbox_components.iter().copied());
+            if !combined.is_empty() {
+                fingerprints.insert(combined.into_iter().collect::<Vec<_>>().join("|"));
+            }
+        }
+    }
+    fingerprints.into_iter().collect()
+}
+
+fn sandbox_destination_ioc_candidates(telemetry: &Value) -> Vec<(String, String)> {
+    let mut candidates = HashSet::new();
+    for phase in sandbox_telemetry_phases(telemetry) {
+        let Some(events) = phase.get("events").and_then(Value::as_array) else {
+            continue;
+        };
+        for event in events {
+            if event.get("type").and_then(Value::as_str) != Some("outbound-network-attempt") {
+                continue;
+            }
+            if let Some(url) = event.get("destination_url").and_then(Value::as_str) {
+                let trimmed = url.trim();
+                if !trimmed.is_empty() {
+                    candidates.insert(("url".to_owned(), trimmed.to_owned()));
+                }
+            }
+            if let Some(ip) = event.get("destination_ip").and_then(Value::as_str) {
+                let trimmed = ip.trim();
+                if !trimmed.is_empty() {
+                    candidates.insert(("ip".to_owned(), trimmed.to_owned()));
+                }
+            }
+            if let Some(host) = event.get("destination_host").and_then(Value::as_str) {
+                let trimmed = host.trim().to_ascii_lowercase();
+                if !trimmed.is_empty() && trimmed != "localhost" && !trimmed.chars().all(|c| c.is_ascii_digit() || c == '.' || c == ':') {
+                    candidates.insert(("domain".to_owned(), trimmed));
+                }
+            }
+        }
+    }
+    candidates.into_iter().collect()
+}
+
 fn package_signal_status_from_signals<'a>(
     signals: impl IntoIterator<Item = &'a str>,
 ) -> PackageSignalStatus {
@@ -2700,6 +3437,9 @@ fn package_signal_status_from_signals<'a>(
             }
             "trusted-publisher-identity-mismatch" => {
                 status.trusted_publisher_identity_mismatch = true;
+            }
+            "cross-ecosystem-ioc-correlation-risk" => {
+                status.cross_ecosystem_ioc_correlation_risk = true;
             }
             "maintainer-account-age-risk" => status.maintainer_account_age_risk = true,
             "recent-maintainer-change-risk" => status.recent_maintainer_change_risk = true,
@@ -2908,6 +3648,10 @@ mod tests {
     use super::*;
     use aegiscudo_core::{PackageCoordinate, PackageEcosystem, Severity, StaticIndicator};
     use aegiscudo_protocol::{DecisionResponse, PackageRequestKind};
+    use std::{
+        path::PathBuf,
+        process::{Command, Output},
+    };
 
     fn profile(tenant_id: Uuid, policy_profile_id: Uuid, snapshot_id: Uuid) -> LoadedPolicyProfile {
         LoadedPolicyProfile {
@@ -2954,6 +3698,162 @@ mod tests {
         }
     }
 
+    fn cargo_metadata_request(
+        tenant_id: Uuid,
+        registry_config_id: Uuid,
+        policy_profile_id: Uuid,
+    ) -> DecisionRequest {
+        let coordinate = PackageCoordinate::new(
+            PackageEcosystem::Cargo,
+            "aegiscudo-benign-cargo-fixture",
+            None::<String>,
+            None::<String>,
+        );
+        DecisionRequest {
+            tenant_id,
+            registry_config_id,
+            policy_profile_id,
+            request: aegiscudo_protocol::NormalizedPackageRequest {
+                kind: aegiscudo_protocol::PackageRequestKind::Metadata,
+                tenant_id,
+                registry_config_id,
+                policy_profile_id,
+                coordinate,
+                trace_id: "trace-cargo-postgres".to_owned(),
+                requested_digest: None,
+                source_url: None,
+                explicit_version_or_integrity: false,
+            },
+        }
+    }
+
+    fn repo_root() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(2)
+            .expect("repo root")
+            .to_path_buf()
+    }
+
+    fn run_local_command(repo_root: &PathBuf, program: &str, args: &[&str]) -> Output {
+        Command::new(program)
+            .args(args)
+            .current_dir(repo_root)
+            .output()
+            .unwrap_or_else(|error| panic!("failed to run {program}: {error}"))
+    }
+
+    fn assert_command_success(program: &str, args: &[&str], output: &Output) {
+        assert!(
+            output.status.success(),
+            "{program} {} failed with status {:?}\nstdout:\n{}\nstderr:\n{}",
+            args.join(" "),
+            output.status.code(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+    }
+
+    async fn seed_postgres_policy_context(
+        repository: &PostgresPolicyRepository,
+        tenant_id: Uuid,
+        registry_config_id: Uuid,
+        policy_profile_id: Uuid,
+    ) {
+        let tenant_name = format!("cargo-postgres-test-{tenant_id}");
+        let profile_name = format!("cargo-postgres-profile-{policy_profile_id}");
+        let registry_name = format!("cargo-postgres-registry-{registry_config_id}");
+        let mount_path = format!(
+            "/proxy/cargo-postgres-{}",
+            registry_config_id.as_simple()
+        );
+
+        sqlx::query(
+            r#"
+            INSERT INTO tenants (id, name)
+            VALUES ($1, $2)
+            "#,
+        )
+        .bind(tenant_id)
+        .bind(tenant_name)
+        .execute(&repository.pool)
+        .await
+        .expect("insert tenant");
+
+        sqlx::query(
+            r#"
+            INSERT INTO policy_profiles (id, tenant_id, name, mode)
+            VALUES ($1, $2, $3, 'enforce'::enforcement_mode)
+            "#,
+        )
+        .bind(policy_profile_id)
+        .bind(tenant_id)
+        .bind(profile_name)
+        .execute(&repository.pool)
+        .await
+        .expect("insert policy profile");
+
+        repository
+            .create_snapshot(PolicySnapshotDraft {
+                tenant_id,
+                policy_profile_id,
+                version: format!("cargo-postgres-{}", policy_profile_id.as_simple()),
+                document: json!({
+                    "known_vulnerability_threshold": {
+                        "severity_floor": "high",
+                        "kev_override": true
+                    },
+                    "rules": []
+                }),
+                created_by: None,
+            })
+            .await
+            .expect("create policy snapshot");
+
+        sqlx::query(
+            r#"
+            INSERT INTO registry_configs (
+              id,
+              tenant_id,
+              name,
+              description,
+              adapter,
+              upstream_url,
+              mount_path,
+              auth_type,
+              mode,
+              policy_profile_id,
+              cache_ttl_seconds,
+              verify_upstream_tls,
+              enabled
+            )
+            VALUES (
+              $1,
+              $2,
+              $3,
+              '',
+              'cargo'::registry_adapter,
+              'http://cargo-fixture-registry:8080',
+              $4,
+              'none'::credential_auth_type,
+              'enforce'::enforcement_mode,
+              $5,
+              300,
+              true,
+              true
+            )
+            "#,
+        )
+        .bind(registry_config_id)
+        .bind(tenant_id)
+        .bind(registry_name)
+        .bind(mount_path)
+        .bind(policy_profile_id)
+        .execute(&repository.pool)
+        .await
+        .expect("insert registry config");
+    }
+
     #[tokio::test]
     async fn in_memory_repository_binds_mode_and_snapshot_from_loaded_profile() {
         let tenant_id = Uuid::now_v7();
@@ -2984,6 +3884,150 @@ mod tests {
 
         assert_eq!(bound.mode, PolicyMode::Warn);
         assert_eq!(bound.policy_snapshot_id, snapshot_id);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live local postgres on 127.0.0.1:15432"]
+    async fn postgres_repository_binds_cargo_request_without_deps_dev_ecosystem_cast_failure() {
+        let repo_root = repo_root();
+        let migrate = run_local_command(
+            &repo_root,
+            "env",
+            &["DATABASE_URL=", "sh", "scripts/apply-migrations.sh"],
+        );
+        assert_command_success(
+            "env",
+            &["DATABASE_URL=", "sh", "scripts/apply-migrations.sh"],
+            &migrate,
+        );
+
+        let repository = PostgresPolicyRepository::connect(
+            "postgres://aegiscudo:aegiscudo@127.0.0.1:15432/aegiscudo",
+        )
+        .await
+        .expect("connect postgres policy repository");
+        let tenant_id = Uuid::now_v7();
+        let policy_profile_id = Uuid::now_v7();
+        let registry_config_id = Uuid::now_v7();
+
+        seed_postgres_policy_context(
+            &repository,
+            tenant_id,
+            registry_config_id,
+            policy_profile_id,
+        )
+        .await;
+
+        let bound = PolicyRepository::Postgres(repository)
+            .bind_decision_request(cargo_metadata_request(
+                tenant_id,
+                registry_config_id,
+                policy_profile_id,
+            ))
+            .await
+            .expect("cargo postgres policy context should bind");
+
+        assert_eq!(bound.coordinate.ecosystem, PackageEcosystem::Cargo);
+        assert_eq!(bound.coordinate.name, "aegiscudo-benign-cargo-fixture");
+        assert_eq!(bound.mode, PolicyMode::Enforce);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live local postgres on 127.0.0.1:15432"]
+    async fn postgres_repository_known_malicious_signal_requires_matching_request_digest() {
+        let repo_root = repo_root();
+        let migrate = run_local_command(
+            &repo_root,
+            "env",
+            &["DATABASE_URL=", "sh", "scripts/apply-migrations.sh"],
+        );
+        assert_command_success(
+            "env",
+            &["DATABASE_URL=", "sh", "scripts/apply-migrations.sh"],
+            &migrate,
+        );
+
+        let repository = PostgresPolicyRepository::connect(
+            "postgres://aegiscudo:aegiscudo@127.0.0.1:15432/aegiscudo",
+        )
+        .await
+        .expect("connect postgres policy repository");
+        let tenant_id = Uuid::now_v7();
+        let policy_profile_id = Uuid::now_v7();
+        let registry_config_id = Uuid::now_v7();
+
+        seed_postgres_policy_context(
+            &repository,
+            tenant_id,
+            registry_config_id,
+            policy_profile_id,
+        )
+        .await;
+
+        let scoped_digest = ArtifactDigest::sha256("c".repeat(64)).expect("valid digest");
+        let artifact_id = Uuid::now_v7();
+        sqlx::query(
+            r#"
+            INSERT INTO artifacts (
+              id,
+              tenant_id,
+              ecosystem,
+              namespace,
+              package_name,
+              package_version,
+              sha256,
+              size_bytes,
+              storage_uri
+            )
+            VALUES (
+              $1,
+              $2,
+              'cargo'::package_ecosystem,
+              NULL,
+              'aegiscudo-benign-cargo-fixture',
+              NULL,
+              $3,
+              123,
+              's3://fixtures/aegiscudo-benign-cargo-fixture.crate'
+            )
+            "#,
+        )
+        .bind(artifact_id)
+        .bind(tenant_id)
+        .bind(&scoped_digest.hex)
+        .execute(&repository.pool)
+        .await
+        .expect("insert artifact");
+
+        sqlx::query(
+            r#"
+            INSERT INTO malware_matches (artifact_id, source, indicator, confidence)
+            VALUES ($1, 'fixture-test', 'known-malicious-fixture', 'high')
+            "#,
+        )
+        .bind(artifact_id)
+        .execute(&repository.pool)
+        .await
+        .expect("insert malware match");
+
+        let bound_without_digest = PolicyRepository::Postgres(repository.clone())
+            .bind_decision_request(cargo_metadata_request(
+                tenant_id,
+                registry_config_id,
+                policy_profile_id,
+            ))
+            .await
+            .expect("digestless cargo request should bind");
+        assert!(!bound_without_digest.known_malicious);
+
+        let mut request_with_digest =
+            cargo_metadata_request(tenant_id, registry_config_id, policy_profile_id);
+        request_with_digest.request.requested_digest = Some(scoped_digest);
+        let bound_with_digest = PolicyRepository::Postgres(repository)
+            .bind_decision_request(request_with_digest)
+            .await
+            .expect("digest-scoped cargo request should bind");
+        assert!(bound_with_digest.known_malicious);
     }
 
     #[tokio::test]
@@ -3144,6 +4188,42 @@ mod tests {
             .expect("policy signal configuration should parse");
 
         assert_eq!(configuration.scorecard.code_review.action, SignalPolicyAction::Allow);
+        assert_eq!(
+            configuration.scorecard.branch_protection.action,
+            SignalPolicyAction::Allow
+        );
+        assert_eq!(configuration.scorecard.ci_cd.action, SignalPolicyAction::Allow);
+        assert_eq!(configuration.scorecard.maintained.action, SignalPolicyAction::Allow);
+        assert_eq!(
+            configuration.scorecard.signed_releases.action,
+            SignalPolicyAction::Allow
+        );
+    }
+
+    #[test]
+    fn policy_signal_configuration_accepts_legacy_policy_fixture_defaults() {
+        let document: serde_json::Value =
+            serde_json::from_str(include_str!("../../../schemas/fixtures/policy.legacy-phase1.json"))
+                .expect("legacy policy fixture parses");
+
+        let configuration = policy_signal_configuration_from_document(&document)
+            .expect("legacy policy fixture should parse");
+
+        assert_eq!(
+            configuration.vulnerable_above_threshold_action,
+            VulnerabilityPolicyAction::Warn
+        );
+        assert_eq!(
+            configuration.known_vulnerability_threshold.severity_floor,
+            VulnerabilitySeverity::High
+        );
+        assert_eq!(
+            configuration
+                .known_vulnerability_threshold
+                .epss_probability_floor,
+            None
+        );
+        assert_eq!(configuration.scorecard.code_review.min_score, 10.0);
         assert_eq!(
             configuration.scorecard.branch_protection.action,
             SignalPolicyAction::Allow
@@ -3999,6 +5079,7 @@ mod tests {
             "artifact-digest-reputation-risk",
             "github-to-registry-publish-gap-risk",
             "trusted-publisher-identity-mismatch",
+            "cross-ecosystem-ioc-correlation-risk",
             "maintainer-account-age-risk",
             "recent-maintainer-change-risk",
             "new-maintainer-ratio-risk",
@@ -4026,9 +5107,681 @@ mod tests {
         assert!(bound.artifact_digest_reputation_risk);
         assert!(bound.github_to_registry_publish_gap_risk);
         assert!(bound.trusted_publisher_identity_mismatch);
+        assert!(bound.cross_ecosystem_ioc_correlation_risk);
         assert!(bound.maintainer_account_age_risk);
         assert!(bound.recent_maintainer_change_risk);
         assert!(bound.new_maintainer_ratio_risk);
+    }
+
+    #[tokio::test]
+    async fn digest_scoped_package_signals_require_matching_request_digest() {
+        let tenant_id = Uuid::now_v7();
+        let policy_profile_id = Uuid::now_v7();
+        let registry_config_id = Uuid::now_v7();
+        let repository = InMemoryPolicyRepository::new();
+        repository
+            .upsert_profile(profile(tenant_id, policy_profile_id, Uuid::now_v7()))
+            .await;
+        repository
+            .upsert_registry_binding(RegistryPolicyBinding {
+                tenant_id,
+                registry_config_id,
+                policy_profile_id,
+                mode: PolicyMode::Warn,
+            })
+            .await;
+
+        let scoped_digest = ArtifactDigest::sha256("a".repeat(64)).expect("valid digest");
+        let request_without_digest = decision_request(tenant_id, registry_config_id, policy_profile_id);
+        repository
+            .remember_package_signal(
+                tenant_id,
+                request_without_digest.request.coordinate.clone(),
+                Some(scoped_digest.clone()),
+                "cross-ecosystem-ioc-correlation-risk",
+                None,
+            )
+            .await;
+
+        let bound_without_digest = PolicyRepository::InMemory(repository.clone())
+            .bind_decision_request(request_without_digest)
+            .await
+            .expect("digestless request should bind");
+        assert!(!bound_without_digest.cross_ecosystem_ioc_correlation_risk);
+
+        let mut request_with_digest = decision_request(tenant_id, registry_config_id, policy_profile_id);
+        request_with_digest.request.requested_digest = Some(scoped_digest);
+        let bound_with_digest = PolicyRepository::InMemory(repository)
+            .bind_decision_request(request_with_digest)
+            .await
+            .expect("digest-scoped request should bind");
+        assert!(bound_with_digest.cross_ecosystem_ioc_correlation_risk);
+    }
+
+    #[tokio::test]
+    async fn digest_scoped_known_malicious_signal_requires_matching_request_digest() {
+        let tenant_id = Uuid::now_v7();
+        let policy_profile_id = Uuid::now_v7();
+        let registry_config_id = Uuid::now_v7();
+        let repository = InMemoryPolicyRepository::new();
+        repository
+            .upsert_profile(profile(tenant_id, policy_profile_id, Uuid::now_v7()))
+            .await;
+        repository
+            .upsert_registry_binding(RegistryPolicyBinding {
+                tenant_id,
+                registry_config_id,
+                policy_profile_id,
+                mode: PolicyMode::Warn,
+            })
+            .await;
+
+        let scoped_digest = ArtifactDigest::sha256("b".repeat(64)).expect("valid digest");
+        let request_without_digest = decision_request(tenant_id, registry_config_id, policy_profile_id);
+        repository
+            .remember_package_signal(
+                tenant_id,
+                request_without_digest.request.coordinate.clone(),
+                Some(scoped_digest.clone()),
+                "known-malicious",
+                None,
+            )
+            .await;
+
+        let bound_without_digest = PolicyRepository::InMemory(repository.clone())
+            .bind_decision_request(request_without_digest)
+            .await
+            .expect("digestless request should bind");
+        assert!(!bound_without_digest.known_malicious);
+
+        let mut request_with_digest = decision_request(tenant_id, registry_config_id, policy_profile_id);
+        request_with_digest.request.requested_digest = Some(scoped_digest);
+        let bound_with_digest = PolicyRepository::InMemory(repository)
+            .bind_decision_request(request_with_digest)
+            .await
+            .expect("digest-scoped request should bind");
+        assert!(bound_with_digest.known_malicious);
+    }
+
+    #[tokio::test]
+    async fn cross_ecosystem_ioc_records_bind_policy_inputs() {
+        let tenant_id = Uuid::now_v7();
+        let policy_profile_id = Uuid::now_v7();
+        let registry_config_id = Uuid::now_v7();
+        let repository = InMemoryPolicyRepository::new();
+        repository
+            .upsert_profile(profile(tenant_id, policy_profile_id, Uuid::now_v7()))
+            .await;
+        repository
+            .upsert_registry_binding(RegistryPolicyBinding {
+                tenant_id,
+                registry_config_id,
+                policy_profile_id,
+                mode: PolicyMode::Warn,
+            })
+            .await;
+
+        let request = decision_request(tenant_id, registry_config_id, policy_profile_id);
+        repository
+            .remember_cross_ecosystem_ioc_snapshot(
+                "openssf-malicious-packages",
+                FeedState::Fresh,
+                vec![
+                    CrossEcosystemIocRecord {
+                        coordinate: PackageCoordinate::new(
+                            PackageEcosystem::Npm,
+                            "left-pad",
+                            None::<String>,
+                            None::<String>,
+                        ),
+                        indicator_type: "package-name".to_owned(),
+                        indicator_value: "left-pad".to_owned(),
+                    },
+                    CrossEcosystemIocRecord {
+                        coordinate: PackageCoordinate::new(
+                            PackageEcosystem::Pypi,
+                            "left-pad",
+                            None::<String>,
+                            None::<String>,
+                        ),
+                        indicator_type: "package-name".to_owned(),
+                        indicator_value: "left-pad".to_owned(),
+                    },
+                ],
+            )
+            .await;
+
+        let bound = PolicyRepository::InMemory(repository)
+            .bind_decision_request(request)
+            .await
+            .expect("policy context should bind");
+
+        assert!(bound.cross_ecosystem_ioc_correlation_risk);
+    }
+
+    #[tokio::test]
+    async fn maintainer_identity_ioc_records_bind_policy_inputs() {
+        let tenant_id = Uuid::now_v7();
+        let policy_profile_id = Uuid::now_v7();
+        let registry_config_id = Uuid::now_v7();
+        let repository = InMemoryPolicyRepository::new();
+        repository
+            .upsert_profile(profile(tenant_id, policy_profile_id, Uuid::now_v7()))
+            .await;
+        repository
+            .upsert_registry_binding(RegistryPolicyBinding {
+                tenant_id,
+                registry_config_id,
+                policy_profile_id,
+                mode: PolicyMode::Warn,
+            })
+            .await;
+
+        let request = decision_request(tenant_id, registry_config_id, policy_profile_id);
+        repository
+            .remember_cross_ecosystem_ioc_snapshot(
+                "openssf-malicious-packages",
+                FeedState::Fresh,
+                vec![
+                    CrossEcosystemIocRecord {
+                        coordinate: request.request.coordinate.clone(),
+                        indicator_type: "maintainer-identity".to_owned(),
+                        indicator_value: "evil@example.test".to_owned(),
+                    },
+                    CrossEcosystemIocRecord {
+                        coordinate: PackageCoordinate::new(
+                            PackageEcosystem::Pypi,
+                            "other-pad",
+                            None::<String>,
+                            None::<String>,
+                        ),
+                        indicator_type: "maintainer-identity".to_owned(),
+                        indicator_value: "evil@example.test".to_owned(),
+                    },
+                ],
+            )
+            .await;
+
+        let bound = PolicyRepository::InMemory(repository)
+            .bind_decision_request(request)
+            .await
+            .expect("policy context should bind");
+
+        assert!(bound.cross_ecosystem_ioc_correlation_risk);
+    }
+
+    #[tokio::test]
+    async fn sandbox_destination_ioc_records_bind_policy_inputs() {
+        let tenant_id = Uuid::now_v7();
+        let policy_profile_id = Uuid::now_v7();
+        let registry_config_id = Uuid::now_v7();
+        let snapshot_id = Uuid::now_v7();
+        let repository = InMemoryPolicyRepository::new();
+        repository
+            .upsert_profile(profile(tenant_id, policy_profile_id, snapshot_id))
+            .await;
+        repository
+            .upsert_registry_binding(RegistryPolicyBinding {
+                tenant_id,
+                registry_config_id,
+                policy_profile_id,
+                mode: PolicyMode::Warn,
+            })
+            .await;
+
+        let request = decision_request(tenant_id, registry_config_id, policy_profile_id);
+        repository
+            .remember_sandbox_run(
+                tenant_id,
+                request.request.coordinate.clone(),
+                None,
+                json!({
+                    "run_id": Uuid::now_v7(),
+                    "state": "completed",
+                    "violation_detected": true,
+                    "phases": [
+                        {
+                            "phase": "E",
+                            "events": [
+                                {
+                                    "type": "outbound-network-attempt",
+                                    "severity": "high",
+                                    "message": "captured outbound request",
+                                    "destination_url": "https://evil.example/collect",
+                                    "destination_host": "evil.example"
+                                }
+                            ]
+                        }
+                    ]
+                }),
+            )
+            .await;
+        repository
+            .remember_cross_ecosystem_ioc_snapshot(
+                "openssf-malicious-packages",
+                FeedState::Fresh,
+                vec![
+                    CrossEcosystemIocRecord {
+                        coordinate: PackageCoordinate::new(
+                            PackageEcosystem::Npm,
+                            "left-pad",
+                            None::<String>,
+                            None::<String>,
+                        ),
+                        indicator_type: "domain".to_owned(),
+                        indicator_value: "evil.example".to_owned(),
+                    },
+                    CrossEcosystemIocRecord {
+                        coordinate: PackageCoordinate::new(
+                            PackageEcosystem::Pypi,
+                            "other-pad",
+                            None::<String>,
+                            None::<String>,
+                        ),
+                        indicator_type: "domain".to_owned(),
+                        indicator_value: "evil.example".to_owned(),
+                    },
+                ],
+            )
+            .await;
+
+        let bound = PolicyRepository::InMemory(repository)
+            .bind_decision_request(request)
+            .await
+            .expect("policy context should bind");
+
+        assert!(bound.cross_ecosystem_ioc_correlation_risk);
+    }
+
+    #[tokio::test]
+    async fn behavioral_fingerprint_ioc_records_bind_policy_inputs() {
+        let tenant_id = Uuid::now_v7();
+        let policy_profile_id = Uuid::now_v7();
+        let registry_config_id = Uuid::now_v7();
+        let snapshot_id = Uuid::now_v7();
+        let repository = InMemoryPolicyRepository::new();
+        repository
+            .upsert_profile(profile(tenant_id, policy_profile_id, snapshot_id))
+            .await;
+        repository
+            .upsert_registry_binding(RegistryPolicyBinding {
+                tenant_id,
+                registry_config_id,
+                policy_profile_id,
+                mode: PolicyMode::Warn,
+            })
+            .await;
+
+        let request = decision_request(tenant_id, registry_config_id, policy_profile_id);
+        repository
+            .remember_static_analysis_report(
+                tenant_id,
+                request.request.coordinate.clone(),
+                None,
+                StaticEvidence {
+                    artifact_digest: ArtifactDigest::sha256("a".repeat(64)).expect("valid digest"),
+                    analyzer_version: "0.1.0".to_owned(),
+                    rule_set_version: "mvp-static-rules-2026-05".to_owned(),
+                    indicators: vec![
+                        StaticIndicator {
+                            indicator_type: "node-child-process".to_owned(),
+                            severity: Severity::High,
+                            file_path: "package/preinstall.js".to_owned(),
+                            start_line: 1,
+                            end_line: 1,
+                            redacted: true,
+                            summary: "child process execution detected".to_owned(),
+                            details: None,
+                        },
+                        StaticIndicator {
+                            indicator_type: "node-outbound-http".to_owned(),
+                            severity: Severity::High,
+                            file_path: "package/preinstall.js".to_owned(),
+                            start_line: 2,
+                            end_line: 2,
+                            redacted: true,
+                            summary: "outbound network access detected".to_owned(),
+                            details: None,
+                        },
+                    ],
+                },
+            )
+            .await;
+        repository
+            .remember_sandbox_run(
+                tenant_id,
+                request.request.coordinate.clone(),
+                None,
+                json!({
+                    "run_id": Uuid::now_v7(),
+                    "state": "completed",
+                    "violation_detected": true,
+                    "phases": [
+                        {
+                            "phase": "E",
+                            "events": [
+                                {
+                                    "type": "outbound-network-attempt",
+                                    "severity": "high",
+                                    "message": "captured outbound request",
+                                    "destination_url": "https://evil.example/collect",
+                                    "destination_host": "evil.example"
+                                }
+                            ]
+                        }
+                    ]
+                }),
+            )
+            .await;
+        repository
+            .remember_cross_ecosystem_ioc_snapshot(
+                "openssf-package-analysis",
+                FeedState::Fresh,
+                vec![
+                    CrossEcosystemIocRecord {
+                        coordinate: PackageCoordinate::new(
+                            PackageEcosystem::Npm,
+                            "behavioral-match",
+                            None::<String>,
+                            None::<String>,
+                        ),
+                        indicator_type: "behavioral-fingerprint".to_owned(),
+                        indicator_value: "exec_binary|network_access".to_owned(),
+                    },
+                    CrossEcosystemIocRecord {
+                        coordinate: PackageCoordinate::new(
+                            PackageEcosystem::Pypi,
+                            "other-pad",
+                            None::<String>,
+                            None::<String>,
+                        ),
+                        indicator_type: "behavioral-fingerprint".to_owned(),
+                        indicator_value: "exec_binary|network_access".to_owned(),
+                    },
+                ],
+            )
+            .await;
+
+        let bound = PolicyRepository::InMemory(repository)
+            .bind_decision_request(request)
+            .await
+            .expect("policy context should bind");
+
+        assert!(bound.cross_ecosystem_ioc_correlation_risk);
+    }
+
+    #[tokio::test]
+    async fn behavioral_fingerprint_ioc_records_require_static_and_dynamic_evidence() {
+        let tenant_id = Uuid::now_v7();
+        let policy_profile_id = Uuid::now_v7();
+        let registry_config_id = Uuid::now_v7();
+        let snapshot_id = Uuid::now_v7();
+        let repository = InMemoryPolicyRepository::new();
+        repository
+            .upsert_profile(profile(tenant_id, policy_profile_id, snapshot_id))
+            .await;
+        repository
+            .upsert_registry_binding(RegistryPolicyBinding {
+                tenant_id,
+                registry_config_id,
+                policy_profile_id,
+                mode: PolicyMode::Warn,
+            })
+            .await;
+
+        let request = decision_request(tenant_id, registry_config_id, policy_profile_id);
+        repository
+            .remember_static_analysis_report(
+                tenant_id,
+                request.request.coordinate.clone(),
+                None,
+                StaticEvidence {
+                    artifact_digest: ArtifactDigest::sha256("b".repeat(64)).expect("valid digest"),
+                    analyzer_version: "0.1.0".to_owned(),
+                    rule_set_version: "mvp-static-rules-2026-05".to_owned(),
+                    indicators: vec![StaticIndicator {
+                        indicator_type: "node-outbound-http".to_owned(),
+                        severity: Severity::High,
+                        file_path: "package/preinstall.js".to_owned(),
+                        start_line: 1,
+                        end_line: 1,
+                        redacted: true,
+                        summary: "outbound network access detected".to_owned(),
+                        details: None,
+                    }],
+                },
+            )
+            .await;
+        repository
+            .remember_cross_ecosystem_ioc_snapshot(
+                "openssf-package-analysis",
+                FeedState::Fresh,
+                vec![
+                    CrossEcosystemIocRecord {
+                        coordinate: PackageCoordinate::new(
+                            PackageEcosystem::Npm,
+                            "behavioral-match",
+                            None::<String>,
+                            None::<String>,
+                        ),
+                        indicator_type: "behavioral-fingerprint".to_owned(),
+                        indicator_value: "network_access".to_owned(),
+                    },
+                    CrossEcosystemIocRecord {
+                        coordinate: PackageCoordinate::new(
+                            PackageEcosystem::Pypi,
+                            "other-pad",
+                            None::<String>,
+                            None::<String>,
+                        ),
+                        indicator_type: "behavioral-fingerprint".to_owned(),
+                        indicator_value: "network_access".to_owned(),
+                    },
+                ],
+            )
+            .await;
+
+        let bound = PolicyRepository::InMemory(repository)
+            .bind_decision_request(request)
+            .await
+            .expect("policy context should bind");
+
+        assert!(!bound.cross_ecosystem_ioc_correlation_risk);
+    }
+
+    #[tokio::test]
+    async fn latest_cross_ecosystem_ioc_snapshot_clears_prior_match() {
+        let tenant_id = Uuid::now_v7();
+        let policy_profile_id = Uuid::now_v7();
+        let registry_config_id = Uuid::now_v7();
+        let repository = InMemoryPolicyRepository::new();
+        repository
+            .upsert_profile(profile(tenant_id, policy_profile_id, Uuid::now_v7()))
+            .await;
+        repository
+            .upsert_registry_binding(RegistryPolicyBinding {
+                tenant_id,
+                registry_config_id,
+                policy_profile_id,
+                mode: PolicyMode::Warn,
+            })
+            .await;
+
+        repository
+            .remember_cross_ecosystem_ioc_snapshot(
+                "openssf-malicious-packages",
+                FeedState::Fresh,
+                vec![
+                    CrossEcosystemIocRecord {
+                        coordinate: PackageCoordinate::new(
+                            PackageEcosystem::Npm,
+                            "left-pad",
+                            None::<String>,
+                            None::<String>,
+                        ),
+                        indicator_type: "package-name".to_owned(),
+                        indicator_value: "left-pad".to_owned(),
+                    },
+                    CrossEcosystemIocRecord {
+                        coordinate: PackageCoordinate::new(
+                            PackageEcosystem::Pypi,
+                            "left-pad",
+                            None::<String>,
+                            None::<String>,
+                        ),
+                        indicator_type: "package-name".to_owned(),
+                        indicator_value: "left-pad".to_owned(),
+                    },
+                ],
+            )
+            .await;
+        repository
+            .remember_cross_ecosystem_ioc_snapshot(
+                "openssf-malicious-packages",
+                FeedState::Fresh,
+                vec![CrossEcosystemIocRecord {
+                    coordinate: PackageCoordinate::new(
+                        PackageEcosystem::Npm,
+                        "left-pad",
+                        None::<String>,
+                        None::<String>,
+                    ),
+                    indicator_type: "package-name".to_owned(),
+                    indicator_value: "left-pad".to_owned(),
+                }],
+            )
+            .await;
+
+        let bound = PolicyRepository::InMemory(repository)
+            .bind_decision_request(decision_request(tenant_id, registry_config_id, policy_profile_id))
+            .await
+            .expect("policy context should bind");
+
+        assert!(!bound.cross_ecosystem_ioc_correlation_risk);
+    }
+
+    #[tokio::test]
+    async fn empty_latest_cross_ecosystem_ioc_snapshot_clears_prior_match() {
+        let tenant_id = Uuid::now_v7();
+        let policy_profile_id = Uuid::now_v7();
+        let registry_config_id = Uuid::now_v7();
+        let repository = InMemoryPolicyRepository::new();
+        repository
+            .upsert_profile(profile(tenant_id, policy_profile_id, Uuid::now_v7()))
+            .await;
+        repository
+            .upsert_registry_binding(RegistryPolicyBinding {
+                tenant_id,
+                registry_config_id,
+                policy_profile_id,
+                mode: PolicyMode::Warn,
+            })
+            .await;
+
+        repository
+            .remember_cross_ecosystem_ioc_snapshot(
+                "openssf-malicious-packages",
+                FeedState::Fresh,
+                vec![
+                    CrossEcosystemIocRecord {
+                        coordinate: PackageCoordinate::new(
+                            PackageEcosystem::Npm,
+                            "left-pad",
+                            None::<String>,
+                            None::<String>,
+                        ),
+                        indicator_type: "package-name".to_owned(),
+                        indicator_value: "left-pad".to_owned(),
+                    },
+                    CrossEcosystemIocRecord {
+                        coordinate: PackageCoordinate::new(
+                            PackageEcosystem::Pypi,
+                            "left-pad",
+                            None::<String>,
+                            None::<String>,
+                        ),
+                        indicator_type: "package-name".to_owned(),
+                        indicator_value: "left-pad".to_owned(),
+                    },
+                ],
+            )
+            .await;
+        repository
+            .remember_cross_ecosystem_ioc_snapshot(
+                "openssf-malicious-packages",
+                FeedState::Fresh,
+                Vec::new(),
+            )
+            .await;
+
+        let bound = PolicyRepository::InMemory(repository)
+            .bind_decision_request(decision_request(tenant_id, registry_config_id, policy_profile_id))
+            .await
+            .expect("policy context should bind");
+
+        assert!(!bound.cross_ecosystem_ioc_correlation_risk);
+    }
+
+    #[tokio::test]
+    async fn unavailable_latest_cross_ecosystem_ioc_snapshot_preserves_prior_match() {
+        let tenant_id = Uuid::now_v7();
+        let policy_profile_id = Uuid::now_v7();
+        let registry_config_id = Uuid::now_v7();
+        let repository = InMemoryPolicyRepository::new();
+        repository
+            .upsert_profile(profile(tenant_id, policy_profile_id, Uuid::now_v7()))
+            .await;
+        repository
+            .upsert_registry_binding(RegistryPolicyBinding {
+                tenant_id,
+                registry_config_id,
+                policy_profile_id,
+                mode: PolicyMode::Warn,
+            })
+            .await;
+
+        repository
+            .remember_cross_ecosystem_ioc_snapshot(
+                "openssf-malicious-packages",
+                FeedState::Fresh,
+                vec![
+                    CrossEcosystemIocRecord {
+                        coordinate: PackageCoordinate::new(
+                            PackageEcosystem::Npm,
+                            "left-pad",
+                            None::<String>,
+                            None::<String>,
+                        ),
+                        indicator_type: "package-name".to_owned(),
+                        indicator_value: "left-pad".to_owned(),
+                    },
+                    CrossEcosystemIocRecord {
+                        coordinate: PackageCoordinate::new(
+                            PackageEcosystem::Pypi,
+                            "left-pad",
+                            None::<String>,
+                            None::<String>,
+                        ),
+                        indicator_type: "package-name".to_owned(),
+                        indicator_value: "left-pad".to_owned(),
+                    },
+                ],
+            )
+            .await;
+        repository
+            .remember_cross_ecosystem_ioc_snapshot(
+                "openssf-malicious-packages",
+                FeedState::Unavailable,
+                Vec::new(),
+            )
+            .await;
+
+        let bound = PolicyRepository::InMemory(repository)
+            .bind_decision_request(decision_request(tenant_id, registry_config_id, policy_profile_id))
+            .await
+            .expect("policy context should bind");
+
+        assert!(bound.cross_ecosystem_ioc_correlation_risk);
     }
 
     #[tokio::test]
@@ -4082,6 +5835,178 @@ mod tests {
         assert!(!bound.scorecard_ci_cd_risk);
         assert!(!bound.scorecard_maintained_risk);
         assert!(bound.scorecard_signed_releases_risk);
+    }
+
+    #[tokio::test]
+    async fn transitive_dependency_signals_bind_policy_inputs() {
+        let tenant_id = Uuid::now_v7();
+        let policy_profile_id = Uuid::now_v7();
+        let registry_config_id = Uuid::now_v7();
+        let repository = InMemoryPolicyRepository::new();
+        repository
+            .upsert_profile(profile(tenant_id, policy_profile_id, Uuid::now_v7()))
+            .await;
+        repository
+            .upsert_registry_binding(RegistryPolicyBinding {
+                tenant_id,
+                registry_config_id,
+                policy_profile_id,
+                mode: PolicyMode::Warn,
+            })
+            .await;
+
+        let request = decision_request(tenant_id, registry_config_id, policy_profile_id);
+        let direct_dependency = PackageCoordinate::new(
+            aegiscudo_core::PackageEcosystem::Npm,
+            "mid-child",
+            Some("2.0.0"),
+            None::<String>,
+        );
+        let transitive_dependency = PackageCoordinate::new(
+            aegiscudo_core::PackageEcosystem::Npm,
+            "bad-child",
+            Some("9.9.9"),
+            None::<String>,
+        );
+        repository
+            .remember_package_signal(
+                tenant_id,
+                transitive_dependency.clone(),
+                None,
+                "known-malicious",
+                None,
+            )
+            .await;
+        repository
+            .remember_package_signal(
+                tenant_id,
+                transitive_dependency.clone(),
+                None,
+                "install-script-detected",
+                None,
+            )
+            .await;
+        repository
+            .remember_deps_dev_dependency_snapshot(
+                vec![request.request.coordinate.clone(), direct_dependency.clone()],
+                vec![
+                    (request.request.coordinate.clone(), vec![direct_dependency.clone()]),
+                    (direct_dependency, vec![transitive_dependency]),
+                ],
+            )
+            .await;
+
+        let bound = PolicyRepository::InMemory(repository)
+            .bind_decision_request(request)
+            .await
+            .expect("policy context should bind");
+
+        assert!(bound.known_malicious);
+        assert!(bound.install_script_detected);
+    }
+
+    #[tokio::test]
+    async fn latest_dependency_snapshot_clears_prior_transitive_signals() {
+        let tenant_id = Uuid::now_v7();
+        let policy_profile_id = Uuid::now_v7();
+        let registry_config_id = Uuid::now_v7();
+        let repository = InMemoryPolicyRepository::new();
+        repository
+            .upsert_profile(profile(tenant_id, policy_profile_id, Uuid::now_v7()))
+            .await;
+        repository
+            .upsert_registry_binding(RegistryPolicyBinding {
+                tenant_id,
+                registry_config_id,
+                policy_profile_id,
+                mode: PolicyMode::Warn,
+            })
+            .await;
+
+        let request = decision_request(tenant_id, registry_config_id, policy_profile_id);
+        let transitive_dependency = PackageCoordinate::new(
+            aegiscudo_core::PackageEcosystem::Npm,
+            "bad-child",
+            Some("9.9.9"),
+            None::<String>,
+        );
+        repository
+            .remember_package_signal(
+                tenant_id,
+                transitive_dependency.clone(),
+                None,
+                "known-malicious",
+                None,
+            )
+            .await;
+        repository
+            .remember_deps_dev_dependency_snapshot(
+                vec![request.request.coordinate.clone()],
+                vec![(request.request.coordinate.clone(), vec![transitive_dependency])],
+            )
+            .await;
+        repository
+            .remember_deps_dev_dependency_snapshot(
+                vec![request.request.coordinate.clone()],
+                Vec::new(),
+            )
+            .await;
+
+        let bound = PolicyRepository::InMemory(repository)
+            .bind_decision_request(request)
+            .await
+            .expect("policy context should bind");
+
+        assert!(!bound.known_malicious);
+    }
+
+    #[tokio::test]
+    async fn edge_only_dependency_snapshot_still_binds_transitive_signals() {
+        let tenant_id = Uuid::now_v7();
+        let policy_profile_id = Uuid::now_v7();
+        let registry_config_id = Uuid::now_v7();
+        let repository = InMemoryPolicyRepository::new();
+        repository
+            .upsert_profile(profile(tenant_id, policy_profile_id, Uuid::now_v7()))
+            .await;
+        repository
+            .upsert_registry_binding(RegistryPolicyBinding {
+                tenant_id,
+                registry_config_id,
+                policy_profile_id,
+                mode: PolicyMode::Warn,
+            })
+            .await;
+
+        let request = decision_request(tenant_id, registry_config_id, policy_profile_id);
+        let transitive_dependency = PackageCoordinate::new(
+            aegiscudo_core::PackageEcosystem::Npm,
+            "bad-child",
+            Some("9.9.9"),
+            None::<String>,
+        );
+        repository
+            .remember_package_signal(
+                tenant_id,
+                transitive_dependency.clone(),
+                None,
+                "known-malicious",
+                None,
+            )
+            .await;
+        repository
+            .remember_deps_dev_dependency_snapshot(
+                Vec::new(),
+                vec![(request.request.coordinate.clone(), vec![transitive_dependency])],
+            )
+            .await;
+
+        let bound = PolicyRepository::InMemory(repository)
+            .bind_decision_request(request)
+            .await
+            .expect("policy context should bind");
+
+        assert!(bound.known_malicious);
     }
 
     #[tokio::test]
@@ -4190,6 +6115,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn graph_only_latest_deps_dev_record_does_not_mask_scorecard_lookup() {
+        let tenant_id = Uuid::now_v7();
+        let policy_profile_id = Uuid::now_v7();
+        let registry_config_id = Uuid::now_v7();
+        let repository = InMemoryPolicyRepository::new();
+        repository
+            .upsert_profile(profile(tenant_id, policy_profile_id, Uuid::now_v7()))
+            .await;
+        repository
+            .upsert_registry_binding(RegistryPolicyBinding {
+                tenant_id,
+                registry_config_id,
+                policy_profile_id,
+                mode: PolicyMode::Warn,
+            })
+            .await;
+
+        let request = decision_request(tenant_id, registry_config_id, policy_profile_id);
+        repository
+            .remember_deps_dev_package(
+                request.request.coordinate.clone(),
+                vec![json!({
+                    "type": "SOURCE_REPO",
+                    "url": "https://github.com/lodash/lodash"
+                })],
+            )
+            .await;
+        repository
+            .remember_scorecard_result(
+                "github.com/lodash/lodash",
+                vec![("Branch-Protection".to_owned(), 8.0)],
+            )
+            .await;
+        repository
+            .remember_deps_dev_package(request.request.coordinate.clone(), Vec::new())
+            .await;
+
+        let bound = PolicyRepository::InMemory(repository)
+            .bind_decision_request(request)
+            .await
+            .expect("policy context should bind");
+
+        assert!(bound.scorecard_branch_protection_risk);
+    }
+
+    #[tokio::test]
     async fn feed_snapshots_bind_state_and_age() {
         let tenant_id = Uuid::now_v7();
         let policy_profile_id = Uuid::now_v7();
@@ -4223,6 +6194,139 @@ mod tests {
             .expect("policy context should bind");
 
         assert_eq!(bound.feed_state, FeedState::Fresh);
+        assert!(bound.feed_snapshot_age_seconds >= 30);
+    }
+
+    #[tokio::test]
+    async fn deps_dev_feed_snapshot_age_can_mark_bound_state_stale() {
+        let tenant_id = Uuid::now_v7();
+        let policy_profile_id = Uuid::now_v7();
+        let registry_config_id = Uuid::now_v7();
+        let repository = InMemoryPolicyRepository::new();
+        repository
+            .upsert_profile(profile(tenant_id, policy_profile_id, Uuid::now_v7()))
+            .await;
+        repository
+            .upsert_registry_binding(RegistryPolicyBinding {
+                tenant_id,
+                registry_config_id,
+                policy_profile_id,
+                mode: PolicyMode::Warn,
+            })
+            .await;
+
+        let fresh_created_at = Utc::now() - chrono::Duration::seconds(30);
+        let stale_created_at = Utc::now() - chrono::Duration::seconds(
+            i64::try_from(FRESH_FEED_MAX_AGE_SECONDS + 60).expect("age fits in i64"),
+        );
+
+        for feed_name in MVP_FEED_NAMES {
+            let created_at = if *feed_name == "deps.dev" {
+                stale_created_at
+            } else {
+                fresh_created_at
+            };
+            repository
+                .remember_feed_snapshot(*feed_name, FeedState::Fresh, Some(created_at), created_at)
+                .await;
+        }
+
+        let bound = PolicyRepository::InMemory(repository)
+            .bind_decision_request(decision_request(
+                tenant_id,
+                registry_config_id,
+                policy_profile_id,
+            ))
+            .await
+            .expect("policy context should bind");
+
+        assert_eq!(bound.feed_state, FeedState::Stale);
+        assert!(bound.feed_snapshot_age_seconds > FRESH_FEED_MAX_AGE_SECONDS);
+    }
+
+    #[tokio::test]
+    async fn openssf_scorecard_degraded_snapshot_marks_bound_state_degraded() {
+        let tenant_id = Uuid::now_v7();
+        let policy_profile_id = Uuid::now_v7();
+        let registry_config_id = Uuid::now_v7();
+        let repository = InMemoryPolicyRepository::new();
+        repository
+            .upsert_profile(profile(tenant_id, policy_profile_id, Uuid::now_v7()))
+            .await;
+        repository
+            .upsert_registry_binding(RegistryPolicyBinding {
+                tenant_id,
+                registry_config_id,
+                policy_profile_id,
+                mode: PolicyMode::Warn,
+            })
+            .await;
+
+        let created_at = Utc::now() - chrono::Duration::seconds(30);
+        for feed_name in MVP_FEED_NAMES {
+            let state = if *feed_name == "openssf-scorecard" {
+                FeedState::Degraded
+            } else {
+                FeedState::Fresh
+            };
+            repository
+                .remember_feed_snapshot(*feed_name, state, Some(created_at), created_at)
+                .await;
+        }
+
+        let bound = PolicyRepository::InMemory(repository)
+            .bind_decision_request(decision_request(
+                tenant_id,
+                registry_config_id,
+                policy_profile_id,
+            ))
+            .await
+            .expect("policy context should bind");
+
+        assert_eq!(bound.feed_state, FeedState::Degraded);
+        assert!(bound.feed_snapshot_age_seconds >= 30);
+    }
+
+    #[tokio::test]
+    async fn openssf_package_analysis_degraded_snapshot_marks_bound_state_degraded() {
+        let tenant_id = Uuid::now_v7();
+        let policy_profile_id = Uuid::now_v7();
+        let registry_config_id = Uuid::now_v7();
+        let repository = InMemoryPolicyRepository::new();
+        repository
+            .upsert_profile(profile(tenant_id, policy_profile_id, Uuid::now_v7()))
+            .await;
+        repository
+            .upsert_registry_binding(RegistryPolicyBinding {
+                tenant_id,
+                registry_config_id,
+                policy_profile_id,
+                mode: PolicyMode::Warn,
+            })
+            .await;
+
+        let created_at = Utc::now() - chrono::Duration::seconds(30);
+        for feed_name in MVP_FEED_NAMES {
+            let state = if *feed_name == "openssf-package-analysis" {
+                FeedState::Degraded
+            } else {
+                FeedState::Fresh
+            };
+            repository
+                .remember_feed_snapshot(*feed_name, state, Some(created_at), created_at)
+                .await;
+        }
+
+        let bound = PolicyRepository::InMemory(repository)
+            .bind_decision_request(decision_request(
+                tenant_id,
+                registry_config_id,
+                policy_profile_id,
+            ))
+            .await
+            .expect("policy context should bind");
+
+        assert_eq!(bound.feed_state, FeedState::Degraded);
         assert!(bound.feed_snapshot_age_seconds >= 30);
     }
 }

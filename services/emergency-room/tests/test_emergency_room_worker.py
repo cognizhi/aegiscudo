@@ -177,8 +177,11 @@ async def test_process_next_sandbox_job_resolves_runner_from_profile_registry() 
 def test_profile_selection_and_import_name() -> None:
     npm_job = build_job(PackageEcosystem.NPM)
     pypi_job = build_job(PackageEcosystem.PYPI)
+    maven_job = build_job(PackageEcosystem.MAVEN)
 
     assert profile_for_job(npm_job) == SandboxProfile.NPM_INSTALL
     assert profile_for_job(pypi_job) == SandboxProfile.PYTHON_INSTALL
+    assert profile_for_job(maven_job) == SandboxProfile.JVM_BINARY_PROFILE
     assert infer_import_name(npm_job) is None
     assert infer_import_name(pypi_job) == "env_snoop"
+    assert infer_import_name(maven_job) is None

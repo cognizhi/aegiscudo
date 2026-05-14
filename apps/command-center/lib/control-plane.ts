@@ -4,17 +4,25 @@ import type {
   DashboardMetrics,
   ConnectionTestResult,
   CredentialStatus,
+  DepsDdevPackagesResponse,
+  GithubActionsScanResult,
+  IocRecordsResponse,
   InvestigationAuditEvent,
   LlmUsage,
+  OpenVexDocument,
+  OpenVexDocumentSummary,
   OverrideActionRequest,
   OverrideQueueItem,
   OverrideResponse,
   PolicyProfileSummary,
+  PolicyScorecardThresholds,
   PolicySimulationRequest,
   PolicySimulationResult,
   QuarantineQueueItem,
   RegistryConfig,
   RequestTimelineBucket,
+  SbomDocumentSummary,
+  SbomNtiaValidation,
 } from "@aegiscudo/shared-types";
 import { getActorId, loadPersistedPersonaId } from "@/lib/mock-personas";
 import type { PersonaId } from "@/lib/mock-personas";
@@ -23,6 +31,28 @@ const fixtureTenantId = "018f4a6f-55d0-7000-8000-000000000001";
 const fixtureActorId = "018f4a6f-55d0-7000-8000-000000000011";
 const defaultApiBaseUrl = "http://127.0.0.1:18002";
 const actorHeader = "x-aegiscudo-actor-id";
+const proxiedDownloadHeaders = [
+  "content-type",
+  "content-disposition",
+  "content-length",
+  "cache-control",
+  "etag",
+  "content-encoding",
+] as const;
+
+export type SbomNtiaValidationResult = SbomNtiaValidation;
+
+export type TenantSbomDocument = SbomDocumentSummary;
+
+export type TenantOpenVexDocumentSummary = OpenVexDocumentSummary;
+
+export type TenantOpenVexDocument = OpenVexDocument;
+
+export interface TenantSbomDownload {
+  blob: Blob;
+  fileName: string | null;
+  contentType: string;
+}
 
 export function getDefaultTenantId(): string {
   return process.env.NEXT_PUBLIC_AEGISCUDO_TENANT_ID ?? fixtureTenantId;
@@ -80,12 +110,137 @@ export async function fetchDashboardMetrics(tenantId: string, personaId?: Person
   return readJsonResponse<DashboardMetrics>(response);
 }
 
+export async function fetchTenantSboms(
+  tenantId: string,
+  options: { limit?: number } = {},
+  personaId?: PersonaId,
+): Promise<TenantSbomDocument[]> {
+  const search =
+    options.limit !== undefined ? `?limit=${encodeURIComponent(String(options.limit))}` : "";
+  const response = await fetch(`/api/tenants/${tenantId}/analysis/sboms${search}`, {
+    cache: "no-store",
+    headers: actorHeaders(personaId),
+  });
+  return readJsonResponse<TenantSbomDocument[]>(response);
+}
+
+export async function downloadTenantSbom(
+  tenantId: string,
+  sbomId: string,
+  personaId?: PersonaId,
+): Promise<TenantSbomDownload> {
+  const response = await fetch(`/api/tenants/${tenantId}/analysis/sboms/${sbomId}`, {
+    cache: "no-store",
+    headers: actorHeaders(personaId),
+  });
+
+  if (!response.ok) {
+    throw new Error(await readErrorMessage(response));
+  }
+
+  return {
+    blob: await response.blob(),
+    fileName: parseContentDispositionFilename(
+      response.headers.get("content-disposition"),
+    ),
+    contentType: response.headers.get("content-type") ?? "application/json",
+  };
+}
+
+export async function fetchTenantOpenVexDocuments(
+  tenantId: string,
+  personaId?: PersonaId,
+): Promise<TenantOpenVexDocumentSummary[]> {
+  const response = await fetch(`/api/tenants/${tenantId}/analysis/openvex-documents`, {
+    cache: "no-store",
+    headers: actorHeaders(personaId),
+  });
+  return readJsonResponse<TenantOpenVexDocumentSummary[]>(response);
+}
+
+export async function fetchTenantOpenVexDocument(
+  tenantId: string,
+  openVexDocumentId: string,
+  personaId?: PersonaId,
+): Promise<TenantOpenVexDocument> {
+  const response = await fetch(
+    `/api/tenants/${tenantId}/analysis/openvex-documents/${openVexDocumentId}`,
+    {
+      cache: "no-store",
+      headers: actorHeaders(personaId),
+    },
+  );
+  return readJsonResponse<TenantOpenVexDocument>(response);
+}
+
 export async function fetchPolicyProfiles(tenantId: string, personaId?: PersonaId): Promise<PolicyProfileSummary[]> {
   const response = await fetch(`/api/tenants/${tenantId}/policy-profiles`, {
     cache: "no-store",
     headers: actorHeaders(personaId),
   });
   return readJsonResponse<PolicyProfileSummary[]>(response);
+}
+
+export async function fetchPolicyScorecardThresholds(
+  tenantId: string,
+  policyProfileId: string,
+  personaId?: PersonaId,
+): Promise<PolicyScorecardThresholds> {
+  const response = await fetch(
+    `/api/tenants/${tenantId}/policy-profiles/${policyProfileId}/scorecard-thresholds`,
+    {
+      cache: "no-store",
+      headers: actorHeaders(personaId),
+    },
+  );
+  return readJsonResponse<PolicyScorecardThresholds>(response);
+}
+
+export async function fetchDepsDdevPackages(
+  tenantId: string,
+  params?: { limit?: number; ecosystem?: string },
+  personaId?: PersonaId,
+): Promise<DepsDdevPackagesResponse> {
+  const query = new URLSearchParams();
+  if (params?.limit !== undefined) query.set("limit", String(params.limit));
+  if (params?.ecosystem) query.set("ecosystem", params.ecosystem);
+  const qs = query.size > 0 ? `?${query.toString()}` : "";
+  const response = await fetch(`/api/tenants/${tenantId}/deps-dev/packages${qs}`, {
+    cache: "no-store",
+    headers: actorHeaders(personaId),
+  });
+  return readJsonResponse<DepsDdevPackagesResponse>(response);
+}
+
+export async function fetchIocRecords(
+  tenantId: string,
+  params?: { limit?: number; indicator_type?: string },
+  personaId?: PersonaId,
+): Promise<IocRecordsResponse> {
+  const query = new URLSearchParams();
+  if (params?.limit !== undefined) query.set("limit", String(params.limit));
+  if (params?.indicator_type) query.set("indicator_type", params.indicator_type);
+  const qs = query.size > 0 ? `?${query.toString()}` : "";
+  const response = await fetch(`/api/tenants/${tenantId}/ioc-records${qs}`, {
+    cache: "no-store",
+    headers: actorHeaders(personaId),
+  });
+  return readJsonResponse<IocRecordsResponse>(response);
+}
+
+export async function fetchGithubActionsScanResults(
+  tenantId: string,
+  params?: { limit?: number },
+  personaId?: PersonaId,
+): Promise<GithubActionsScanResult[]> {
+  const query = new URLSearchParams();
+  if (params?.limit !== undefined) query.set("limit", String(params.limit));
+  const qs = query.size > 0 ? `?${query.toString()}` : "";
+  const response = await fetch(
+    `/api/tenants/${tenantId}/github-actions/scan-results${qs}`,
+    { cache: "no-store", headers: actorHeaders(personaId) },
+  );
+  return readJsonResponse<GithubActionsScanResult[]>(response);
 }
 
 export async function simulatePolicyReplay(
@@ -158,6 +313,20 @@ export async function proxyControlPlaneJson(
   pathname: string,
   options: ProxyControlPlaneJsonOptions = {},
 ): Promise<Response> {
+  return proxyJsonService(
+    controlPlaneApiBaseUrl(),
+    pathname,
+    options,
+    "Unable to reach the Aegiscudo API investigation endpoints.",
+  );
+}
+
+async function proxyJsonService(
+  baseUrl: string,
+  pathname: string,
+  options: ProxyControlPlaneJsonOptions,
+  unavailableMessage: string,
+): Promise<Response> {
   try {
     const headers: Record<string, string> = {
       accept: "application/json",
@@ -187,39 +356,66 @@ export async function proxyControlPlaneJson(
     if (options.body !== undefined) {
       requestInit.body = JSON.stringify(options.body);
     }
-    const upstream = await fetch(`${controlPlaneApiBaseUrl().replace(/\/$/, "")}${pathname}`, requestInit);
-    const body = await upstream.text();
-    const contentDisposition = upstream.headers.get("content-disposition");
-    return new Response(body, {
+    const upstream = await fetch(`${baseUrl.replace(/\/$/, "")}${pathname}`, requestInit);
+    const responseHeaders = new Headers();
+    for (const headerName of proxiedDownloadHeaders) {
+      const value = upstream.headers.get(headerName);
+      if (value !== null) {
+        responseHeaders.set(headerName, value);
+      }
+    }
+    if (!responseHeaders.has("content-type")) {
+      responseHeaders.set("content-type", "application/json");
+    }
+    return new Response(upstream.body, {
       status: upstream.status,
-      headers: {
-        "content-type": upstream.headers.get("content-type") ?? "application/json",
-        ...(contentDisposition ? { "content-disposition": contentDisposition } : {}),
-      },
+      headers: responseHeaders,
     });
   } catch (error) {
     const message =
       error instanceof Error
         ? error.message
-        : "Unable to reach the Aegiscudo API investigation endpoints.";
+        : unavailableMessage;
     return Response.json({ message }, { status: 503 });
   }
 }
 
 async function readJsonResponse<T>(response: Response): Promise<T> {
   if (!response.ok) {
-    let message = `Request failed with status ${response.status}`;
-    try {
-      const errorBody = (await response.json()) as { message?: string };
-      if (typeof errorBody.message === "string" && errorBody.message.trim()) {
-        message = errorBody.message;
-      }
-    } catch {
-      // Ignore JSON parse failures and keep the generic message.
-    }
-    throw new Error(message);
+    throw new Error(await readErrorMessage(response));
   }
   return (await response.json()) as T;
+}
+
+async function readErrorMessage(response: Response): Promise<string> {
+  let message = `Request failed with status ${response.status}`;
+  try {
+    const errorBody = (await response.json()) as { message?: string };
+    if (typeof errorBody.message === "string" && errorBody.message.trim()) {
+      message = errorBody.message;
+    }
+  } catch {
+    // Ignore JSON parse failures and keep the generic message.
+  }
+  return message;
+}
+
+function parseContentDispositionFilename(value: string | null): string | null {
+  if (!value) {
+    return null;
+  }
+
+  const encodedMatch = value.match(/filename\*=UTF-8''([^;]+)/i);
+  if (encodedMatch?.[1]) {
+    try {
+      return decodeURIComponent(encodedMatch[1]);
+    } catch {
+      // Fall through to the plain filename parser.
+    }
+  }
+
+  const plainMatch = value.match(/filename="?([^";]+)"?/i);
+  return plainMatch?.[1] ?? null;
 }
 
 export async function fetchRegistryConfigs(tenantId: string, personaId?: PersonaId): Promise<RegistryConfig[]> {

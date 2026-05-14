@@ -133,26 +133,11 @@ That often means updating one or more of:
 
 Conventional Commits are preferred because the repo is already structured around release automation expectations:
 
-- format commits as `type(scope): summary` when a scope adds clarity, for example `fix(mosquito-net): preserve explicit artifact routes during fallback`
-- keep the first line imperative and specific enough that release notes are readable without opening the PR
 - `feat:` for user-visible capability additions
 - `fix:` for behavior corrections
 - `docs:` for documentation-only changes
 - `test:` for fixture and validation additions
 - `refactor:` for internal structure changes without behavior changes
-
-If a change spans multiple concerns, prefer splitting it into multiple commits instead of collapsing unrelated work under one broad summary. This helps `release-please` group changes into meaningful release notes.
-
-## Release Version Strategy
-
-Aegiscudo currently uses a single monorepo release version.
-
-- `release-please` tracks the repository root package at `.` using `.release-please-manifest.json`
-- release PRs and tags advance one shared version for the repository instead of separate per-service versions
-- the generated root changelog lives at `CHANGELOG.md`
-- build-time surfaces such as `APP_VERSION` and `NEXT_PUBLIC_APP_VERSION` must derive from that Git tag rather than hardcoded source literals
-
-Until the PRD changes, do not introduce independent application-version streams for individual services or packages.
 
 PRs should include:
 

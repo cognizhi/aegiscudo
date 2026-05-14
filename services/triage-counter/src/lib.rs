@@ -2,7 +2,7 @@ pub mod metrics;
 pub mod repository;
 
 use aegiscudo_policy::DecisionEngine;
-use aegiscudo_protocol::DecisionRequest;
+use aegiscudo_protocol::{DecisionQueryRequest, DecisionRequest};
 use aegiscudo_telemetry::health;
 use axum::{
     Json, Router,
@@ -89,7 +89,8 @@ pub fn app(policy_repository: PolicyRepository) -> Router {
         .route("/readyz", get(|| async { Json(health(SERVICE_NAME)) }))
         .route("/metrics", get(metrics))
         .route("/v1/decisions/evaluate", post(evaluate_decision))
-    .route("/v1/decisions/simulate", post(simulate_decision))
+        .route("/v1/decisions/query", post(query_decision))
+        .route("/v1/decisions/simulate", post(simulate_decision))
         .with_state(state)
 }
 
@@ -134,6 +135,13 @@ async fn simulate_decision(
     Json(request): Json<DecisionRequest>,
 ) -> Result<Json<aegiscudo_protocol::DecisionResponse>, ApiError> {
     Ok(Json(simulate_with_state(&state, request).await?))
+}
+
+async fn query_decision(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<DecisionQueryRequest>,
+) -> Result<Json<aegiscudo_protocol::DecisionResponse>, ApiError> {
+    Ok(Json(query_with_state(&state, request).await?))
 }
 
 async fn evaluate_with_state(
@@ -184,6 +192,22 @@ async fn simulate_with_state(
     Ok(response)
 }
 
+async fn query_with_state(
+    state: &AppState,
+    request: DecisionQueryRequest,
+) -> Result<aegiscudo_protocol::DecisionResponse, PolicyRepositoryError> {
+    let cache_key = decision_query_cache_key(&request);
+    if let Some(mut response) = state.decision_cache.get(&cache_key).await {
+        response.trace_id = request.request.trace_id.clone();
+        return Ok(response);
+    }
+
+    let response = query_with_policy_repository(&state.policy_repository, &state.decision_engine, request.clone())
+        .await?;
+    state.decision_cache.put(cache_key, &response).await;
+    Ok(response)
+}
+
 fn decision_cache_key(request: &DecisionRequest) -> String {
     format!(
         "{}:{}:{}:{}:{}",
@@ -200,6 +224,24 @@ fn decision_cache_key(request: &DecisionRequest) -> String {
             .as_ref()
             .map(|digest| digest.hex.as_str())
             .unwrap_or("none"),
+    )
+}
+
+fn decision_query_cache_key(request: &DecisionQueryRequest) -> String {
+    format!(
+        "query:{}:{}:{}:{}",
+        request.tenant_id,
+        request.policy_profile_id,
+        match request.request.kind {
+            aegiscudo_protocol::PackageRequestKind::Metadata => "metadata",
+            aegiscudo_protocol::PackageRequestKind::Artifact => "artifact",
+        },
+        request
+            .request
+            .requested_digest
+            .as_ref()
+            .map(|digest| format!("{}:{}", request.request.coordinate.purl(), digest.hex))
+            .unwrap_or_else(|| request.request.coordinate.purl()),
     )
 }
 
@@ -221,6 +263,15 @@ async fn evaluate_with_policy_repository(
     Ok(response)
 }
 
+async fn query_with_policy_repository(
+    policy_repository: &PolicyRepository,
+    decision_engine: &DecisionEngine,
+    request: DecisionQueryRequest,
+) -> Result<aegiscudo_protocol::DecisionResponse, PolicyRepositoryError> {
+    let bound_input = policy_repository.bind_query_request(request).await?;
+    Ok(decision_engine.evaluate(bound_input))
+}
+
 struct ApiError(PolicyRepositoryError);
 
 impl From<PolicyRepositoryError> for ApiError {
@@ -231,7 +282,8 @@ impl From<PolicyRepositoryError> for ApiError {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        let (status, message) = match self.0 {
+        let error = self.0.to_string();
+        let (status, message) = match &self.0 {
             PolicyRepositoryError::ProfileNotFound | PolicyRepositoryError::SnapshotNotFound => (
                 StatusCode::NOT_FOUND,
                 "policy profile or snapshot was not found",
@@ -264,6 +316,9 @@ impl IntoResponse for ApiError {
                 "policy repository is unavailable",
             ),
         };
+        if status.is_server_error() {
+            tracing::error!(%status, %error, details = ?self.0, "triage-counter request failed");
+        }
         (status, message).into_response()
     }
 }
@@ -274,7 +329,10 @@ mod tests {
     use aegiscudo_core::{
         ArtifactDigest, PackageCoordinate, PackageEcosystem, PolicyMode, PolicySnapshot,
     };
-    use aegiscudo_protocol::{DecisionRequest, NormalizedPackageRequest, PackageRequestKind};
+    use aegiscudo_protocol::{
+        DecisionQueryRequest, DecisionRequest, NormalizedPackageRequest, NormalizedQueryRequest,
+        PackageRequestKind,
+    };
     use repository::{
         InMemoryPolicyRepository, LoadedPolicyProfile, PolicySignalConfiguration,
         RegistryPolicyBinding,
@@ -427,6 +485,69 @@ mod tests {
         assert_eq!(jobs.len(), 1);
         assert_eq!(jobs[0].artifact_digest, digest);
         assert_eq!(jobs[0].policy_snapshot_id, snapshot_id);
+    }
+
+    #[tokio::test]
+    async fn query_binds_policy_profile_without_registry_context() {
+        let tenant_id = Uuid::now_v7();
+        let policy_profile_id = Uuid::now_v7();
+        let snapshot_id = Uuid::now_v7();
+        let coordinate = PackageCoordinate::new(
+            PackageEcosystem::GithubActions,
+            "checkout",
+            Some("f".repeat(40)),
+            Some("actions"),
+        );
+        let repository = InMemoryPolicyRepository::new();
+        repository
+            .upsert_profile(LoadedPolicyProfile {
+                id: policy_profile_id,
+                tenant_id,
+                mode: PolicyMode::Enforce,
+                latest_snapshot: PolicySnapshot {
+                    id: snapshot_id,
+                    tenant_id,
+                    version: "2026.05.13".to_owned(),
+                    effective_at: chrono::Utc::now(),
+                    immutable_rule_hash: ArtifactDigest::sha256("a".repeat(64)).unwrap(),
+                },
+                signal_configuration: PolicySignalConfiguration::default(),
+            })
+            .await;
+        repository
+            .remember_package_signal(
+                tenant_id,
+                coordinate.clone(),
+                None,
+                "known-malicious",
+                None,
+            )
+            .await;
+
+        let response = query_with_policy_repository(
+            &PolicyRepository::InMemory(repository.clone()),
+            &DecisionEngine,
+            DecisionQueryRequest {
+                tenant_id,
+                policy_profile_id,
+                request: NormalizedQueryRequest {
+                    kind: PackageRequestKind::Metadata,
+                    tenant_id,
+                    policy_profile_id,
+                    coordinate,
+                    trace_id: "trace-gh-query".to_owned(),
+                    requested_digest: None,
+                    explicit_version_or_integrity: true,
+                },
+            },
+        )
+        .await
+        .expect("query should evaluate");
+
+        assert_eq!(response.decision, aegiscudo_core::PolicyDecision::BlockKnownMalicious);
+        assert_eq!(response.policy_snapshot_id, snapshot_id);
+        assert!(repository.decision_records().await.is_empty());
+        assert!(repository.analysis_jobs().await.is_empty());
     }
 
     #[tokio::test]

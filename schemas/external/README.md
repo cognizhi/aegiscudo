@@ -37,3 +37,9 @@ Retrieved: 2026-05-11
 - `schemas/external/spdx/2.3/spdx-schema.json`
   - Upstream: `https://raw.githubusercontent.com/spdx/spdx-spec/v2.3/schemas/spdx-schema.json`
   - SHA-256: `239208b7ac287b3cf5d9a9af23f9d69863971102a5e1587a27a398b43490b89b`
+
+## Tracked Future Compatibility Target
+
+- SPDX 3.0 is the next SBOM compatibility target called out by the Phase 2 PRD.
+- It is intentionally not vendored here yet because the current service and CLI only emit validated SPDX 2.3 JSON compatibility exports.
+- When SPDX 3.0 export work starts, vendor the exact upstream validation assets here and update this provenance note alongside the new export path.

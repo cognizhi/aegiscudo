@@ -14,11 +14,15 @@ anyhow.workspace = true
 axum.workspace = true
 base64.workspace = true
 chrono.workspace = true
+hex.workspace = true
 http.workspace = true
 prometheus.workspace = true
 reqwest.workspace = true
+ring = "0.17.14"
 serde.workspace = true
 serde_json.workspace = true
+semver.workspace = true
+sha1.workspace = true
 sha2.workspace = true
 sqlx.workspace = true
 thiserror.workspace = true
@@ -26,3 +30,7 @@ tokio.workspace = true
 tracing.workspace = true
 url.workspace = true
 uuid.workspace = true
+
+[dev-dependencies]
+flate2 = "1.1.5"
+tar = "0.4.44"

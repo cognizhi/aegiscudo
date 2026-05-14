@@ -6,7 +6,7 @@ Emergency Room is the sandbox orchestration component for dynamic package behavi
 
 ## Responsibilities
 
-- Select sandbox profiles for npm and PyPI analysis jobs.
+- Select sandbox profiles for npm, PyPI, Cargo, and Maven analysis jobs.
 - Launch isolated executions with no customer secrets, no privileged mode, and no host mounts.
 - Plant canary credentials and AI-agent configuration files.
 - Capture process, filesystem, network, canary, stdout/stderr, timeout, and exit-code telemetry.
@@ -19,4 +19,4 @@ Sandboxes must be single-use execution environments with strict CPU, memory, egr
 
 ## Current Implementation State
 
-The Python FastAPI service shell exists with health/readiness/metrics routes, trace ID middleware, and shared log plus structured-event redaction utility. Profile registry, local mocked adapter, Cloud Run Jobs adapter, canary planting, telemetry ingestion, stdout/stderr redaction, and sandbox integration tests remain Phase 1B work.
+The Python service now runs local npm, PyPI, Cargo, and Maven/JVM sandbox profiles with canary planting, timeout handling, stdout/stderr redaction, structured telemetry emission, and focused integration coverage. The Maven path currently provides an initial `jvm-binary-profile`: it selects classes from packaged `.jar` / `.war` / `.ear` artifacts, uses a temporary Java source probe plus `Class.forName(..., true, ...)` to trigger class loading and static initializers in-process, and emits `jvm-class-loaded` telemetry for selected artifact classes confirmed in `java -verbose:class` output. It also relies on the existing exfiltration collector plus canary environment to capture network and secret-access signals. `outbound-network-attempt` telemetry now carries normalized `destination_url`, `destination_host`, and `destination_ip` fields so downstream policy evaluation can correlate sandbox egress against feed-harvested cross-ecosystem IOC records. Broader JVM runtime attribution, generalized filesystem/process tracing, containerized Cloud Run Jobs orchestration, and production sandbox deployment hardening remain later-phase work.

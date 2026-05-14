@@ -116,6 +116,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/tenants/{tenant_id}/policy-profiles/{policy_profile_id}/scorecard-thresholds": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["getPolicyScorecardThresholds"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/tenants/{tenant_id}/policy-simulator/replay": {
         parameters: {
             query?: never;
@@ -372,6 +388,70 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/tenants/{tenant_id}/sboms": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["listTenantSboms"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/tenants/{tenant_id}/sboms/{sbom_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["downloadTenantSbom"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/tenants/{tenant_id}/openvex-documents": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["listOpenVexDocuments"];
+        put?: never;
+        post: operations["importOpenVexDocument"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/tenants/{tenant_id}/openvex-documents/{openvex_document_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["getOpenVexDocument"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/tenants/{tenant_id}/ai-providers": {
         parameters: {
             query?: never;
@@ -420,6 +500,38 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/cli/github-actions/enrich": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["enrichCliGithubActions"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/cli/risk": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["submitCliRisk"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/cli/explain": {
         parameters: {
             query?: never;
@@ -430,6 +542,26 @@ export interface paths {
         get?: never;
         put?: never;
         post: operations["explainCliPackage"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/tenants/{tenant_id}/github-actions/scan-results": {
+        parameters: {
+            query?: {
+                limit?: number;
+            };
+            header?: never;
+            path: {
+                tenant_id: string;
+            };
+            cookie?: never;
+        };
+        get: operations["listGithubActionsScanResults"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -478,7 +610,7 @@ export interface components {
         };
         PackageCoordinateSummary: {
             /** @enum {string} */
-            ecosystem: "npm" | "pypi" | "cargo" | "maven" | "docker-oci" | "generic-http";
+            ecosystem: "npm" | "pypi" | "cargo" | "maven" | "docker-oci" | "generic-http" | "githubactions";
             name: string;
             version?: string;
             namespace?: string;
@@ -544,6 +676,16 @@ export interface components {
             tenant_id?: string;
             packages: components["schemas"]["CliScanPackageRequest"][];
         };
+        CliGithubActionsEnrichmentPackageRequest: {
+            coordinate: components["schemas"]["PackageCoordinateSummary"];
+        };
+        CliGithubActionsEnrichmentRequest: {
+            /** Format: uuid */
+            tenant_id?: string;
+            /** Format: uuid */
+            policy_profile_id?: string;
+            packages: components["schemas"]["CliGithubActionsEnrichmentPackageRequest"][];
+        };
         CliScanFindingResponse: {
             coordinate: components["schemas"]["PackageCoordinateSummary"];
             artifact_sha256?: string;
@@ -566,6 +708,31 @@ export interface components {
             /** Format: uuid */
             policy_profile_id: string;
             findings: components["schemas"]["CliScanFindingResponse"][];
+        };
+        CliGithubActionsEnrichmentResponse: {
+            /** Format: uuid */
+            tenant_id: string;
+            /** Format: uuid */
+            policy_profile_id: string;
+            findings: components["schemas"]["CliScanFindingResponse"][];
+        };
+        CliRiskRequest: {
+            /** Format: uuid */
+            tenant_id?: string;
+            coordinate: components["schemas"]["PackageCoordinateSummary"];
+        };
+        CliRiskResponse: {
+            /** Format: uuid */
+            tenant_id: string;
+            /** Format: uuid */
+            registry_config_id: string;
+            /** Format: uuid */
+            policy_profile_id: string;
+            coordinate: components["schemas"]["PackageCoordinateSummary"];
+            decision: components["schemas"]["PolicyDecision"];
+            rationale: string[];
+            trace_id: string;
+            create_analysis_job: boolean;
         };
         CliExplainRequest: {
             /** Format: uuid */
@@ -637,6 +804,60 @@ export interface components {
                 [key: string]: unknown;
             };
         };
+        /** @enum {string} */
+        OpenVexExpiryMode: "never" | "expires-at";
+        OpenVexExpiryPolicy: {
+            mode: components["schemas"]["OpenVexExpiryMode"];
+            /** Format: date-time */
+            expires_at?: string;
+        };
+        OpenVexDocumentImportRequest: {
+            source: string;
+            /** @description OpenVEX v0.2.0 JSON document. */
+            document: {
+                [key: string]: unknown;
+            };
+            expiry_policy?: components["schemas"]["OpenVexExpiryPolicy"];
+        };
+        OpenVexDocumentSummary: {
+            /** Format: uuid */
+            id: string;
+            /** Format: uuid */
+            tenant_id: string;
+            source: string;
+            document_id: string;
+            author: string;
+            context: string;
+            version: number;
+            /** Format: date-time */
+            document_timestamp: string;
+            /** Format: date-time */
+            imported_at: string;
+            expiry_policy: components["schemas"]["OpenVexExpiryPolicy"];
+            document_digest: string;
+            statement_count: number;
+        };
+        OpenVexDocument: {
+            /** Format: uuid */
+            id: string;
+            /** Format: uuid */
+            tenant_id: string;
+            source: string;
+            document_id: string;
+            author: string;
+            context: string;
+            version: number;
+            /** Format: date-time */
+            document_timestamp: string;
+            /** Format: date-time */
+            imported_at: string;
+            expiry_policy: components["schemas"]["OpenVexExpiryPolicy"];
+            document_digest: string;
+            statement_count: number;
+            document: {
+                [key: string]: unknown;
+            };
+        };
         OverrideQueueItem: {
             /** Format: uuid */
             id: string;
@@ -697,6 +918,26 @@ export interface components {
             evidence_counts: components["schemas"]["EvidenceCounts"];
             /** Format: date-time */
             created_at: string;
+        };
+        SbomNtiaValidation: {
+            valid: boolean;
+            issues: string[];
+        };
+        SbomDocumentSummary: {
+            /** Format: uuid */
+            id: string;
+            /** Format: uuid */
+            analysis_job_id: string | null;
+            /** Format: uuid */
+            tenant_id: string | null;
+            format: string;
+            source: string;
+            component_count: number;
+            /** Format: int64 */
+            storage_size_bytes: number;
+            /** Format: date-time */
+            created_at: string;
+            ntia_validation: components["schemas"]["SbomNtiaValidation"];
         };
         ArtifactEvidence: {
             /** Format: uuid */
@@ -765,7 +1006,7 @@ export interface components {
             /** @default 30 */
             lookback_days: number;
             /** @enum {string} */
-            ecosystem?: "npm" | "pypi" | "cargo" | "maven" | "docker-oci" | "generic-http";
+            ecosystem?: "npm" | "pypi" | "cargo" | "maven" | "docker-oci" | "generic-http" | "githubactions";
             /** @default 50 */
             limit: number;
         };
@@ -806,7 +1047,7 @@ export interface components {
             target_latest_version: string;
             lookback_days: number;
             /** @enum {string} */
-            ecosystem?: "npm" | "pypi" | "cargo" | "maven" | "docker-oci" | "generic-http";
+            ecosystem?: "npm" | "pypi" | "cargo" | "maven" | "docker-oci" | "generic-http" | "githubactions";
             replayed_request_count: number;
             changed_request_count: number;
             baseline_counts: components["schemas"]["PolicyDecisionCounts"];
@@ -814,6 +1055,77 @@ export interface components {
             items: components["schemas"]["PolicySimulationDiffItem"][];
             /** Format: date-time */
             generated_at: string;
+        };
+        /** @enum {string} */
+        SignalPolicyAction: "allow" | "warn" | "block" | "hitl";
+        DepsDdevPackageSummary: {
+            purl: string;
+            ecosystem: string;
+            namespace?: string;
+            package_name: string;
+            package_version?: string;
+            licenses: string[];
+            /** Format: int64 */
+            dependency_count: number;
+            source_repo_url?: string;
+        };
+        DepsDdevPackagesResponse: {
+            packages: components["schemas"]["DepsDdevPackageSummary"][];
+            /** Format: date-time */
+            snapshot_taken_at?: string;
+            /** Format: int64 */
+            total: number;
+        };
+        IocRecordSummary: {
+            /** Format: uuid */
+            id: string;
+            ecosystem: string;
+            namespace?: string;
+            package_name: string;
+            package_version?: string;
+            indicator_type: "maintainer-identity" | "domain" | "ip" | "url" | "package-name" | "behavioral-fingerprint";
+            indicator_value: string;
+        };
+        IocRecordsResponse: {
+            records: components["schemas"]["IocRecordSummary"][];
+            /** Format: date-time */
+            snapshot_taken_at?: string;
+            /** Format: int64 */
+            total: number;
+        };
+        GithubActionsScanResult: {
+            /** Format: uuid */
+            id: string;
+            /** Format: uuid */
+            tenant_id: string;
+            /** Format: uuid */
+            policy_profile_id: string;
+            owner: string;
+            repo: string;
+            ref: string;
+            decision: string;
+            rationale: string[];
+            trace_id: string;
+            fallback_ref?: string;
+            /** Format: date-time */
+            scanned_at: string;
+        };
+        ScorecardCheckThreshold: {
+            /** Format: double */
+            min_score: number;
+            action: components["schemas"]["SignalPolicyAction"];
+            enabled: boolean;
+        };
+        PolicyScorecardThresholds: {
+            /** Format: uuid */
+            policy_profile_id: string;
+            /** Format: uuid */
+            policy_version_id: string;
+            code_review: components["schemas"]["ScorecardCheckThreshold"];
+            branch_protection: components["schemas"]["ScorecardCheckThreshold"];
+            ci_cd: components["schemas"]["ScorecardCheckThreshold"];
+            maintained: components["schemas"]["ScorecardCheckThreshold"];
+            signed_releases: components["schemas"]["ScorecardCheckThreshold"];
         };
         RegistryConfig: {
             /** Format: uuid */
@@ -994,7 +1306,10 @@ export interface components {
         };
     };
     responses: never;
-    parameters: never;
+    parameters: {
+        /** @description Actor UUID for privileged tenant-scoped suppression administration routes. */
+        ActorIdHeader: string;
+    };
     requestBodies: never;
     headers: never;
     pathItems: never;
@@ -1213,6 +1528,38 @@ export interface operations {
                 };
             };
             /** @description Tenant was not found. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    getPolicyScorecardThresholds: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                tenant_id: string;
+                policy_profile_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Scorecard check thresholds and actions for the latest policy version of the specified profile. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PolicyScorecardThresholds"];
+                };
+            };
+            /** @description Tenant or policy profile was not found. */
             404: {
                 headers: {
                     [name: string]: unknown;
@@ -2027,6 +2374,313 @@ export interface operations {
             };
         };
     };
+    listTenantSboms: {
+        parameters: {
+            query?: {
+                limit?: number;
+            };
+            header: {
+                /** @description Actor UUID for privileged tenant-scoped suppression administration routes. */
+                "x-aegiscudo-actor-id": components["parameters"]["ActorIdHeader"];
+            };
+            path: {
+                tenant_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Tenant-scoped SBOM document summaries. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SbomDocumentSummary"][];
+                };
+            };
+            /** @description The SBOM list query parameters were invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Request actor header is missing. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Request actor is not authorized to read tenant SBOM data. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description SBOM service is unavailable. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    downloadTenantSbom: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description Actor UUID for privileged tenant-scoped suppression administration routes. */
+                "x-aegiscudo-actor-id": components["parameters"]["ActorIdHeader"];
+            };
+            path: {
+                tenant_id: string;
+                sbom_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Tenant-scoped SBOM document download. */
+            200: {
+                headers: {
+                    /** @description Attachment filename for the exported SBOM document. */
+                    "Content-Disposition"?: string;
+                    /** @description Media type for the exported SBOM document. */
+                    "Content-Type"?: string;
+                    /** @description Byte length of the exported SBOM document when available. */
+                    "Content-Length"?: number;
+                    /** @description Cache policy forwarded from the control-plane download path when present. */
+                    "Cache-Control"?: string;
+                    /** @description Entity tag for the exported SBOM document when available. */
+                    ETag?: string;
+                    /** @description Content encoding for the exported SBOM document when present. */
+                    "Content-Encoding"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": string;
+                };
+            };
+            /** @description Request actor header is missing. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Request actor is not authorized to read tenant SBOM data. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description SBOM document was not found. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description SBOM service is unavailable. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    listOpenVexDocuments: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description Actor UUID for privileged tenant-scoped suppression administration routes. */
+                "x-aegiscudo-actor-id": components["parameters"]["ActorIdHeader"];
+            };
+            path: {
+                tenant_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Tenant-scoped imported OpenVEX document metadata. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OpenVexDocumentSummary"][];
+                };
+            };
+            /** @description Request actor header is missing. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Request actor is not authorized to manage suppression data. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Tenant was not found. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    importOpenVexDocument: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description Actor UUID for privileged tenant-scoped suppression administration routes. */
+                "x-aegiscudo-actor-id": components["parameters"]["ActorIdHeader"];
+            };
+            path: {
+                tenant_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["OpenVexDocumentImportRequest"];
+            };
+        };
+        responses: {
+            /** @description Imported OpenVEX document with normalized metadata. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OpenVexDocument"];
+                };
+            };
+            /** @description Request was invalid or the document failed OpenVEX validation. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Request actor header is missing. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Request actor is not authorized to manage suppression data. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Tenant was not found. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    getOpenVexDocument: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description Actor UUID for privileged tenant-scoped suppression administration routes. */
+                "x-aegiscudo-actor-id": components["parameters"]["ActorIdHeader"];
+            };
+            path: {
+                tenant_id: string;
+                openvex_document_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Imported OpenVEX document with raw JSON payload. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OpenVexDocument"];
+                };
+            };
+            /** @description Request actor header is missing. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Request actor is not authorized to manage suppression data. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Tenant or document was not found. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
     listAiProviders: {
         parameters: {
             query?: never;
@@ -2140,6 +2794,108 @@ export interface operations {
             };
         };
     };
+    enrichCliGithubActions: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CliGithubActionsEnrichmentRequest"];
+            };
+        };
+        responses: {
+            /** @description GitHub Actions scan findings enriched against tenant policy and threat intelligence. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CliGithubActionsEnrichmentResponse"];
+                };
+            };
+            /** @description GitHub Actions enrichment request validation failed. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description No matching tenant policy profile was found. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Triage Counter is unavailable. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    submitCliRisk: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CliRiskRequest"];
+            };
+        };
+        responses: {
+            /** @description Tenant-scoped risk lookup for a fully qualified package coordinate. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CliRiskResponse"];
+                };
+            };
+            /** @description CLI risk request validation failed. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description No matching enabled registry configuration or policy context was found. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Triage Counter is unavailable. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
     explainCliPackage: {
         parameters: {
             query?: never;
@@ -2164,6 +2920,48 @@ export interface operations {
             };
             /** @description No matching analyzed package was found. */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    listGithubActionsScanResults: {
+        parameters: {
+            query?: {
+                limit?: number;
+            };
+            header?: never;
+            path: {
+                tenant_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description GitHub Actions workflow integrity scan results for the tenant. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["GithubActionsScanResult"][];
+                };
+            };
+            /** @description Missing actor header. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Actor is not a member of the tenant. */
+            403: {
                 headers: {
                     [name: string]: unknown;
                 };

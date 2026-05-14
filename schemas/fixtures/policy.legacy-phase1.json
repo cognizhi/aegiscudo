@@ -1,0 +1,26 @@
+{
+  "id": "00000000-0000-0000-0000-000000000111",
+  "tenant_id": "00000000-0000-0000-0000-000000000001",
+  "version": "2026.04.0",
+  "mode": "warn",
+  "minimum_release_age_hours": 24,
+  "known_vulnerability_threshold": {
+    "severity_floor": "high",
+    "kev_override": true
+  },
+  "fail_closed": true,
+  "rules": [
+    {
+      "id": "known-vulnerable",
+      "signal": "vulnerable_above_threshold",
+      "action": "warn",
+      "enabled": true
+    },
+    {
+      "id": "known-malicious",
+      "signal": "known_malicious",
+      "action": "block",
+      "enabled": true
+    }
+  ]
+}

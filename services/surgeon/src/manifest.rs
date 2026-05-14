@@ -5,12 +5,39 @@
 //! metadata signals that can only be reliably derived from parsed data, not raw
 //! text patterns.
 
+use std::collections::{BTreeSet, HashSet};
 use std::path::Path;
 
 use aegiscudo_core::{IndicatorDetails, Severity, StaticIndicator};
+use roxmltree::Node;
 use serde_json::Value;
 
 use crate::indicator;
+
+#[derive(Debug, Default)]
+struct CargoDependencyAnalysis {
+    build_dependency_sections: usize,
+    dev_dependency_sections: usize,
+    target_dependency_sections: usize,
+    optional_dependency_names: HashSet<String>,
+}
+
+impl CargoDependencyAnalysis {
+    fn merge(&mut self, other: Self) {
+        self.build_dependency_sections += other.build_dependency_sections;
+        self.dev_dependency_sections += other.dev_dependency_sections;
+        self.target_dependency_sections += other.target_dependency_sections;
+        self.optional_dependency_names
+            .extend(other.optional_dependency_names);
+    }
+}
+
+#[derive(Debug, Default)]
+struct CargoFeatureAnalysis {
+    feature_count: usize,
+    edge_count: usize,
+    optional_dependency_edge_count: usize,
+}
 
 /// Lifecycle hook names that execute automatically during `npm install`.
 const NPM_LIFECYCLE_HOOKS: &[&str] = &[
@@ -324,6 +351,768 @@ pub fn scan_setup_cfg(
     }
 }
 
+/// Parse a Maven `pom.xml` file and emit structured Maven-specific indicators.
+pub fn scan_pom_xml(
+    root: &Path,
+    path: &Path,
+    content: &str,
+    indicators: &mut Vec<StaticIndicator>,
+) {
+    let document = match roxmltree::Document::parse(content) {
+        Ok(document) => document,
+        Err(_) => {
+            indicators.push(indicator(
+                root,
+                path,
+                "malformed-pom-xml",
+                Severity::Medium,
+                1,
+                1,
+                "pom.xml could not be parsed as XML — possible obfuscation or corruption",
+                None,
+            ));
+            return;
+        }
+    };
+
+    let Some(project) = document
+        .descendants()
+        .find(|node| node.is_element() && node.tag_name().name() == "project")
+    else {
+        indicators.push(indicator(
+            root,
+            path,
+            "malformed-pom-xml",
+            Severity::Medium,
+            1,
+            1,
+            "pom.xml is missing the Maven `<project>` root element",
+            None,
+        ));
+        return;
+    };
+
+    let dependencies = project
+        .descendants()
+        .filter(|node| node.is_element() && node.tag_name().name() == "dependency")
+        .filter(|node| !node.ancestors().any(|ancestor| {
+            ancestor.is_element()
+                && matches!(ancestor.tag_name().name(), "plugin" | "pluginManagement")
+        }))
+        .collect::<Vec<_>>();
+    if !dependencies.is_empty() {
+        indicators.push(indicator(
+            root,
+            path,
+            "maven-dependency",
+            Severity::Low,
+            1,
+            1,
+            &format!(
+                "pom.xml declares {} dependency or dependencyManagement entr{}",
+                dependencies.len(),
+                if dependencies.len() == 1 { "y" } else { "ies" }
+            ),
+            None,
+        ));
+    }
+
+    let mut non_compile_scopes = BTreeSet::new();
+    let mut scoped_dependency_count = 0usize;
+    let mut classifier_count = 0usize;
+    for dependency in &dependencies {
+        if let Some(scope) = first_child_text(*dependency, "scope")
+            .filter(|scope| scope != "compile")
+        {
+            non_compile_scopes.insert(scope);
+            scoped_dependency_count += 1;
+        }
+        if first_child_text(*dependency, "classifier").is_some() {
+            classifier_count += 1;
+        }
+    }
+    if scoped_dependency_count > 0 {
+        indicators.push(indicator(
+            root,
+            path,
+            "maven-dependency-scope",
+            Severity::Low,
+            1,
+            1,
+            &format!(
+                "pom.xml declares {} non-compile dependency scope entr{}: {}",
+                scoped_dependency_count,
+                if scoped_dependency_count == 1 { "y" } else { "ies" },
+                non_compile_scopes.into_iter().collect::<Vec<_>>().join(", ")
+            ),
+            None,
+        ));
+    }
+
+    if classifier_count > 0 {
+        indicators.push(indicator(
+            root,
+            path,
+            "maven-dependency-classifier",
+            Severity::Low,
+            1,
+            1,
+            &format!(
+                "pom.xml declares {} dependency classifier entr{} — platform-specific or alternate artifact variants require review",
+                classifier_count,
+                if classifier_count == 1 { "y" } else { "ies" }
+            ),
+            None,
+        ));
+    }
+
+    let plugin_count = project
+        .descendants()
+        .filter(|node| node.is_element() && node.tag_name().name() == "plugin")
+        .count();
+    if plugin_count > 0 {
+        indicators.push(indicator(
+            root,
+            path,
+            "maven-build-plugin",
+            Severity::High,
+            1,
+            1,
+            &format!(
+                "pom.xml declares {} Maven build plugin entr{} — plugin code can execute during the build lifecycle",
+                plugin_count,
+                if plugin_count == 1 { "y" } else { "ies" }
+            ),
+            None,
+        ));
+    }
+
+    let repository_count = project
+        .descendants()
+        .filter(|node| {
+            node.is_element()
+                && matches!(node.tag_name().name(), "repository" | "pluginRepository")
+        })
+        .count();
+    if repository_count > 0 {
+        indicators.push(indicator(
+            root,
+            path,
+            "maven-repository-override",
+            Severity::High,
+            1,
+            1,
+            &format!(
+                "pom.xml declares {} custom Maven repositor{} — dependency resolution is widened beyond the default repository set",
+                repository_count,
+                if repository_count == 1 { "y" } else { "ies" }
+            ),
+            None,
+        ));
+    }
+
+    if project
+        .children()
+        .any(|node| node.is_element() && node.tag_name().name() == "parent")
+    {
+        indicators.push(indicator(
+            root,
+            path,
+            "maven-parent-pom",
+            Severity::Medium,
+            1,
+            1,
+            "pom.xml inherits from a parent POM — build and dependency policy may be supplied transitively",
+            None,
+        ));
+    }
+
+    if project
+        .descendants()
+        .any(|node| node.is_element() && node.tag_name().name() == "relocation")
+    {
+        indicators.push(indicator(
+            root,
+            path,
+            "maven-relocation",
+            Severity::High,
+            1,
+            1,
+            "pom.xml declares artifact relocation — coordinates may resolve to a different artifact than requested",
+            None,
+        ));
+    }
+}
+
+fn first_child_text(node: Node<'_, '_>, name: &str) -> Option<String> {
+    node.children()
+        .find(|child| child.is_element() && child.tag_name().name() == name)
+        .and_then(|child| child.text())
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(str::to_owned)
+}
+
+/// Parse a `Cargo.toml` file and emit structured Cargo-specific indicators.
+pub fn scan_cargo_toml(
+    root: &Path,
+    path: &Path,
+    content: &str,
+    indicators: &mut Vec<StaticIndicator>,
+) {
+    let table: toml::Table = match content.parse() {
+        Ok(t) => t,
+        Err(_) => {
+            indicators.push(indicator(
+                root,
+                path,
+                "malformed-cargo-toml",
+                Severity::Medium,
+                1,
+                1,
+                "Cargo.toml could not be parsed — possible obfuscation or corruption",
+                None,
+            ));
+            return;
+        }
+    };
+
+    if let Some(package) = table.get("package").and_then(|value| value.as_table()) {
+        match package.get("build") {
+            Some(toml::Value::String(build_path)) if !build_path.trim().is_empty() => {
+                indicators.push(indicator(
+                    root,
+                    path,
+                    "cargo-build-script",
+                    Severity::Critical,
+                    1,
+                    1,
+                    &format!(
+                        "Cargo.toml declares build script `{build_path}` — executes during cargo build"
+                    ),
+                    None,
+                ));
+            }
+            Some(toml::Value::Boolean(true)) => {
+                indicators.push(indicator(
+                    root,
+                    path,
+                    "cargo-build-script",
+                    Severity::Critical,
+                    1,
+                    1,
+                    "Cargo.toml enables a build script — executes during cargo build",
+                    None,
+                ));
+            }
+            _ => {}
+        }
+    }
+
+    if table
+        .get("lib")
+        .and_then(|value| value.as_table())
+        .and_then(|lib| lib.get("proc-macro"))
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false)
+    {
+        indicators.push(indicator(
+            root,
+            path,
+            "cargo-proc-macro",
+            Severity::High,
+            1,
+            1,
+            "Cargo.toml declares a procedural macro crate — executes compiler-hosted Rust code at build time",
+            None,
+        ));
+    }
+
+    let mut dependency_analysis = CargoDependencyAnalysis::default();
+    for section in ["dependencies", "dev-dependencies", "build-dependencies"] {
+        if let Some(dependencies) = table.get(section).and_then(|value| value.as_table()) {
+            let table_analysis = scan_cargo_dependency_table(root, path, section, dependencies, indicators);
+            dependency_analysis.merge(table_analysis);
+            if !dependencies.is_empty() {
+                match section {
+                    "build-dependencies" => dependency_analysis.build_dependency_sections += 1,
+                    "dev-dependencies" => dependency_analysis.dev_dependency_sections += 1,
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    if let Some(targets) = table.get("target").and_then(|value| value.as_table()) {
+        dependency_analysis.merge(scan_cargo_target_tables(root, path, targets, indicators));
+    }
+
+    if dependency_analysis.build_dependency_sections > 0 {
+        indicators.push(indicator(
+            root,
+            path,
+            "cargo-build-dependency",
+            Severity::High,
+            1,
+            1,
+            &format!(
+                "Cargo.toml declares {} build-dependency section(s) — build-time code executes before the crate is compiled",
+                dependency_analysis.build_dependency_sections
+            ),
+            None,
+        ));
+    }
+
+    if dependency_analysis.dev_dependency_sections > 0 {
+        indicators.push(indicator(
+            root,
+            path,
+            "cargo-dev-dependency",
+            Severity::Low,
+            1,
+            1,
+            &format!(
+                "Cargo.toml declares {} dev-dependency section(s) — test and tooling code expands the artifact review surface",
+                dependency_analysis.dev_dependency_sections
+            ),
+            None,
+        ));
+    }
+
+    if !dependency_analysis.optional_dependency_names.is_empty() {
+        indicators.push(indicator(
+            root,
+            path,
+            "cargo-optional-dependency",
+            Severity::Low,
+            1,
+            1,
+            &format!(
+                "Cargo.toml declares {} optional dependenc{} — feature flags can activate additional code paths",
+                dependency_analysis.optional_dependency_names.len(),
+                if dependency_analysis.optional_dependency_names.len() == 1 {
+                    "y"
+                } else {
+                    "ies"
+                }
+            ),
+            None,
+        ));
+    }
+
+    if dependency_analysis.target_dependency_sections > 0 {
+        indicators.push(indicator(
+            root,
+            path,
+            "cargo-target-specific-dependency",
+            Severity::Low,
+            1,
+            1,
+            &format!(
+                "Cargo.toml declares {} target-specific dependency section(s) — platform-specific code paths require review",
+                dependency_analysis.target_dependency_sections
+            ),
+            None,
+        ));
+    }
+
+    if let Some(feature_analysis) = scan_cargo_features(
+        table.get("features").and_then(|value| value.as_table()),
+        &dependency_analysis.optional_dependency_names,
+    ) {
+        let summary = if feature_analysis.optional_dependency_edge_count > 0 {
+            format!(
+                "Cargo feature graph defines {} feature(s) with {} edge(s); {} edge(s) activate optional dependencies",
+                feature_analysis.feature_count,
+                feature_analysis.edge_count,
+                feature_analysis.optional_dependency_edge_count
+            )
+        } else {
+            format!(
+                "Cargo feature graph defines {} feature(s) with {} edge(s)",
+                feature_analysis.feature_count,
+                feature_analysis.edge_count
+            )
+        };
+        indicators.push(indicator(
+            root,
+            path,
+            "cargo-feature-graph",
+            Severity::Low,
+            1,
+            1,
+            &summary,
+            None,
+        ));
+    }
+
+    if table.contains_key("patch") {
+        indicators.push(indicator(
+            root,
+            path,
+            "cargo-patch-override",
+            Severity::High,
+            1,
+            1,
+            "Cargo.toml contains `[patch]` overrides — dependency sources are being rewritten",
+            None,
+        ));
+    }
+
+    if table.contains_key("replace") {
+        indicators.push(indicator(
+            root,
+            path,
+            "cargo-replace-override",
+            Severity::High,
+            1,
+            1,
+            "Cargo.toml contains `[replace]` overrides — dependency identities are being substituted",
+            None,
+        ));
+    }
+}
+
+/// Parse a `Cargo.lock` file and emit source-integrity indicators.
+pub fn scan_cargo_lock(
+    root: &Path,
+    path: &Path,
+    content: &str,
+    indicators: &mut Vec<StaticIndicator>,
+) {
+    let table: toml::Table = match content.parse() {
+        Ok(t) => t,
+        Err(_) => {
+            indicators.push(indicator(
+                root,
+                path,
+                "malformed-cargo-lock",
+                Severity::Medium,
+                1,
+                1,
+                "Cargo.lock could not be parsed — possible obfuscation or corruption",
+                None,
+            ));
+            return;
+        }
+    };
+
+    let Some(packages) = table.get("package").and_then(|value| value.as_array()) else {
+        return;
+    };
+    let (local_package_refs, local_package_names) = cargo_lock_local_package_refs(packages);
+
+    for package in packages {
+        let Some(package_table) = package.as_table() else {
+            continue;
+        };
+        let name = package_table
+            .get("name")
+            .and_then(|value| value.as_str())
+            .unwrap_or("unknown");
+        let version = package_table
+            .get("version")
+            .and_then(|value| value.as_str())
+            .unwrap_or("");
+        let source = package_table.get("source").and_then(|value| value.as_str());
+
+        let Some(source) = source else {
+            if local_package_refs.contains(&(name.to_owned(), version.to_owned()))
+                || local_package_names.contains(name)
+            {
+                indicators.push(indicator(
+                    root,
+                    path,
+                    "cargo-path-dependency",
+                    Severity::High,
+                    1,
+                    1,
+                    &format!(
+                        "Cargo.lock package `{name}@{version}` resolves from local path or workspace source with no registry source recorded"
+                    ),
+                    None,
+                ));
+            }
+            continue;
+        };
+
+        if source.starts_with("git+") {
+            indicators.push(indicator(
+                root,
+                path,
+                "cargo-git-dependency",
+                Severity::High,
+                1,
+                1,
+                &format!(
+                    "Cargo.lock package `{name}@{version}` resolves from git source `{source}`"
+                ),
+                None,
+            ));
+        } else if source.starts_with("path+") {
+            indicators.push(indicator(
+                root,
+                path,
+                "cargo-path-dependency",
+                Severity::High,
+                1,
+                1,
+                &format!(
+                    "Cargo.lock package `{name}@{version}` resolves from local path source `{source}`"
+                ),
+                None,
+            ));
+        } else if source.starts_with("registry+") && !is_default_crates_io_source(source) {
+            indicators.push(indicator(
+                root,
+                path,
+                "cargo-alternate-registry-dependency",
+                Severity::High,
+                1,
+                1,
+                &format!(
+                    "Cargo.lock package `{name}@{version}` resolves from alternate registry source `{source}`"
+                ),
+                None,
+            ));
+        }
+    }
+}
+
+fn cargo_lock_local_package_refs(
+    packages: &[toml::Value],
+) -> (HashSet<(String, String)>, HashSet<String>) {
+    let mut exact_refs = HashSet::new();
+    let mut name_refs = HashSet::new();
+
+    for package in packages {
+        let Some(package_table) = package.as_table() else {
+            continue;
+        };
+        let Some(dependencies) = package_table.get("dependencies").and_then(|value| value.as_array())
+        else {
+            continue;
+        };
+
+        for dependency in dependencies {
+            let Some(entry) = dependency.as_str() else {
+                continue;
+            };
+            if let Some((name, version)) = parse_cargo_lock_dependency_entry(entry) {
+                name_refs.insert(name.clone());
+                if let Some(version) = version {
+                    exact_refs.insert((name, version));
+                }
+            }
+        }
+    }
+
+    (exact_refs, name_refs)
+}
+
+fn parse_cargo_lock_dependency_entry(entry: &str) -> Option<(String, Option<String>)> {
+    let trimmed = entry.split(" (").next().unwrap_or(entry).trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    if let Some((name, version)) = trimmed.rsplit_once(' ') {
+        let name = name.trim();
+        let version = version.trim();
+        if !name.is_empty() && !version.is_empty() && version.chars().any(|ch| ch.is_ascii_digit())
+        {
+            return Some((name.to_owned(), Some(version.to_owned())));
+        }
+    }
+
+    Some((trimmed.to_owned(), None))
+}
+
+fn scan_cargo_target_tables(
+    root: &Path,
+    path: &Path,
+    targets: &toml::Table,
+    indicators: &mut Vec<StaticIndicator>,
+) -> CargoDependencyAnalysis {
+    let mut analysis = CargoDependencyAnalysis::default();
+
+    for (target_name, value) in targets {
+        let Some(target_table) = value.as_table() else {
+            continue;
+        };
+        for section in ["dependencies", "dev-dependencies", "build-dependencies"] {
+            let Some(dependencies) = target_table.get(section).and_then(|entry| entry.as_table())
+            else {
+                continue;
+            };
+            let table_analysis = scan_cargo_dependency_table(
+                root,
+                path,
+                &format!("target.{target_name}.{section}"),
+                dependencies,
+                indicators,
+            );
+            analysis.merge(table_analysis);
+            if !dependencies.is_empty() {
+                analysis.target_dependency_sections += 1;
+                match section {
+                    "build-dependencies" => analysis.build_dependency_sections += 1,
+                    "dev-dependencies" => analysis.dev_dependency_sections += 1,
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    analysis
+}
+
+fn scan_cargo_dependency_table(
+    root: &Path,
+    path: &Path,
+    section_name: &str,
+    dependencies: &toml::Table,
+    indicators: &mut Vec<StaticIndicator>,
+) -> CargoDependencyAnalysis {
+    let mut analysis = CargoDependencyAnalysis::default();
+
+    for (name, value) in dependencies {
+        let Some(dependency) = value.as_table() else {
+            continue;
+        };
+
+        if dependency
+            .get("optional")
+            .and_then(|entry| entry.as_bool())
+            .unwrap_or(false)
+        {
+            analysis.optional_dependency_names.insert(name.to_owned());
+        }
+
+        if let Some(git) = dependency.get("git").and_then(|entry| entry.as_str()) {
+            indicators.push(indicator(
+                root,
+                path,
+                "cargo-git-dependency",
+                Severity::High,
+                1,
+                1,
+                &format!(
+                    "Cargo.toml `{section_name}` dependency `{name}` resolves from git source `{git}`"
+                ),
+                None,
+            ));
+        }
+
+        if let Some(local_path) = dependency.get("path").and_then(|entry| entry.as_str()) {
+            indicators.push(indicator(
+                root,
+                path,
+                "cargo-path-dependency",
+                Severity::High,
+                1,
+                1,
+                &format!(
+                    "Cargo.toml `{section_name}` dependency `{name}` resolves from local path `{local_path}`"
+                ),
+                None,
+            ));
+        }
+
+        if let Some(registry) = dependency.get("registry").and_then(|entry| entry.as_str()) {
+            indicators.push(indicator(
+                root,
+                path,
+                "cargo-alternate-registry-dependency",
+                Severity::High,
+                1,
+                1,
+                &format!(
+                    "Cargo.toml `{section_name}` dependency `{name}` resolves from alternate registry `{registry}`"
+                ),
+                None,
+            ));
+        }
+    }
+
+    analysis
+}
+
+fn is_default_crates_io_source(source: &str) -> bool {
+    source.contains("github.com/rust-lang/crates.io-index")
+        || source.contains("index.crates.io")
+}
+
+fn scan_cargo_features(
+    features: Option<&toml::Table>,
+    optional_dependency_names: &HashSet<String>,
+) -> Option<CargoFeatureAnalysis> {
+    let mut analysis = CargoFeatureAnalysis::default();
+    let mut dep_references = HashSet::new();
+
+    if let Some(features) = features {
+        analysis.feature_count += features.len();
+
+        for values in features.values() {
+            let Some(entries) = values.as_array() else {
+                continue;
+            };
+            for entry in entries {
+                let Some(reference) = entry.as_str() else {
+                    continue;
+                };
+                analysis.edge_count += 1;
+                if feature_reference_matches_optional_dependency(
+                    reference,
+                    optional_dependency_names,
+                    &mut dep_references,
+                ) {
+                    analysis.optional_dependency_edge_count += 1;
+                }
+            }
+        }
+    }
+
+    let implicit_optional_features = optional_dependency_names
+        .iter()
+        .filter(|name| !dep_references.contains(*name))
+        .count();
+    analysis.feature_count += implicit_optional_features;
+    analysis.edge_count += implicit_optional_features;
+    analysis.optional_dependency_edge_count += implicit_optional_features;
+
+    if analysis.feature_count == 0 {
+        None
+    } else {
+        Some(analysis)
+    }
+}
+
+fn feature_reference_matches_optional_dependency(
+    reference: &str,
+    optional_dependency_names: &HashSet<String>,
+    dep_references: &mut HashSet<String>,
+) -> bool {
+    let trimmed = reference.trim();
+    let reference_body = trimmed.strip_prefix("dep:").unwrap_or(trimmed);
+    let is_conditional_forward = reference_body.contains("?/") || reference_body.ends_with('?');
+    let dependency_name = reference_body
+        .split_once('/')
+        .map(|(name, _)| name)
+        .unwrap_or(reference_body)
+        .trim_end_matches('?');
+
+    if trimmed.starts_with("dep:") && optional_dependency_names.contains(dependency_name) {
+        dep_references.insert(dependency_name.to_owned());
+    }
+
+    if is_conditional_forward {
+        return false;
+    }
+
+    optional_dependency_names.contains(dependency_name)
+}
+
 /// Parse a `pyproject.toml` file and emit structured indicators.
 ///
 /// Called from `scan_text` when the path ends with `pyproject.toml`.
@@ -521,15 +1310,25 @@ mod tests {
 
     use super::*;
 
-    fn scan(
+    fn scan_indicators(
         scan_fn: impl Fn(&Path, &Path, &str, &mut Vec<StaticIndicator>),
         content: &str,
-    ) -> Vec<String> {
+    ) -> Vec<StaticIndicator> {
         let mut indicators = Vec::new();
         let root = Path::new("/root");
         let path = Path::new("/root/package/file");
         scan_fn(root, path, content, &mut indicators);
-        indicators.into_iter().map(|i| i.indicator_type).collect()
+        indicators
+    }
+
+    fn scan(
+        scan_fn: impl Fn(&Path, &Path, &str, &mut Vec<StaticIndicator>),
+        content: &str,
+    ) -> Vec<String> {
+        scan_indicators(scan_fn, content)
+            .into_iter()
+            .map(|i| i.indicator_type)
+            .collect()
     }
 
     #[test]
@@ -595,6 +1394,255 @@ mod tests {
             types.contains(&"malformed-package-json".to_owned()),
             "{types:?}"
         );
+    }
+
+    #[test]
+    fn cargo_toml_build_script_proc_macro_and_dependency_sources_detected() {
+        let cargo_toml = r#"
+[package]
+name = "evil"
+version = "0.1.0"
+build = "build.rs"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+serde = { git = "https://github.com/example/serde" }
+
+[build-dependencies]
+cc = "1"
+
+[patch.crates-io]
+rand = { path = "../rand" }
+
+[replace]
+"foo:0.1.0" = { path = "../foo" }
+"#;
+        let types = scan(scan_cargo_toml, cargo_toml);
+        assert!(types.contains(&"cargo-build-script".to_owned()), "{types:?}");
+        assert!(types.contains(&"cargo-proc-macro".to_owned()), "{types:?}");
+        assert!(types.contains(&"cargo-git-dependency".to_owned()), "{types:?}");
+        assert!(types.contains(&"cargo-build-dependency".to_owned()), "{types:?}");
+        assert!(types.contains(&"cargo-patch-override".to_owned()), "{types:?}");
+        assert!(types.contains(&"cargo-replace-override".to_owned()), "{types:?}");
+    }
+
+    #[test]
+    fn cargo_toml_target_build_dependencies_are_detected() {
+        let cargo_toml = r#"
+[package]
+name = "evil"
+version = "0.1.0"
+
+[target.'cfg(unix)'.build-dependencies]
+cc = "1"
+"#;
+        let types = scan(scan_cargo_toml, cargo_toml);
+        assert!(types.contains(&"cargo-build-dependency".to_owned()), "{types:?}");
+    }
+
+    #[test]
+    fn cargo_toml_feature_target_dev_and_optional_surfaces_are_detected() {
+        let cargo_toml = r#"
+[package]
+name = "evil"
+version = "0.1.0"
+
+[dependencies]
+serde = { version = "1", optional = true }
+
+[dev-dependencies]
+tempfile = "3"
+
+[target.'cfg(unix)'.dependencies]
+nix = "0.30"
+
+[features]
+default = ["serde"]
+cli = ["dep:serde", "serde/derive"]
+"#;
+        let types = scan(scan_cargo_toml, cargo_toml);
+        assert!(
+            types.contains(&"cargo-target-specific-dependency".to_owned()),
+            "{types:?}"
+        );
+        assert!(types.contains(&"cargo-dev-dependency".to_owned()), "{types:?}");
+        assert!(
+            types.contains(&"cargo-optional-dependency".to_owned()),
+            "{types:?}"
+        );
+        assert!(types.contains(&"cargo-feature-graph".to_owned()), "{types:?}");
+    }
+
+    #[test]
+    fn cargo_toml_optional_dependencies_create_implicit_features() {
+        let cargo_toml = r#"
+[package]
+name = "evil"
+version = "0.1.0"
+
+[dependencies]
+serde = { version = "1", optional = true }
+"#;
+        let types = scan(scan_cargo_toml, cargo_toml);
+        assert!(
+            types.contains(&"cargo-optional-dependency".to_owned()),
+            "{types:?}"
+        );
+        assert!(types.contains(&"cargo-feature-graph".to_owned()), "{types:?}");
+    }
+
+    #[test]
+    fn cargo_toml_conditional_feature_forwarding_does_not_count_as_activation() {
+        let cargo_toml = r#"
+[package]
+name = "evil"
+version = "0.1.0"
+
+[dependencies]
+serde = { version = "1", optional = true }
+
+[features]
+extras = ["serde?/derive"]
+"#;
+        let indicators = scan_indicators(scan_cargo_toml, cargo_toml);
+        let feature_graph = indicators
+            .iter()
+            .find(|indicator| indicator.indicator_type == "cargo-feature-graph")
+            .expect("feature graph indicator should be present");
+        assert!(
+            feature_graph
+                .summary
+                .contains("1 edge(s) activate optional dependencies"),
+            "conditional forwarding should not count as optional dependency activation: {}",
+            feature_graph.summary
+        );
+    }
+
+    #[test]
+    fn cargo_toml_malformed_flagged() {
+        let types = scan(scan_cargo_toml, "[package\nname = 'oops'");
+        assert!(types.contains(&"malformed-cargo-toml".to_owned()), "{types:?}");
+    }
+
+        #[test]
+        fn pom_xml_structured_fields_detected() {
+                let pom = r#"
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+    <modelVersion>4.0.0</modelVersion>
+    <parent>
+        <groupId>org.example</groupId>
+        <artifactId>parent</artifactId>
+        <version>1.0.0</version>
+    </parent>
+    <groupId>org.example</groupId>
+    <artifactId>evil</artifactId>
+    <version>1.0.0</version>
+    <dependencies>
+        <dependency>
+            <groupId>org.slf4j</groupId>
+            <artifactId>slf4j-api</artifactId>
+            <version>2.0.0</version>
+            <scope>runtime</scope>
+            <classifier>linux-x86_64</classifier>
+        </dependency>
+    </dependencies>
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.codehaus.mojo</groupId>
+                <artifactId>exec-maven-plugin</artifactId>
+                <version>3.1.0</version>
+            </plugin>
+        </plugins>
+    </build>
+    <repositories>
+        <repository>
+            <id>corp</id>
+            <url>https://repo.example.invalid/maven2</url>
+        </repository>
+    </repositories>
+    <distributionManagement>
+        <relocation>
+            <groupId>org.example.redirected</groupId>
+            <artifactId>evil</artifactId>
+            <version>2.0.0</version>
+        </relocation>
+    </distributionManagement>
+</project>
+"#;
+                let types = scan(scan_pom_xml, pom);
+                assert!(types.contains(&"maven-dependency".to_owned()), "{types:?}");
+                assert!(types.contains(&"maven-dependency-scope".to_owned()), "{types:?}");
+                assert!(types.contains(&"maven-dependency-classifier".to_owned()), "{types:?}");
+                assert!(types.contains(&"maven-build-plugin".to_owned()), "{types:?}");
+                assert!(types.contains(&"maven-repository-override".to_owned()), "{types:?}");
+                assert!(types.contains(&"maven-parent-pom".to_owned()), "{types:?}");
+                assert!(types.contains(&"maven-relocation".to_owned()), "{types:?}");
+        }
+
+        #[test]
+        fn pom_xml_malformed_flagged() {
+                let types = scan(scan_pom_xml, "<project><dependencies></project>");
+                assert!(types.contains(&"malformed-pom-xml".to_owned()), "{types:?}");
+        }
+
+    #[test]
+    fn cargo_lock_non_default_sources_detected() {
+        let cargo_lock = r#"
+version = 4
+
+[[package]]
+name = "git-dep"
+version = "0.1.0"
+source = "git+https://github.com/example/git-dep?rev=deadbeef#deadbeef"
+
+[[package]]
+name = "private-registry-dep"
+version = "0.2.0"
+source = "registry+https://registry.example.invalid/index"
+"#;
+        let types = scan(scan_cargo_lock, cargo_lock);
+        assert!(types.contains(&"cargo-git-dependency".to_owned()), "{types:?}");
+        assert!(
+            types.contains(&"cargo-alternate-registry-dependency".to_owned()),
+            "{types:?}"
+        );
+    }
+
+    #[test]
+    fn cargo_lock_path_dependencies_without_source_are_detected() {
+        let cargo_lock = r#"
+version = 4
+
+[[package]]
+name = "root"
+version = "0.1.0"
+dependencies = [
+    "path-dep",
+]
+
+[[package]]
+name = "path-dep"
+version = "0.2.0"
+"#;
+        let types = scan(scan_cargo_lock, cargo_lock);
+        assert!(types.contains(&"cargo-path-dependency".to_owned()), "{types:?}");
+    }
+
+    #[test]
+    fn cargo_lock_crates_io_source_not_flagged() {
+        let cargo_lock = r#"
+version = 4
+
+[[package]]
+name = "serde"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+"#;
+        let types = scan(scan_cargo_lock, cargo_lock);
+        assert!(types.is_empty(), "{types:?}");
     }
 
     #[test]

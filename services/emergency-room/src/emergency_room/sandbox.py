@@ -3,13 +3,18 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import shutil
 import socket
+import subprocess as _subprocess
+import tarfile
 import threading
 import time
+import zipfile
 from contextlib import contextmanager
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from ipaddress import ip_address
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any, Mapping, Protocol
@@ -75,7 +80,47 @@ CANARY_FILES: dict[str, str] = {
         "  user:\n"
         "    token: aegiscudo-canary-kube-token-do-not-use\n"
     ),
+    # Cargo registry credentials
+    ".cargo/credentials.toml": (
+        '[registry]\ntoken = "cargo-canary-token-do-not-use"\n'
+    ),
 }
+
+_JVM_CLASS_LOAD_PROBE = """import java.io.File;
+import java.net.URL;
+import java.net.URLClassLoader;
+
+public class JvmClassLoadProbe {
+    public static void main(String[] args) throws Exception {
+        if (args.length < 2) {
+            throw new IllegalArgumentException("expected artifact path plus class names");
+        }
+        URL artifactUrl = new File(args[0]).toURI().toURL();
+        try (URLClassLoader loader = new URLClassLoader(new URL[] { artifactUrl }, JvmClassLoadProbe.class.getClassLoader())) {
+            for (int index = 1; index < args.length; index += 1) {
+                Class.forName(args[index], true, loader);
+            }
+        }
+    }
+}
+"""
+
+_ELF_MAGIC = b"\x7fELF"
+_PE_MAGIC = b"MZ"
+_MACHO_MAGIC = frozenset({
+    b"\xfe\xed\xfa\xce",
+    b"\xce\xfa\xed\xfe",
+    b"\xcf\xfa\xed\xfe",
+    b"\xfe\xed\xfa\xcf",
+})
+_SUSPICIOUS_STRINGS: frozenset[str] = frozenset({
+    "api.telegram.org",
+    "requestbin",
+    "webhook.site",
+    "pastebin.com",
+    "transfer.sh",
+    "ngrok.io",
+})
 
 
 class LocalSandboxRunRequest(BaseModel):
@@ -194,13 +239,42 @@ async def run_local_sandbox(request: LocalSandboxRunRequest) -> LocalSandboxRunR
         canary_snapshot = snapshot_canary_files(home_dir)
         base_env = build_canary_environment(home_dir)
 
+        # Cargo: extract crate once and share project dir across all phases
+        cargo_project_dir: Path | None = None
+        if request.profile == SandboxProfile.CARGO_BUILD_PROFILE:
+            cargo_home = sandbox_root / "cargo-home"
+            cargo_home.mkdir(parents=True, exist_ok=True)
+            # Preserve the system rustup home so cargo can locate the active toolchain.
+            # HOME is changed to the sandbox home dir, which hides ~/.rustup.
+            rustup_home = os.environ.get("RUSTUP_HOME") or str(Path.home() / ".rustup")
+            base_env = {
+                **base_env,
+                "CARGO_HOME": str(cargo_home),
+                "RUSTUP_HOME": rustup_home,
+                "CARGO_TERM_COLOR": "never",
+                "CARGO_INCREMENTAL": "0",
+            }
+            container_dir = work_dir / "cargo-container"
+            container_dir.mkdir(parents=True, exist_ok=True)
+            cargo_project_dir = await ensure_cargo_workspace(container_dir, artifact_path)
+        elif request.profile == SandboxProfile.JVM_BINARY_PROFILE:
+            java_tool_options = base_env.get("JAVA_TOOL_OPTIONS", "").strip()
+            user_home_flag = f"-Duser.home={home_dir}"
+            base_env = {
+                **base_env,
+                "JAVA_TOOL_OPTIONS": f"{java_tool_options} {user_home_flag}".strip(),
+            }
+
         collector_port_open = is_port_available(9999)
         collector_context = ExfiltrationCollector() if collector_port_open else null_context()
         with collector_context as collector:
             phases = phases_for_profile(request.profile)
             for phase in phases:
-                phase_work_dir = work_dir / phase.value
-                phase_work_dir.mkdir(parents=True, exist_ok=True)
+                if cargo_project_dir is not None:
+                    phase_work_dir = cargo_project_dir
+                else:
+                    phase_work_dir = work_dir / phase.value
+                    phase_work_dir.mkdir(parents=True, exist_ok=True)
                 phase_result = await execute_phase(
                     request,
                     artifact_path,
@@ -228,6 +302,8 @@ def build_local_sandbox_profile_registry() -> SandboxProfileRegistry:
         {
             SandboxProfile.NPM_INSTALL: executor,
             SandboxProfile.PYTHON_INSTALL: executor,
+            SandboxProfile.CARGO_BUILD_PROFILE: executor,
+            SandboxProfile.JVM_BINARY_PROFILE: executor,
         }
     )
 
@@ -260,6 +336,16 @@ async def execute_phase(
     if request.profile == SandboxProfile.NPM_INSTALL:
         await ensure_npm_workspace(work_dir)
         command = npm_command_for_phase(phase, artifact_path)
+    elif request.profile == SandboxProfile.CARGO_BUILD_PROFILE:
+        # work_dir is the shared extracted cargo project directory
+        phase_env = dict(base_env)
+        if phase in (SandboxPhase.H, SandboxPhase.F):
+            # Deny Cargo registry network after dependency fetch
+            phase_env["CARGO_NET_OFFLINE"] = "true"
+        base_env = phase_env
+        command = cargo_command_for_phase(phase, work_dir)
+    elif request.profile == SandboxProfile.JVM_BINARY_PROFILE:
+        command = java_command_for_phase(phase, artifact_path, work_dir)
     else:
         await ensure_python_workspace(work_dir)
         if phase == SandboxPhase.G:
@@ -294,6 +380,39 @@ async def execute_phase(
                     type="process-nonzero-exit",
                     severity=Severity.LOW,
                     message=f"phase {phase.value} exited with code {completed.returncode}",
+                )
+            )
+
+        # Dependency tree capture for Cargo phase H
+        if (
+            request.profile == SandboxProfile.CARGO_BUILD_PROFILE
+            and phase == SandboxPhase.H
+            and not completed.timeout
+            and completed.returncode == 0
+        ):
+            tree_events = _cargo_tree_events(completed.stdout)
+            events.extend(tree_events)
+
+        # Post-build artifact inspection for Cargo phase F
+        if (
+            request.profile == SandboxProfile.CARGO_BUILD_PROFILE
+            and phase == SandboxPhase.F
+            and not completed.timeout
+        ):
+            inspect_events, inspect_violation = await post_cargo_build_inspection(work_dir)
+            events.extend(inspect_events)
+            violation_detected = violation_detected or inspect_violation
+
+        if (
+            request.profile == SandboxProfile.JVM_BINARY_PROFILE
+            and phase == SandboxPhase.G
+            and not completed.timeout
+            and completed.returncode == 0
+        ):
+            events.extend(
+                jvm_class_load_events(
+                    f"{completed.stdout}\n{completed.stderr}",
+                    infer_java_load_targets(artifact_path),
                 )
             )
 
@@ -382,6 +501,10 @@ def resolve_artifact_uri(value: str) -> Path:
 def phases_for_profile(profile: SandboxProfile) -> tuple[SandboxPhase, ...]:
     if profile == SandboxProfile.NPM_INSTALL:
         return (SandboxPhase.A, SandboxPhase.D, SandboxPhase.E)
+    if profile == SandboxProfile.CARGO_BUILD_PROFILE:
+        return (SandboxPhase.A, SandboxPhase.D, SandboxPhase.E, SandboxPhase.H, SandboxPhase.F)
+    if profile == SandboxProfile.JVM_BINARY_PROFILE:
+        return (SandboxPhase.A, SandboxPhase.G)
     return (SandboxPhase.A, SandboxPhase.D, SandboxPhase.G)
 
 
@@ -479,6 +602,7 @@ def collector_events(records: list[CollectorRecord]) -> tuple[list[SandboxTeleme
     for record in records:
         payload = record.payload or {}
         redacted_payload = redact_mapping(payload if isinstance(payload, dict) else {})
+        destination_url, destination_host, destination_ip = collector_destination_fields(record)
         events.append(
             SandboxTelemetryEvent(
                 type="outbound-network-attempt",
@@ -487,6 +611,9 @@ def collector_events(records: list[CollectorRecord]) -> tuple[list[SandboxTeleme
                     "captured outbound sandbox exfil attempt to loopback collector "
                     f"with payload {json.dumps(redacted_payload, sort_keys=True)}"
                 ),
+                destination_url=destination_url,
+                destination_host=destination_host,
+                destination_ip=destination_ip,
             )
         )
         violation_detected = True
@@ -501,6 +628,35 @@ def collector_events(records: list[CollectorRecord]) -> tuple[list[SandboxTeleme
             )
             violation_detected = True
     return events, violation_detected
+
+
+def collector_destination_fields(
+    record: CollectorRecord,
+) -> tuple[str | None, str | None, str | None]:
+    host_header = record.headers.get("host", "").strip()
+    if not host_header:
+        return None, None, None
+
+    destination_host = normalized_destination_host(host_header)
+    destination_ip = normalized_destination_ip(destination_host)
+    path = record.path if record.path.startswith("/") else f"/{record.path}"
+    destination_url = f"http://{host_header}{path}"
+    return destination_url, destination_host, destination_ip
+
+
+def normalized_destination_host(host_header: str) -> str:
+    if host_header.startswith("[") and "]" in host_header:
+        return host_header[1 : host_header.index("]")]
+    return host_header.rsplit(":", 1)[0] if host_header.count(":") == 1 else host_header
+
+
+def normalized_destination_ip(host: str) -> str | None:
+    if host == "localhost":
+        return "127.0.0.1"
+    try:
+        return str(ip_address(host))
+    except ValueError:
+        return None
 
 
 def payload_contains_canary_values(payload: dict[str, Any]) -> bool:
@@ -522,6 +678,345 @@ def sys_executable() -> str:
     return shutil.which("python3") or shutil.which("python") or "python3"
 
 
+def java_executable() -> str:
+    return shutil.which("java") or "java"
+
+
 @contextmanager
 def null_context() -> Any:
     yield type("NullCollector", (), {"records": []})()
+
+# ---------------------------------------------------------------------------
+# JVM sandbox helpers
+# ---------------------------------------------------------------------------
+
+
+def java_command_for_phase(phase: SandboxPhase, artifact_path: Path, work_dir: Path) -> list[str] | None:
+    if phase == SandboxPhase.A:
+        return None
+    if phase != SandboxPhase.G:
+        return None
+
+    selected_classes = infer_java_load_targets(artifact_path)
+    if not selected_classes:
+        raise ValueError(f"unable to infer JVM load targets from artifact: {artifact_path}")
+
+    probe_path = work_dir / "JvmClassLoadProbe.java"
+    if not probe_path.exists():
+        probe_path.write_text(_JVM_CLASS_LOAD_PROBE, encoding="utf-8")
+
+    return [java_executable(), "-verbose:class", str(probe_path), str(artifact_path), *selected_classes]
+
+
+def infer_java_load_targets(artifact_path: Path) -> list[str]:
+    if artifact_path.suffix.lower() not in {".jar", ".war", ".ear"}:
+        raise ValueError(f"unsupported JVM artifact: {artifact_path}")
+
+    with zipfile.ZipFile(artifact_path) as archive:
+        selected: list[str] = []
+        main_class = infer_java_main_class(archive)
+        if main_class is not None:
+            selected.append(main_class)
+
+        for entry_name in archive.namelist():
+            if not entry_name.endswith(".class"):
+                continue
+            if entry_name.startswith("META-INF/") or entry_name.endswith(("module-info.class", "package-info.class")):
+                continue
+
+            class_name = entry_name[: -len(".class")].replace("/", ".")
+            if "$" in class_name or class_name in selected:
+                continue
+            selected.append(class_name)
+            if len(selected) >= 3:
+                break
+
+    return selected
+
+
+def infer_java_main_class(archive: zipfile.ZipFile) -> str | None:
+    try:
+        manifest = archive.read("META-INF/MANIFEST.MF").decode("utf-8", errors="replace")
+    except KeyError:
+        return None
+
+    for line in manifest.splitlines():
+        if line.lower().startswith("main-class:"):
+            main_class = line.split(":", 1)[1].strip()
+            return main_class or None
+    return None
+
+
+def jvm_class_load_events(output: str, selected_classes: list[str]) -> list[SandboxTelemetryEvent]:
+    loaded: set[str] = set()
+    modern_pattern = re.compile(r"\[.*?\]\[info\]\[class,load\]\s+([A-Za-z0-9_.$/]+)\s+source:")
+    legacy_pattern = re.compile(r"^\[Loaded\s+([A-Za-z0-9_.$/]+)\s+from\s+.*\]$", re.MULTILINE)
+
+    for match in modern_pattern.finditer(output):
+        loaded.add(match.group(1))
+    for match in legacy_pattern.finditer(output):
+        loaded.add(match.group(1))
+
+    events: list[SandboxTelemetryEvent] = []
+    for class_name in selected_classes:
+        if class_name in loaded:
+            events.append(
+                SandboxTelemetryEvent(
+                    type="jvm-class-loaded",
+                    severity=Severity.INFO,
+                    message=f"loaded selected JVM class {class_name}",
+                )
+            )
+    return events
+
+
+# ---------------------------------------------------------------------------
+# Cargo sandbox helpers
+# ---------------------------------------------------------------------------
+
+
+async def ensure_cargo_workspace(container_dir: Path, artifact_path: Path) -> Path:
+    """Copy source dir or extract .crate archive into container_dir. Returns the Cargo project root."""
+    project_dir = container_dir / "project"
+    if project_dir.exists():
+        return _find_cargo_project_root(project_dir)
+
+    project_dir.mkdir(parents=True, exist_ok=True)
+
+    if artifact_path.is_dir():
+        shutil.copytree(
+            str(artifact_path),
+            str(project_dir / artifact_path.name),
+            ignore=shutil.ignore_patterns("target"),
+        )
+        return _find_cargo_project_root(project_dir)
+
+    name = artifact_path.name
+    if name.endswith(".crate") or name.endswith(".tar.gz"):
+        with tarfile.open(str(artifact_path), "r:gz") as tf:
+            tf.extractall(str(project_dir), filter="data")
+        return _find_cargo_project_root(project_dir)
+
+    raise ValueError(f"unsupported Cargo artifact: {artifact_path}")
+
+
+def _find_cargo_project_root(directory: Path) -> Path:
+    """Return the directory containing Cargo.toml, searching one level deep."""
+    if (directory / "Cargo.toml").exists():
+        return directory
+    for child in sorted(directory.iterdir()):
+        if child.is_dir() and (child / "Cargo.toml").exists():
+            return child
+    return directory
+
+
+def cargo_command_for_phase(phase: SandboxPhase, project_dir: Path) -> list[str] | None:
+    manifest = str(project_dir / "Cargo.toml")
+    if phase == SandboxPhase.A:
+        return None
+    if phase == SandboxPhase.D:
+        return [
+            "cargo", "metadata",
+            "--format-version=1", "--no-deps", "--locked",
+            "--manifest-path", manifest,
+        ]
+    if phase == SandboxPhase.E:
+        return ["cargo", "fetch", "--locked", "--manifest-path", manifest]
+    if phase == SandboxPhase.H:
+        return ["cargo", "tree", "--locked", "--manifest-path", manifest]
+    if phase == SandboxPhase.F:
+        return ["cargo", "build", "--locked", "--manifest-path", manifest]
+    return None
+
+
+def _is_native_binary(path: Path) -> bool:
+    try:
+        with path.open("rb") as fh:
+            magic = fh.read(4)
+        return (
+            magic == _ELF_MAGIC
+            or magic[:2] == _PE_MAGIC[:2]
+            or magic in _MACHO_MAGIC
+        )
+    except OSError:
+        return False
+
+
+def _collect_native_artifacts(directory: Path) -> list[Path]:
+    """Find ELF / Mach-O / PE binaries under a directory."""
+    candidates: list[Path] = []
+    try:
+        for path in directory.rglob("*"):
+            if path.is_file() and _is_native_binary(path):
+                candidates.append(path)
+    except (PermissionError, OSError):
+        pass
+    return candidates
+
+
+def _inspect_native_artifact(artifact: Path) -> tuple[list[SandboxTelemetryEvent], bool]:
+    """Run strings / nm on a native binary and flag suspicious content."""
+    events: list[SandboxTelemetryEvent] = []
+    violation = False
+
+    events.append(
+        SandboxTelemetryEvent(
+            type="cargo-native-artifact-detected",
+            severity=Severity.MEDIUM,
+            message=f"native binary found in build output: {artifact.name}",
+        )
+    )
+
+    strings_bin = shutil.which("strings")
+    if strings_bin:
+        try:
+            result = _subprocess.run(
+                [strings_bin, "--", str(artifact)],
+                capture_output=True, text=True, timeout=10,
+            )
+            suspicious_lines = [
+                line.strip()
+                for line in result.stdout.splitlines()
+                if any(pat in line.lower() for pat in _SUSPICIOUS_STRINGS)
+            ]
+            if suspicious_lines:
+                violation = True
+                events.append(
+                    SandboxTelemetryEvent(
+                        type="native-artifact-escalation",
+                        severity=Severity.CRITICAL,
+                        message=(
+                            f"suspicious strings in {artifact.name}: "
+                            + "; ".join(suspicious_lines[:5])
+                        ),
+                    )
+                )
+        except Exception:
+            pass
+
+    nm_bin = shutil.which("nm")
+    rustfilt_bin = shutil.which("rustfilt")
+    if nm_bin:
+        try:
+            nm_result = _subprocess.run(
+                [nm_bin, "--demangle", "--", str(artifact)],
+                capture_output=True, text=True, timeout=15,
+            )
+            symbols_raw = nm_result.stdout
+            if rustfilt_bin:
+                rf_result = _subprocess.run(
+                    [rustfilt_bin],
+                    input=nm_result.stdout,
+                    capture_output=True, text=True, timeout=10,
+                )
+                symbols_raw = rf_result.stdout
+            suspicious_syms = [
+                line.strip()
+                for line in symbols_raw.splitlines()
+                if any(
+                    pat in line
+                    for pat in (
+                        "std::net",
+                        "TcpStream",
+                        "UdpSocket",
+                        "std::process::Command",
+                        "libc::execv",
+                    )
+                )
+            ]
+            if suspicious_syms:
+                violation = True
+                events.append(
+                    SandboxTelemetryEvent(
+                        type="native-artifact-escalation",
+                        severity=Severity.CRITICAL,
+                        message=(
+                            f"suspicious symbols in {artifact.name}: "
+                            + "; ".join(suspicious_syms[:5])
+                        ),
+                    )
+                )
+        except Exception:
+            pass
+
+    return events, violation
+
+
+_MAX_TREE_OUTPUT_CHARS = 4000
+_PROC_MACRO_MARKER = "(proc-macro)"
+
+
+def _cargo_tree_events(tree_output: str) -> list[SandboxTelemetryEvent]:
+    """Emit telemetry events derived from `cargo tree` stdout output."""
+    events: list[SandboxTelemetryEvent] = []
+    if not tree_output.strip():
+        return events
+
+    # Capture the full dependency tree output (truncated for storage)
+    summary = tree_output[:_MAX_TREE_OUTPUT_CHARS]
+    if len(tree_output) > _MAX_TREE_OUTPUT_CHARS:
+        summary += f"\n... ({len(tree_output) - _MAX_TREE_OUTPUT_CHARS} chars truncated)"
+    events.append(
+        SandboxTelemetryEvent(
+            type="cargo-dependency-tree",
+            severity=Severity.INFO,
+            message=summary,
+        )
+    )
+
+    # Flag transitive proc-macro crates — they execute arbitrary code at compile time
+    proc_macro_lines = [
+        line.strip()
+        for line in tree_output.splitlines()
+        if _PROC_MACRO_MARKER in line
+    ]
+    if proc_macro_lines:
+        sample = ", ".join(proc_macro_lines[:5])
+        events.append(
+            SandboxTelemetryEvent(
+                type="cargo-proc-macro-in-tree",
+                severity=Severity.MEDIUM,
+                message=f"{len(proc_macro_lines)} proc-macro crate(s) in dependency tree: {sample}",
+            )
+        )
+
+    return events
+
+
+async def post_cargo_build_inspection(
+    project_dir: Path,
+) -> tuple[list[SandboxTelemetryEvent], bool]:
+    """Inspect OUT_DIR outputs and native artifacts produced by cargo build."""
+    events: list[SandboxTelemetryEvent] = []
+    violation = False
+
+    target_debug = project_dir / "target" / "debug"
+    if not target_debug.exists():
+        return events, violation
+
+    out_dirs = sorted(target_debug.glob("build/*/out"))
+    if out_dirs:
+        out_files: list[str] = []
+        for out_dir in out_dirs:
+            out_files.extend(
+                str(p.relative_to(project_dir))
+                for p in out_dir.rglob("*")
+                if p.is_file()
+            )
+        events.append(
+            SandboxTelemetryEvent(
+                type="cargo-build-out-dir",
+                severity=Severity.MEDIUM,
+                message=(
+                    f"build script OUT_DIR produced {len(out_files)} file(s)"
+                    + (f": {', '.join(out_files[:3])}" if out_files else "")
+                ),
+            )
+        )
+
+    for artifact in _collect_native_artifacts(target_debug):
+        artifact_events, artifact_violation = _inspect_native_artifact(artifact)
+        events.extend(artifact_events)
+        violation = violation or artifact_violation
+
+    return events, violation

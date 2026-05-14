@@ -158,6 +158,143 @@ SET ecosystem = EXCLUDED.ecosystem,
 SQL
 }
 
+seed_live_cargo_fixture_artifact() {
+  artifact_id=$1
+  package_name=$2
+  package_version=$3
+  storage_uri=$4
+  created_at=$5
+
+  fixture_values=$(
+    REPO_ROOT="$repo_root" \
+      PACKAGE_NAME="$package_name" \
+      PACKAGE_VERSION="$package_version" \
+      python3 - <<'PY'
+from pathlib import Path
+import hashlib
+import os
+import sys
+
+repo_root = Path(os.environ["REPO_ROOT"])
+package_name = os.environ["PACKAGE_NAME"]
+package_version = os.environ["PACKAGE_VERSION"]
+sys.path.insert(0, str(repo_root / "scripts"))
+
+from fixture_registry import build_cargo_crate
+
+crate_bytes = build_cargo_crate(
+    repo_root / "testdata" / "cargo",
+    package_name,
+    package_version,
+)
+print(hashlib.sha256(crate_bytes).hexdigest())
+print(len(crate_bytes))
+PY
+  )
+  artifact_sha256=$(printf '%s\n' "$fixture_values" | sed -n '1p')
+  artifact_size_bytes=$(printf '%s\n' "$fixture_values" | sed -n '2p')
+
+  run_seed <<SQL >/dev/null
+INSERT INTO artifacts (
+  id,
+  tenant_id,
+  ecosystem,
+  namespace,
+  package_name,
+  package_version,
+  sha256,
+  size_bytes,
+  storage_uri,
+  created_at
+)
+VALUES (
+  '$artifact_id',
+  '018f4a6f-55d0-7000-8000-000000000001',
+  'cargo',
+  NULL,
+  '$package_name',
+  '$package_version',
+  '$artifact_sha256',
+  $artifact_size_bytes,
+  '$storage_uri',
+  '$created_at'
+)
+ON CONFLICT (id) DO UPDATE
+SET ecosystem = EXCLUDED.ecosystem,
+    namespace = EXCLUDED.namespace,
+    package_name = EXCLUDED.package_name,
+    package_version = EXCLUDED.package_version,
+    sha256 = EXCLUDED.sha256,
+    size_bytes = EXCLUDED.size_bytes,
+    storage_uri = EXCLUDED.storage_uri,
+    created_at = EXCLUDED.created_at;
+SQL
+}
+
+seed_live_maven_fixture_artifact() {
+  artifact_id=$1
+  namespace=$2
+  package_name=$3
+  package_version=$4
+  fixture_path=$5
+  storage_uri=$6
+  created_at=$7
+
+  fixture_values=$(
+    REPO_ROOT="$repo_root" \
+      FIXTURE_PATH="$fixture_path" \
+      python3 - <<'PY'
+from pathlib import Path
+import hashlib
+import os
+
+repo_root = Path(os.environ["REPO_ROOT"])
+fixture_path = repo_root / os.environ["FIXTURE_PATH"]
+payload = fixture_path.read_bytes()
+print(hashlib.sha256(payload).hexdigest())
+print(len(payload))
+PY
+  )
+  artifact_sha256=$(printf '%s\n' "$fixture_values" | sed -n '1p')
+  artifact_size_bytes=$(printf '%s\n' "$fixture_values" | sed -n '2p')
+
+  run_seed <<SQL >/dev/null
+INSERT INTO artifacts (
+  id,
+  tenant_id,
+  ecosystem,
+  namespace,
+  package_name,
+  package_version,
+  sha256,
+  size_bytes,
+  storage_uri,
+  created_at
+)
+VALUES (
+  '$artifact_id',
+  '018f4a6f-55d0-7000-8000-000000000001',
+  'maven',
+  '$namespace',
+  '$package_name',
+  '$package_version',
+  '$artifact_sha256',
+  $artifact_size_bytes,
+  '$storage_uri',
+  '$created_at'
+)
+ON CONFLICT (id) DO UPDATE
+SET ecosystem = EXCLUDED.ecosystem,
+    namespace = EXCLUDED.namespace,
+    package_name = EXCLUDED.package_name,
+    package_version = EXCLUDED.package_version,
+    sha256 = EXCLUDED.sha256,
+    size_bytes = EXCLUDED.size_bytes,
+    storage_uri = EXCLUDED.storage_uri,
+    created_at = EXCLUDED.created_at;
+SQL
+}
+
 seed_live_package_signal() {
   signal_id=$1
   package_name=$2
@@ -216,7 +353,9 @@ WHERE pd.package_request_id = pr.id
   AND pr.tenant_id = '018f4a6f-55d0-7000-8000-000000000001'
   AND (
     pr.package_name = 'aegiscudo-benign-npm-fixture'
+    OR pr.package_name = 'aegiscudo-benign-cargo-fixture'
     OR pr.package_name = 'aegiscudo-benign-pypi-fixture'
+    OR pr.package_name = 'aegiscudo-benign-maven-fixture'
     OR (
       pr.package_name = 'fresh-postinstall'
       AND NOT (
@@ -228,7 +367,7 @@ WHERE pd.package_request_id = pr.id
 
 DELETE FROM package_requests
 WHERE tenant_id = '018f4a6f-55d0-7000-8000-000000000001'
-  AND package_name IN ('aegiscudo-benign-npm-fixture', 'aegiscudo-benign-pypi-fixture', 'fresh-postinstall')
+  AND package_name IN ('aegiscudo-benign-npm-fixture', 'aegiscudo-benign-cargo-fixture', 'aegiscudo-benign-pypi-fixture', 'aegiscudo-benign-maven-fixture', 'fresh-postinstall')
   AND id <> '018f4a6f-55d0-7000-8000-000000000501';
 SQL
 }
@@ -265,6 +404,12 @@ seed_live_npm_fixture_artifact \
   '1.0.0' \
   'http://127.0.0.1:18080/aegiscudo-benign-npm-fixture/-/aegiscudo-benign-npm-fixture-1.0.0.tgz' \
   '2026-05-05T10:20:00Z'
+seed_live_cargo_fixture_artifact \
+  '018f4a6f-55d0-7000-8000-000000000605' \
+  'aegiscudo-benign-cargo-fixture' \
+  '1.0.0' \
+  'http://127.0.0.1:18082/api/v1/crates/aegiscudo-benign-cargo-fixture/1.0.0/download' \
+  '2026-05-05T10:22:00Z'
 seed_live_pypi_fixture_artifact \
   '018f4a6f-55d0-7000-8000-000000000604' \
   'aegiscudo-benign-pypi-fixture' \
@@ -272,5 +417,13 @@ seed_live_pypi_fixture_artifact \
   'testdata/pypi/packages/aegiscudo_benign_pypi_fixture-1.0.0-py3-none-any.whl' \
   'http://127.0.0.1:18081/packages/aegiscudo_benign_pypi_fixture-1.0.0-py3-none-any.whl' \
   '2026-05-05T10:25:00Z'
+seed_live_maven_fixture_artifact \
+  '018f4a6f-55d0-7000-8000-000000000606' \
+  'com.aegiscudo.fixtures' \
+  'aegiscudo-benign-maven-fixture' \
+  '1.0.0' \
+  'testdata/maven/com/aegiscudo/fixtures/aegiscudo-benign-maven-fixture/1.0.0/aegiscudo-benign-maven-fixture-1.0.0.jar' \
+  'http://127.0.0.1:18083/com/aegiscudo/fixtures/aegiscudo-benign-maven-fixture/1.0.0/aegiscudo-benign-maven-fixture-1.0.0.jar' \
+  '2026-05-05T10:26:00Z'
 
 printf '%s\n' "local control-plane seed applied to ${db_name}"

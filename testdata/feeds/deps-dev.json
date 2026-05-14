@@ -34,5 +34,42 @@
         { "type": "SOURCE_REPO", "url": "https://github.com/psf/requests" }
       ]
     }
+  ],
+  "nodes": [
+    {
+      "versionKey": { "system": "NPM", "name": "express", "version": "4.18.2" },
+      "bundled": false,
+      "relation": "SELF",
+      "errors": []
+    },
+    {
+      "versionKey": { "system": "NPM", "name": "accepts", "version": "1.3.8" },
+      "bundled": false,
+      "relation": "DIRECT",
+      "errors": []
+    },
+    {
+      "versionKey": { "system": "NPM", "name": "mime-types", "version": "2.1.34" },
+      "bundled": false,
+      "relation": "INDIRECT",
+      "errors": []
+    },
+    {
+      "versionKey": { "system": "PYPI", "name": "requests", "version": "2.31.0" },
+      "bundled": false,
+      "relation": "SELF",
+      "errors": []
+    },
+    {
+      "versionKey": { "system": "PYPI", "name": "urllib3", "version": "2.2.1" },
+      "bundled": false,
+      "relation": "DIRECT",
+      "errors": []
+    }
+  ],
+  "edges": [
+    { "fromNode": 0, "toNode": 1, "requirement": "~1.3.8" },
+    { "fromNode": 1, "toNode": 2, "requirement": "~2.1.34" },
+    { "fromNode": 3, "toNode": 4, "requirement": ">=1.21.1,<3" }
   ]
 }

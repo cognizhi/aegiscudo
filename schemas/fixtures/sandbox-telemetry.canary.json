@@ -4,6 +4,13 @@
   "phase": "E",
   "egress_mode": "deny-all",
   "events": [
-    { "type": "canary-access", "severity": "critical", "message": "package read fake .npmrc canary" }
+    {
+      "type": "canary-access",
+      "severity": "critical",
+      "message": "package read fake .npmrc canary",
+      "destination_url": "http://localhost:9999/collect",
+      "destination_host": "localhost",
+      "destination_ip": "127.0.0.1"
+    }
   ]
 }

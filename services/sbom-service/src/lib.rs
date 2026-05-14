@@ -6,8 +6,11 @@ use aegiscudo_core::PackageEcosystem;
 use aegiscudo_telemetry::health;
 use axum::{
     Json, Router,
-    extract::{Path, State},
-    http::StatusCode,
+    extract::{Path, Query, State},
+    http::{
+        StatusCode,
+        header::{CONTENT_DISPOSITION, CONTENT_TYPE, HeaderValue},
+    },
     response::{IntoResponse, Response},
     routing::{get, post},
 };
@@ -15,7 +18,10 @@ use chrono::{DateTime, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
-use sqlx::{PgPool, Row, postgres::PgPoolOptions};
+use sqlx::{
+    PgPool, Row,
+    postgres::{PgPoolOptions, PgRow},
+};
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -23,6 +29,8 @@ pub const SERVICE_NAME: &str = "sbom-service";
 /// Hard upper bound on components per SBOM request. Prevents OOM via
 /// unbounded allocations before any disk/DB work begins.
 pub const MAX_COMPONENT_COUNT: usize = 50_000;
+const DEFAULT_SBOM_LIST_LIMIT: i64 = 12;
+const MAX_SBOM_LIST_LIMIT: u32 = 50;
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -33,6 +41,12 @@ pub struct Config {
 pub struct AppState {
     pool: PgPool,
     config: Config,
+}
+
+#[derive(Debug, Clone)]
+struct ResolvedGenerateComponents {
+    tenant_id: Option<Uuid>,
+    components: Vec<SbomComponentInput>,
 }
 
 pub async fn connect(database_url: &str) -> Result<PgPool, sqlx::Error> {
@@ -50,6 +64,8 @@ pub fn app(pool: PgPool, config: Config) -> Router {
         .route("/v1/sbom/generate", post(generate_sbom))
         .route("/v1/sbom/{id}", get(get_sbom))
         .route("/v1/sbom/{id}/metadata", get(get_sbom_metadata))
+        .route("/v1/tenants/{tenant_id}/sboms", get(list_tenant_sboms))
+        .route("/v1/tenants/{tenant_id}/sboms/{id}", get(get_tenant_sbom))
         .with_state(state)
 }
 
@@ -82,7 +98,8 @@ pub struct GenerateSbomRequest {
     pub source: String,
     /// SBOM format: `cyclonedx-1.7-json`, `cyclonedx-1.6-json`, or `spdx-2.3-json`.
     pub format: SbomFormatSpec,
-    /// Components to include in the SBOM.
+    /// Components to include in the SBOM. May be empty when `analysis_job_id`
+    /// is provided and stored Surgeon SBOM fragments should be loaded.
     pub components: Vec<SbomComponentInput>,
     /// Optional reference to the analysis job that produced these components.
     pub analysis_job_id: Option<Uuid>,
@@ -147,6 +164,11 @@ pub struct NtiaValidationResult {
     pub issues: Vec<String>,
 }
 
+#[derive(Debug, Clone, Default, Deserialize)]
+struct ListTenantSbomsQuery {
+    limit: Option<u32>,
+}
+
 // ── Handlers ─────────────────────────────────────────────────────────────────
 
 async fn generate_sbom(
@@ -155,14 +177,18 @@ async fn generate_sbom(
 ) -> Result<Json<GenerateSbomResponse>, ApiError> {
     validate_generate_request(&req)?;
 
-    if req.components.len() > MAX_COMPONENT_COUNT {
-        return Err(ApiError::TooManyComponents(req.components.len()));
+    let resolved = resolve_generate_components(&state.pool, &req).await?;
+
+    validate_component_inputs(&resolved.components)?;
+
+    if resolved.components.len() > MAX_COMPONENT_COUNT {
+        return Err(ApiError::TooManyComponents(resolved.components.len()));
     }
 
     let document = match req.format {
-        SbomFormatSpec::CycloneDx17 => generate_cyclonedx(&req.source, "1.7", &req.components),
-        SbomFormatSpec::CycloneDx16 => generate_cyclonedx(&req.source, "1.6", &req.components),
-        SbomFormatSpec::Spdx23 => generate_spdx23(&req.source, &req.components),
+        SbomFormatSpec::CycloneDx17 => generate_cyclonedx(&req.source, "1.7", &resolved.components),
+        SbomFormatSpec::CycloneDx16 => generate_cyclonedx(&req.source, "1.6", &resolved.components),
+        SbomFormatSpec::Spdx23 => generate_spdx23(&req.source, &resolved.components),
     };
 
     let ntia_validation = validate_ntia_minimum_elements(req.format.db_value(), &document);
@@ -174,13 +200,13 @@ async fn generate_sbom(
     let id = Uuid::new_v4();
     let storage_uri = write_sbom_to_store(
         &state.config.sbom_store_dir,
-        req.tenant_id,
+        resolved.tenant_id,
         id,
         &bytes,
     )
     .await?;
 
-    let component_count = req.components.len() as i32;
+    let component_count = resolved.components.len() as i32;
     let now: DateTime<Utc> = Utc::now();
 
     sqlx::query(
@@ -194,7 +220,7 @@ async fn generate_sbom(
     )
     .bind(id)
     .bind(req.analysis_job_id)
-    .bind(req.tenant_id)
+    .bind(resolved.tenant_id)
     .bind(&req.source)
     .bind(req.format.db_value())
     .bind(&storage_uri)
@@ -234,11 +260,7 @@ async fn get_sbom(
     .ok_or(ApiError::NotFound)?;
 
     let storage_uri: String = row.try_get("storage_uri")?;
-    let path = uri_to_path(&storage_uri)?;
-    let bytes = tokio::fs::read(&path).await.map_err(|e| {
-        tracing::error!(error = %e, "failed to read SBOM from store");
-        ApiError::Storage("read failed".to_owned())
-    })?;
+    let bytes = load_stored_sbom_bytes(&storage_uri).await?;
 
     Ok((
         StatusCode::OK,
@@ -265,12 +287,84 @@ async fn get_sbom_metadata(
     .await?
     .ok_or(ApiError::NotFound)?;
 
+    Ok(Json(sbom_metadata_from_row(&row).await?))
+}
+
+async fn list_tenant_sboms(
+    State(state): State<Arc<AppState>>,
+    Path(tenant_id): Path<Uuid>,
+    Query(query): Query<ListTenantSbomsQuery>,
+) -> Result<Json<Vec<SbomMetadata>>, ApiError> {
+    let limit = resolve_sbom_list_limit(query.limit)?;
+    let rows = sqlx::query(
+        r#"
+        SELECT id, analysis_job_id, tenant_id, source, format,
+               component_count, storage_uri, storage_sha256,
+               storage_size_bytes, created_at
+        FROM sbom_documents
+        WHERE tenant_id = $1
+        ORDER BY created_at DESC
+        LIMIT $2
+        "#,
+    )
+    .bind(tenant_id)
+    .bind(limit)
+    .fetch_all(&state.pool)
+    .await?;
+
+    let mut documents = Vec::with_capacity(rows.len());
+    for row in rows {
+        documents.push(sbom_metadata_from_row(&row).await?);
+    }
+
+    Ok(Json(documents))
+}
+
+async fn get_tenant_sbom(
+    State(state): State<Arc<AppState>>,
+    Path((tenant_id, id)): Path<(Uuid, Uuid)>,
+) -> Result<Response, ApiError> {
+    let row = sqlx::query(
+        r#"
+        SELECT source, format, storage_uri
+        FROM sbom_documents
+        WHERE tenant_id = $1 AND id = $2
+        "#,
+    )
+    .bind(tenant_id)
+    .bind(id)
+    .fetch_optional(&state.pool)
+    .await?
+    .ok_or(ApiError::NotFound)?;
+
+    let source: String = row.try_get("source")?;
     let format: String = row.try_get("format")?;
     let storage_uri: String = row.try_get("storage_uri")?;
-    let ntia_validation = load_stored_sbom_validation(&format, &storage_uri).await?;
+    let bytes = load_stored_sbom_bytes(&storage_uri).await?;
+    let filename = sbom_download_filename(&source, &format, id);
 
-    Ok(Json(SbomMetadata {
-        id: row.try_get("id")?,
+    let mut response = Response::new(bytes.into());
+    *response.status_mut() = StatusCode::OK;
+    response
+        .headers_mut()
+        .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    response.headers_mut().insert(
+        CONTENT_DISPOSITION,
+        HeaderValue::from_str(&format!("attachment; filename=\"{filename}\""))
+            .map_err(|_| ApiError::Storage("content disposition failed".to_owned()))?,
+    );
+
+    Ok(response)
+}
+
+async fn sbom_metadata_from_row(row: &PgRow) -> Result<SbomMetadata, ApiError> {
+    let id: Uuid = row.try_get("id")?;
+    let format: String = row.try_get("format")?;
+    let storage_uri: String = row.try_get("storage_uri")?;
+    let ntia_validation = ntia_validation_for_summary(id, &format, &storage_uri).await;
+
+    Ok(SbomMetadata {
+        id,
         analysis_job_id: row.try_get("analysis_job_id")?,
         tenant_id: row.try_get("tenant_id")?,
         format,
@@ -281,7 +375,49 @@ async fn get_sbom_metadata(
         storage_size_bytes: row.try_get("storage_size_bytes")?,
         created_at: row.try_get("created_at")?,
         ntia_validation,
-    }))
+    })
+}
+
+async fn ntia_validation_for_summary(
+    id: Uuid,
+    format: &str,
+    storage_uri: &str,
+) -> NtiaValidationResult {
+    match load_stored_sbom_validation(format, storage_uri).await {
+        Ok(validation) => validation,
+        Err(error) => {
+            tracing::warn!(
+                sbom_id = %id,
+                storage_uri = %storage_uri,
+                error = %error,
+                "failed to load stored SBOM for summary validation"
+            );
+            NtiaValidationResult {
+                valid: false,
+                issues: vec![
+                    "stored SBOM document could not be loaded for NTIA validation".to_owned(),
+                ],
+            }
+        }
+    }
+}
+
+async fn resolve_generate_components(
+    pool: &PgPool,
+    req: &GenerateSbomRequest,
+) -> Result<ResolvedGenerateComponents, ApiError> {
+    if !req.components.is_empty() {
+        return Ok(ResolvedGenerateComponents {
+            tenant_id: req.tenant_id,
+            components: req.components.clone(),
+        });
+    }
+
+    let analysis_job_id = req
+        .analysis_job_id
+        .ok_or_else(|| ApiError::InvalidRequest("analysis_job_id is required when components are omitted".to_owned()))?;
+
+    load_analysis_job_components(pool, analysis_job_id, req.tenant_id).await
 }
 
 fn validate_generate_request(req: &GenerateSbomRequest) -> Result<(), ApiError> {
@@ -291,7 +427,17 @@ fn validate_generate_request(req: &GenerateSbomRequest) -> Result<(), ApiError> 
         ));
     }
 
-    for (index, component) in req.components.iter().enumerate() {
+    if req.components.is_empty() && req.analysis_job_id.is_none() {
+        return Err(ApiError::InvalidRequest(
+            "components must not be empty when analysis_job_id is absent".to_owned(),
+        ));
+    }
+
+    validate_component_inputs(&req.components)
+}
+
+fn validate_component_inputs(components: &[SbomComponentInput]) -> Result<(), ApiError> {
+    for (index, component) in components.iter().enumerate() {
         if component.purl.trim().is_empty() {
             return Err(ApiError::InvalidRequest(format!(
                 "components[{index}].purl must not be empty"
@@ -373,6 +519,131 @@ fn validate_generate_request(req: &GenerateSbomRequest) -> Result<(), ApiError> 
     Ok(())
 }
 
+#[derive(Debug, Deserialize)]
+struct StoredSbomFragment {
+    components: Vec<StoredSbomFragmentComponent>,
+}
+
+#[derive(Debug, Deserialize)]
+struct StoredSbomFragmentComponent {
+    purl: String,
+    name: String,
+    ecosystem: PackageEcosystem,
+    version: Option<String>,
+    namespace: Option<String>,
+    integrity: Option<String>,
+}
+
+async fn load_analysis_job_components(
+    pool: &PgPool,
+    analysis_job_id: Uuid,
+    tenant_id: Option<Uuid>,
+) -> Result<ResolvedGenerateComponents, ApiError> {
+    let rows = if let Some(tenant_id) = tenant_id {
+        sqlx::query(
+            r#"
+            SELECT
+              fragments.tenant_id,
+              fragments.fragment,
+              policy_decision.decision AS decision,
+              policy_decision.decided_at
+            FROM analysis_sbom_fragments AS fragments
+            LEFT JOIN LATERAL (
+              SELECT
+                policy_decisions.decision::text AS decision,
+                policy_decisions.decided_at
+              FROM policy_decisions
+              WHERE policy_decisions.artifact_id = fragments.artifact_id
+                AND policy_decisions.tenant_id = fragments.tenant_id
+              ORDER BY policy_decisions.decided_at DESC
+              LIMIT 1
+            ) AS policy_decision ON TRUE
+            WHERE fragments.analysis_job_id = $1
+              AND fragments.tenant_id = $2
+            ORDER BY fragments.created_at ASC, fragments.id ASC
+            "#,
+        )
+        .bind(analysis_job_id)
+        .bind(tenant_id)
+        .fetch_all(pool)
+        .await?
+    } else {
+        sqlx::query(
+            r#"
+            SELECT
+              fragments.tenant_id,
+              fragments.fragment,
+              policy_decision.decision AS decision,
+              policy_decision.decided_at
+            FROM analysis_sbom_fragments AS fragments
+            LEFT JOIN LATERAL (
+              SELECT
+                policy_decisions.decision::text AS decision,
+                policy_decisions.decided_at
+              FROM policy_decisions
+              WHERE policy_decisions.artifact_id = fragments.artifact_id
+                AND policy_decisions.tenant_id = fragments.tenant_id
+              ORDER BY policy_decisions.decided_at DESC
+              LIMIT 1
+            ) AS policy_decision ON TRUE
+            WHERE fragments.analysis_job_id = $1
+            ORDER BY fragments.created_at ASC, fragments.id ASC
+            "#,
+        )
+        .bind(analysis_job_id)
+        .fetch_all(pool)
+        .await?
+    };
+
+    if rows.is_empty() {
+        return Err(ApiError::NotFound);
+    }
+
+    let resolved_tenant_id = rows.first().and_then(|row| row.try_get("tenant_id").ok());
+    let mut components = Vec::new();
+    for row in &rows {
+        let fragment: Value = row.try_get("fragment")?;
+        let decision = row.try_get::<Option<String>, _>("decision")?;
+        let decided_at = row.try_get::<Option<DateTime<Utc>>, _>("decided_at")?;
+        components.extend(stored_fragment_components(
+            &fragment,
+            decision.as_deref(),
+            decided_at,
+        )?);
+    }
+
+    Ok(ResolvedGenerateComponents {
+        tenant_id: tenant_id.or(resolved_tenant_id),
+        components,
+    })
+}
+
+fn stored_fragment_components(
+    fragment: &Value,
+    decision: Option<&str>,
+    decided_at: Option<DateTime<Utc>>,
+) -> Result<Vec<SbomComponentInput>, ApiError> {
+    let fragment: StoredSbomFragment = serde_json::from_value(fragment.clone()).map_err(|error| {
+        ApiError::InvalidRequest(format!("stored SBOM fragment is invalid: {error}"))
+    })?;
+
+    Ok(fragment
+        .components
+        .into_iter()
+        .map(|component| SbomComponentInput {
+            purl: component.purl,
+            name: component.name,
+            ecosystem: component.ecosystem,
+            version: component.version,
+            namespace: component.namespace,
+            integrity: component.integrity,
+            decision: decision.unwrap_or("unknown").to_owned(),
+            decision_timestamp: decided_at
+                .map(|value| value.to_rfc3339_opts(SecondsFormat::Secs, true)),
+        })
+        .collect())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ParsedPurl {
     ecosystem: PackageEcosystem,
@@ -445,17 +716,60 @@ fn resolved_component_version(component: &SbomComponentInput) -> Option<String> 
     })
 }
 
+fn resolve_sbom_list_limit(requested_limit: Option<u32>) -> Result<i64, ApiError> {
+    match requested_limit {
+        None => Ok(DEFAULT_SBOM_LIST_LIMIT),
+        Some(0) => Err(ApiError::InvalidRequest(
+            "limit must be greater than zero".to_owned(),
+        )),
+        Some(limit) => Ok(i64::from(limit.min(MAX_SBOM_LIST_LIMIT))),
+    }
+}
+
+fn sbom_download_filename(source: &str, format: &str, id: Uuid) -> String {
+    let source_component = sanitize_filename_component(source);
+    let format_component = sanitize_filename_component(format);
+    format!("{source_component}-{format_component}-{id}.json")
+}
+
+fn sanitize_filename_component(value: &str) -> String {
+    let mut sanitized = String::with_capacity(value.len());
+    let mut last_was_dash = false;
+    for ch in value.chars() {
+        if ch.is_ascii_alphanumeric() {
+            sanitized.push(ch.to_ascii_lowercase());
+            last_was_dash = false;
+            continue;
+        }
+        if !last_was_dash {
+            sanitized.push('-');
+            last_was_dash = true;
+        }
+    }
+
+    let trimmed = sanitized.trim_matches('-');
+    if trimmed.is_empty() {
+        "sbom".to_owned()
+    } else {
+        trimmed.to_owned()
+    }
+}
+
 async fn load_stored_sbom_validation(
     format: &str,
     storage_uri: &str,
 ) -> Result<NtiaValidationResult, ApiError> {
-    let path = uri_to_path(storage_uri)?;
-    let bytes = tokio::fs::read(&path).await.map_err(|error| {
-        tracing::error!(error = %error, "failed to read SBOM from store for validation");
-        ApiError::Storage("read failed".to_owned())
-    })?;
+    let bytes = load_stored_sbom_bytes(storage_uri).await?;
     let document: Value = serde_json::from_slice(&bytes)?;
     Ok(validate_ntia_minimum_elements(format, &document))
+}
+
+async fn load_stored_sbom_bytes(storage_uri: &str) -> Result<Vec<u8>, ApiError> {
+    let path = uri_to_path(storage_uri)?;
+    tokio::fs::read(&path).await.map_err(|error| {
+        tracing::error!(error = %error, "failed to read SBOM from store");
+        ApiError::Storage("read failed".to_owned())
+    })
 }
 
 fn validate_ntia_minimum_elements(format: &str, document: &Value) -> NtiaValidationResult {
@@ -797,7 +1111,7 @@ fn uri_to_path(uri: &str) -> Result<std::path::PathBuf, ApiError> {
 fn hex_sha256(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
-    format!("{:x}", hasher.finalize())
+    hex::encode(hasher.finalize())
 }
 
 fn validate_cyclonedx_ntia(document: &Value) -> Vec<String> {
@@ -1221,6 +1535,53 @@ mod tests {
     }
 
     #[test]
+    fn resolve_sbom_list_limit_defaults_and_clamps() {
+        assert_eq!(resolve_sbom_list_limit(None).unwrap(), DEFAULT_SBOM_LIST_LIMIT);
+        assert_eq!(resolve_sbom_list_limit(Some(3)).unwrap(), 3);
+        assert_eq!(
+            resolve_sbom_list_limit(Some(MAX_SBOM_LIST_LIMIT + 25)).unwrap(),
+            i64::from(MAX_SBOM_LIST_LIMIT)
+        );
+    }
+
+    #[test]
+    fn resolve_sbom_list_limit_rejects_zero() {
+        let err = resolve_sbom_list_limit(Some(0)).unwrap_err();
+        assert!(matches!(err, ApiError::InvalidRequest(_)));
+        assert!(err.to_string().contains("greater than zero"));
+    }
+
+    #[test]
+    fn sbom_download_filename_sanitizes_source_and_format() {
+        let filename = sbom_download_filename(
+            "Cargo lock / workspace",
+            "cyclonedx-1.7-json",
+            Uuid::nil(),
+        );
+
+        assert_eq!(
+            filename,
+            "cargo-lock-workspace-cyclonedx-1-7-json-00000000-0000-0000-0000-000000000000.json"
+        );
+    }
+
+    #[tokio::test]
+    async fn ntia_validation_for_summary_degrades_storage_failures() {
+        let validation = ntia_validation_for_summary(
+            Uuid::nil(),
+            "cyclonedx-1.7-json",
+            "file:///definitely-missing-aegiscudo-sbom.json",
+        )
+        .await;
+
+        assert!(!validation.valid);
+        assert_eq!(
+            validation.issues,
+            vec!["stored SBOM document could not be loaded for NTIA validation".to_owned()]
+        );
+    }
+
+    #[test]
     fn too_many_components_error_is_descriptive() {
         let err = ApiError::TooManyComponents(100_000);
         let msg = err.to_string();
@@ -1361,3 +1722,87 @@ mod tests {
         assert_eq!(generated_components[0]["version"], "4.17.21");
     }
 }
+
+    #[test]
+    fn validate_generate_request_allows_analysis_job_without_inline_components() {
+        let request = GenerateSbomRequest {
+            source: "analysis-job".to_owned(),
+            format: SbomFormatSpec::CycloneDx17,
+            components: Vec::new(),
+            analysis_job_id: Some(Uuid::new_v4()),
+            tenant_id: None,
+        };
+
+        assert!(validate_generate_request(&request).is_ok());
+    }
+
+    #[test]
+    fn validate_generate_request_rejects_empty_components_without_analysis_job() {
+        let request = GenerateSbomRequest {
+            source: "analysis-job".to_owned(),
+            format: SbomFormatSpec::CycloneDx17,
+            components: Vec::new(),
+            analysis_job_id: None,
+            tenant_id: None,
+        };
+
+        let error = validate_generate_request(&request).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "invalid request: components must not be empty when analysis_job_id is absent"
+        );
+    }
+
+    #[test]
+    fn stored_fragment_components_applies_decision_context() {
+        let fragment = json!({
+            "components": [{
+                "purl": "pkg:cargo/serde@1.0.217",
+                "name": "serde",
+                "ecosystem": "cargo",
+                "version": "1.0.217",
+                "namespace": null,
+                "integrity": "sha256:abc123"
+            }],
+            "dependency_edges": []
+        });
+
+        let decided_at = DateTime::parse_from_rfc3339("2026-05-14T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let components = stored_fragment_components(
+            &fragment,
+            Some("ALLOW_WITH_WARNING"),
+            Some(decided_at),
+        )
+        .unwrap();
+
+        assert_eq!(components.len(), 1);
+        assert_eq!(components[0].decision, "ALLOW_WITH_WARNING");
+        assert_eq!(
+            components[0].decision_timestamp.as_deref(),
+            Some("2026-05-14T12:00:00Z")
+        );
+    }
+
+    #[test]
+    fn stored_fragment_components_defaults_decision_to_unknown() {
+        let fragment = json!({
+            "components": [{
+                "purl": "pkg:npm/babel/core@7.29.0",
+                "name": "core",
+                "ecosystem": "npm",
+                "version": "7.29.0",
+                "namespace": "babel",
+                "integrity": null
+            }],
+            "dependency_edges": []
+        });
+
+        let components = stored_fragment_components(&fragment, None, None).unwrap();
+
+        assert_eq!(components.len(), 1);
+        assert_eq!(components[0].decision, "unknown");
+        assert_eq!(components[0].namespace.as_deref(), Some("babel"));
+        assert!(components[0].decision_timestamp.is_none());
+    }

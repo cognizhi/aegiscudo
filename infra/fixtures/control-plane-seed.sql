@@ -252,6 +252,36 @@ VALUES
   300,
   true,
   true
+),
+(
+  '018f4a6f-55d0-7000-8000-000000000303',
+  '018f4a6f-55d0-7000-8000-000000000001',
+  'local cargo fixture registry',
+  'Local deterministic Cargo sparse registry upstream for Phase 2 integration tests',
+  'cargo',
+  'http://cargo-fixture-registry:8080',
+  '/proxy/cargo-fixtures',
+  'none',
+  'enforce',
+  '018f4a6f-55d0-7000-8000-000000000101',
+  300,
+  true,
+  true
+),
+(
+  '018f4a6f-55d0-7000-8000-000000000304',
+  '018f4a6f-55d0-7000-8000-000000000001',
+  'local maven fixture registry',
+  'Local deterministic Maven repository upstream for Phase 2 integration tests',
+  'maven',
+  'http://maven-fixture-registry:8080',
+  '/proxy/maven-fixtures',
+  'none',
+  'enforce',
+  '018f4a6f-55d0-7000-8000-000000000101',
+  300,
+  true,
+  true
 )
 ON CONFLICT (tenant_id, mount_path) DO UPDATE
 SET name = EXCLUDED.name,

@@ -1,0 +1,8 @@
+[package]
+name = "aegiscudo-benign-cargo-fixture"
+version = "1.0.0"
+edition = "2021"
+description = "Deterministic Cargo fixture for Aegiscudo proxy compatibility tests"
+
+[lib]
+path = "src/lib.rs"

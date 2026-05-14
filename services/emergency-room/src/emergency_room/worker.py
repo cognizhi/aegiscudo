@@ -300,6 +300,8 @@ def profile_for_job(job: SandboxJob) -> SandboxProfile:
         return SandboxProfile.NPM_INSTALL
     if job.ecosystem == PackageEcosystem.PYPI:
         return SandboxProfile.PYTHON_INSTALL
+    if job.ecosystem == PackageEcosystem.MAVEN:
+        return SandboxProfile.JVM_BINARY_PROFILE
     raise RuntimeError(f"unsupported sandbox ecosystem: {job.ecosystem.value}")
 
 

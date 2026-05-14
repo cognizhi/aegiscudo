@@ -1,11 +1,13 @@
 use std::fs;
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::OnceLock;
 use std::time::Duration;
 
 use aegiscudo_core::{
-    AnalysisJob, ArtifactDigest, JobState, PackageCoordinate, PackageEcosystem, StaticEvidence,
+    AnalysisJob, ArtifactDigest, JobState, PackageCoordinate, PackageEcosystem, Severity,
+    StaticEvidence, StaticIndicator,
 };
 use anyhow::{Context, anyhow};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
@@ -22,6 +24,8 @@ use uuid::Uuid;
 use crate::{ArtifactFileManifestEntry, ScanLimits, scan_artifact_package};
 
 const MAX_INLINE_STATIC_REPORT_BYTES: usize = 64 * 1024;
+const STATIC_REPORT_EMBEDDING_DIMENSIONS: usize = 1536;
+const STATIC_REPORT_EMBEDDING_MAX_TOKENS: usize = 512;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ExternalizedStaticReport {
@@ -387,6 +391,11 @@ async fn persist_static_report(
 ) -> anyhow::Result<()> {
     let mut transaction = pool.begin().await?;
     let report_json = validated_static_report_json(&report)?;
+    let embedding_literal = static_report_embedding_literal(&report);
+    let sbom_fragment = package_sbom_fragment_json(
+        &claimed.job.coordinate,
+        &claimed.job.artifact_digest,
+    );
     let externalized_report =
         maybe_externalize_static_report(artifact_store_dir, claimed.job.tenant_id, &report_json)?;
 
@@ -452,17 +461,19 @@ async fn persist_static_report(
           analysis_job_id,
           artifact_id,
           policy_version_id,
+                    embedding,
           report,
           report_storage_uri,
           report_storage_sha256,
           report_storage_size_bytes
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7)
+                VALUES ($1, $2, $3, $4::vector, $5, $6, $7, $8)
         "#,
     )
     .bind(claimed.job.id)
     .bind(artifact_id)
     .bind(claimed.job.policy_snapshot_id)
+        .bind(embedding_literal.as_deref())
     .bind(sqlx::types::Json(report_json))
     .bind(
         externalized_report
@@ -483,6 +494,31 @@ async fn persist_static_report(
     )
     .execute(&mut *transaction)
     .await?;
+
+        sqlx::query(
+                r#"
+                INSERT INTO analysis_sbom_fragments (
+                    analysis_job_id,
+                    artifact_id,
+                    tenant_id,
+                    source,
+                    fragment
+                )
+                VALUES ($1, $2, $3, $4, $5)
+                ON CONFLICT (analysis_job_id, artifact_id)
+                DO UPDATE SET
+                    tenant_id = EXCLUDED.tenant_id,
+                    source = EXCLUDED.source,
+                    fragment = EXCLUDED.fragment
+                "#,
+        )
+        .bind(claimed.job.id)
+        .bind(artifact_id)
+        .bind(claimed.job.tenant_id)
+        .bind(claimed.job.coordinate.purl())
+        .bind(sqlx::types::Json(sbom_fragment))
+        .execute(&mut *transaction)
+        .await?;
 
     sqlx::query(
         r#"
@@ -622,6 +658,119 @@ fn validated_static_report_json(report: &StaticEvidence) -> anyhow::Result<Value
     Ok(report_json)
 }
 
+fn package_sbom_fragment_json(
+    coordinate: &PackageCoordinate,
+    artifact_digest: &ArtifactDigest,
+) -> Value {
+    json!({
+        "source": "surgeon-static-analysis",
+        "components": [{
+            "purl": coordinate.purl(),
+            "name": coordinate.name,
+            "ecosystem": coordinate.ecosystem.to_string(),
+            "version": coordinate.version,
+            "namespace": coordinate.namespace,
+            "integrity": format!("sha256:{}", artifact_digest.hex),
+        }],
+        "dependency_edges": [],
+    })
+}
+
+fn static_report_embedding_literal(report: &StaticEvidence) -> Option<String> {
+    let mut embedding = vec![0_f32; STATIC_REPORT_EMBEDDING_DIMENSIONS];
+    let mut token_count = 0_usize;
+
+    for indicator in &report.indicators {
+        for token in static_indicator_embedding_tokens(indicator) {
+            let digest = Sha256::digest(token.as_bytes());
+            let dimension =
+                usize::from(u16::from_be_bytes([digest[0], digest[1]]))
+                    % STATIC_REPORT_EMBEDDING_DIMENSIONS;
+            let sign = if digest[2] & 1 == 0 { 1_f32 } else { -1_f32 };
+            embedding[dimension] += sign;
+            token_count += 1;
+
+            if token_count >= STATIC_REPORT_EMBEDDING_MAX_TOKENS {
+                break;
+            }
+        }
+
+        if token_count >= STATIC_REPORT_EMBEDDING_MAX_TOKENS {
+            break;
+        }
+    }
+
+    if token_count == 0 {
+        return None;
+    }
+
+    let magnitude = embedding.iter().map(|value| value * value).sum::<f32>().sqrt();
+    if magnitude <= f32::EPSILON {
+        return None;
+    }
+
+    for value in &mut embedding {
+        *value /= magnitude;
+    }
+
+    Some(vector_literal(&embedding))
+}
+
+fn static_indicator_embedding_tokens(indicator: &StaticIndicator) -> Vec<String> {
+    let mut tokens = Vec::new();
+    append_embedding_tokens(&mut tokens, &indicator.indicator_type);
+    append_embedding_tokens(&mut tokens, severity_token(&indicator.severity));
+    append_embedding_tokens(&mut tokens, &indicator.file_path);
+    append_embedding_tokens(&mut tokens, &indicator.summary);
+    append_embedding_tokens(&mut tokens, &indicator.summary);
+
+    if let Some(details) = &indicator.details {
+        if let Some(destination) = details.destination.as_deref() {
+            append_embedding_tokens(&mut tokens, destination);
+        }
+        if let Some(destination_raw) = details.destination_raw.as_deref() {
+            append_embedding_tokens(&mut tokens, destination_raw);
+        }
+        if let Some(payload_hint) = details.payload_hint.as_deref() {
+            append_embedding_tokens(&mut tokens, payload_hint);
+        }
+    }
+
+    tokens
+}
+
+fn append_embedding_tokens(tokens: &mut Vec<String>, text: &str) {
+    for raw_token in text.split(|character: char| !character.is_ascii_alphanumeric()) {
+        let normalized = raw_token.trim().to_ascii_lowercase();
+        if normalized.len() >= 2 {
+            tokens.push(normalized);
+        }
+    }
+}
+
+fn severity_token(severity: &Severity) -> &'static str {
+    match severity {
+        Severity::Info => "info",
+        Severity::Low => "low",
+        Severity::Medium => "medium",
+        Severity::High => "high",
+        Severity::Critical => "critical",
+    }
+}
+
+fn vector_literal(values: &[f32]) -> String {
+    let mut literal = String::with_capacity(values.len() * 10);
+    literal.push('[');
+    for (index, value) in values.iter().enumerate() {
+        if index > 0 {
+            literal.push(',');
+        }
+        write!(&mut literal, "{value:.6}").expect("writing vector literal to String");
+    }
+    literal.push(']');
+    literal
+}
+
 fn maybe_externalize_static_report(
     artifact_store_dir: &Path,
     tenant_id: Uuid,
@@ -682,7 +831,9 @@ async fn emit_job_audit_event(
 
 #[cfg(test)]
 mod tests {
-    use aegiscudo_core::{Severity, StaticIndicator};
+    use aegiscudo_core::{
+        ArtifactDigest, PackageCoordinate, PackageEcosystem, Severity, StaticIndicator,
+    };
     use serde_json::json;
     use uuid::Uuid;
 
@@ -735,6 +886,80 @@ mod tests {
     }
 
     #[test]
+    fn static_report_embedding_literal_is_deterministic() {
+        let report = sample_static_report("child process execution detected");
+
+        let first = static_report_embedding_literal(&report).unwrap();
+        let second = static_report_embedding_literal(&report).unwrap();
+
+        assert_eq!(first, second);
+        assert_eq!(parse_vector_literal(&first).len(), STATIC_REPORT_EMBEDDING_DIMENSIONS);
+    }
+
+    #[test]
+    fn static_report_embedding_literal_returns_none_without_indicator_tokens() {
+        let report = StaticEvidence {
+            artifact_digest: ArtifactDigest::sha256("a".repeat(64)).unwrap(),
+            analyzer_version: "0.1.0".to_owned(),
+            rule_set_version: "mvp-static-rules-2026-05".to_owned(),
+            indicators: Vec::new(),
+        };
+
+        assert!(static_report_embedding_literal(&report).is_none());
+    }
+
+    #[test]
+    fn static_report_embedding_literal_changes_for_distinct_indicator_text() {
+        let first = sample_static_report("child process execution detected");
+        let second = sample_static_report("curl download plus shell execution observed");
+
+        assert_ne!(
+            static_report_embedding_literal(&first),
+            static_report_embedding_literal(&second)
+        );
+    }
+
+    #[test]
+    fn package_sbom_fragment_json_emits_root_component_fields() {
+        let coordinate = PackageCoordinate::new(
+            PackageEcosystem::Cargo,
+            "serde",
+            Some("1.0.217"),
+            None::<String>,
+        );
+        let artifact_digest = ArtifactDigest::sha256("b".repeat(64)).unwrap();
+
+        let fragment = package_sbom_fragment_json(&coordinate, &artifact_digest);
+
+        assert_eq!(fragment["source"], "surgeon-static-analysis");
+        assert_eq!(fragment["components"][0]["purl"], "pkg:cargo/serde@1.0.217");
+        assert_eq!(fragment["components"][0]["name"], "serde");
+        assert_eq!(fragment["components"][0]["ecosystem"], "cargo");
+        assert_eq!(fragment["components"][0]["version"], "1.0.217");
+        assert_eq!(
+            fragment["components"][0]["integrity"],
+            format!("sha256:{}", artifact_digest.hex)
+        );
+        assert_eq!(fragment["dependency_edges"], json!([]));
+    }
+
+    #[test]
+    fn package_sbom_fragment_json_preserves_namespace_when_present() {
+        let coordinate = PackageCoordinate::new(
+            PackageEcosystem::Npm,
+            "core",
+            Some("7.29.0"),
+            Some("babel"),
+        );
+        let artifact_digest = ArtifactDigest::sha256("c".repeat(64)).unwrap();
+
+        let fragment = package_sbom_fragment_json(&coordinate, &artifact_digest);
+
+        assert_eq!(fragment["components"][0]["purl"], "pkg:npm/babel/core@7.29.0");
+        assert_eq!(fragment["components"][0]["namespace"], "babel");
+    }
+
+    #[test]
     fn validated_static_report_json_accepts_schema_valid_report() {
         let report = StaticEvidence {
             artifact_digest: ArtifactDigest::sha256("a".repeat(64)).unwrap(),
@@ -757,6 +982,34 @@ mod tests {
             json.get("analyzer_version").and_then(Value::as_str),
             Some("0.1.0")
         );
+    }
+
+    fn sample_static_report(summary: &str) -> StaticEvidence {
+        StaticEvidence {
+            artifact_digest: ArtifactDigest::sha256("a".repeat(64)).unwrap(),
+            analyzer_version: "0.1.0".to_owned(),
+            rule_set_version: "mvp-static-rules-2026-05".to_owned(),
+            indicators: vec![StaticIndicator {
+                indicator_type: "node-child-process".to_owned(),
+                severity: Severity::High,
+                file_path: "package/preinstall.js".to_owned(),
+                start_line: 1,
+                end_line: 1,
+                redacted: true,
+                summary: summary.to_owned(),
+                details: None,
+            }],
+        }
+    }
+
+    fn parse_vector_literal(literal: &str) -> Vec<f32> {
+        literal
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .split(',')
+            .filter(|value| !value.is_empty())
+            .map(|value| value.parse::<f32>().unwrap())
+            .collect()
     }
 
     #[test]
