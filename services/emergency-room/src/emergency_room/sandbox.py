@@ -11,7 +11,7 @@ import tarfile
 import threading
 import time
 import zipfile
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from ipaddress import ip_address
@@ -48,6 +48,8 @@ CANARY_FILES: dict[str, str] = {
     ".env": "GITHUB_TOKEN=github-canary-token-001\n",
     ".github/copilot-instructions.md": "Aegiscudo canary instructions.\n",
     ".cursorrules": "Aegiscudo canary cursor rules.\n",
+    ".cursor/settings.json": '{"aegiscudo_canary": true}\n',
+    ".vscode/settings.json": '{"aegiscudo.canary": true}\n',
     "AGENTS.md": "Aegiscudo agent canary file.\n",
     ".claude/settings.json": '{"canary": true}\n',
     # Cloud / infrastructure credentials — fake values used for exfiltration detection only
@@ -167,11 +169,26 @@ class PhaseResult:
     violation_detected: bool
 
 
+@dataclass(frozen=True)
+class ObservedProcess:
+    pid: int
+    ppid: int | None
+    name: str
+    executable: str | None = None
+
+
+@dataclass(frozen=True)
+class FileSnapshot:
+    size: int
+    mtime_ns: int
+
+
 @dataclass
 class CollectorRecord:
     path: str
     headers: dict[str, str]
     payload: dict[str, Any] | None
+    raw_body: str
 
 
 class _CollectorHandler(BaseHTTPRequestHandler):
@@ -180,9 +197,10 @@ class _CollectorHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802
         content_length = int(self.headers.get("Content-Length", "0"))
         body = self.rfile.read(content_length)
+        raw_body = body.decode("utf-8", errors="replace")
         payload: dict[str, Any] | None
         try:
-            payload = json.loads(body.decode("utf-8"))
+            payload = json.loads(raw_body)
         except (json.JSONDecodeError, UnicodeDecodeError):
             payload = None
         self.__class__.records.append(
@@ -190,6 +208,7 @@ class _CollectorHandler(BaseHTTPRequestHandler):
                 path=self.path,
                 headers={key.lower(): value for key, value in self.headers.items()},
                 payload=payload,
+                raw_body=raw_body,
             )
         )
         self.send_response(200)
@@ -332,6 +351,7 @@ async def execute_phase(
     start = time.monotonic()
     events: list[SandboxTelemetryEvent] = []
     violation_detected = False
+    jvm_filesystem_before: dict[str, FileSnapshot] | None = None
 
     if request.profile == SandboxProfile.NPM_INSTALL:
         await ensure_npm_workspace(work_dir)
@@ -360,6 +380,13 @@ async def execute_phase(
         command = python_command_for_phase(phase, artifact_path, request.import_name)
 
     if command is not None:
+        if request.profile == SandboxProfile.JVM_BINARY_PROFILE and phase == SandboxPhase.G:
+            jvm_filesystem_before = snapshot_filesystem_state(
+                {
+                    "home": home_dir,
+                    "workspace": work_dir,
+                }
+            )
         completed = await run_subprocess(
             command,
             cwd=work_dir,
@@ -399,9 +426,28 @@ async def execute_phase(
             and phase == SandboxPhase.F
             and not completed.timeout
         ):
-            inspect_events, inspect_violation = await post_cargo_build_inspection(work_dir)
+            inspect_events, inspect_violation, _inspect_needs_hifi = await post_cargo_build_inspection(work_dir)
             events.extend(inspect_events)
             violation_detected = violation_detected or inspect_violation
+
+        if (
+            request.profile == SandboxProfile.JVM_BINARY_PROFILE
+            and phase == SandboxPhase.G
+            and not completed.timeout
+        ):
+            events.extend(jvm_process_execution_events(completed.observed_processes))
+            if jvm_filesystem_before is not None:
+                events.extend(
+                    jvm_filesystem_write_events(
+                        jvm_filesystem_before,
+                        snapshot_filesystem_state(
+                            {
+                                "home": home_dir,
+                                "workspace": work_dir,
+                            }
+                        ),
+                    )
+                )
 
         if (
             request.profile == SandboxProfile.JVM_BINARY_PROFILE
@@ -459,6 +505,7 @@ class CompletedProcess:
     stdout: str
     stderr: str
     timeout: bool
+    observed_processes: list[ObservedProcess]
 
 
 async def run_subprocess(
@@ -475,6 +522,8 @@ async def run_subprocess(
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
+    observed_processes: dict[int, ObservedProcess] = {}
+    monitor_task = asyncio.create_task(monitor_child_processes(process.pid, observed_processes))
     try:
         stdout, stderr = await asyncio.wait_for(process.communicate(), timeout_seconds)
         return CompletedProcess(
@@ -482,11 +531,22 @@ async def run_subprocess(
             stdout=stdout.decode("utf-8", errors="replace"),
             stderr=stderr.decode("utf-8", errors="replace"),
             timeout=False,
+            observed_processes=sorted_observed_processes(observed_processes),
         )
     except TimeoutError:
         process.kill()
         await process.communicate()
-        return CompletedProcess(returncode=-9, stdout="", stderr="", timeout=True)
+        return CompletedProcess(
+            returncode=-9,
+            stdout="",
+            stderr="",
+            timeout=True,
+            observed_processes=sorted_observed_processes(observed_processes),
+        )
+    finally:
+        monitor_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await monitor_task
 
 
 def resolve_artifact_uri(value: str) -> Path:
@@ -618,7 +678,13 @@ def collector_events(records: list[CollectorRecord]) -> tuple[list[SandboxTeleme
         )
         violation_detected = True
         env_mapping = payload.get("env") if isinstance(payload, dict) else None
+        contains_canary = False
         if isinstance(env_mapping, dict) and payload_contains_canary_values(env_mapping):
+            contains_canary = True
+        elif raw_payload_contains_canary_values(record.raw_body):
+            contains_canary = True
+
+        if contains_canary:
             events.append(
                 SandboxTelemetryEvent(
                     type="canary-secret-access",
@@ -664,6 +730,10 @@ def payload_contains_canary_values(payload: dict[str, Any]) -> bool:
     return any(canary in values for canary in CANARY_ENVIRONMENT.values())
 
 
+def raw_payload_contains_canary_values(payload: str) -> bool:
+    return any(canary in payload for canary in CANARY_ENVIRONMENT.values())
+
+
 def is_port_available(port: int) -> bool:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -680,6 +750,94 @@ def sys_executable() -> str:
 
 def java_executable() -> str:
     return shutil.which("java") or "java"
+
+
+def sorted_observed_processes(
+    observed_processes: Mapping[int, ObservedProcess],
+) -> list[ObservedProcess]:
+    return sorted(observed_processes.values(), key=lambda process: process.pid)
+
+
+async def monitor_child_processes(
+    root_pid: int,
+    observed_processes: dict[int, ObservedProcess],
+) -> None:
+    while True:
+        for process in descendant_processes(root_pid):
+            observed_processes.setdefault(process.pid, process)
+        await asyncio.sleep(0.05)
+
+
+def descendant_processes(root_pid: int) -> list[ObservedProcess]:
+    proc_root = Path("/proc")
+    if not proc_root.exists():
+        return []
+
+    process_table: dict[int, ObservedProcess] = {}
+    child_map: dict[int, list[int]] = {}
+    try:
+        entries = list(proc_root.iterdir())
+    except OSError:
+        return []
+
+    for entry in entries:
+        if not entry.name.isdigit():
+            continue
+        process = read_process_info(int(entry.name))
+        if process is None:
+            continue
+        process_table[process.pid] = process
+        if process.ppid is not None:
+            child_map.setdefault(process.ppid, []).append(process.pid)
+
+    descendants: list[ObservedProcess] = []
+    queue = list(child_map.get(root_pid, []))
+    seen: set[int] = set()
+    while queue:
+        pid = queue.pop(0)
+        if pid in seen:
+            continue
+        seen.add(pid)
+        process = process_table.get(pid)
+        if process is None:
+            continue
+        descendants.append(process)
+        queue.extend(child_map.get(pid, []))
+    return descendants
+
+
+def read_process_info(pid: int) -> ObservedProcess | None:
+    proc_dir = Path("/proc") / str(pid)
+    status_path = proc_dir / "status"
+    cmdline_path = proc_dir / "cmdline"
+    try:
+        name: str | None = None
+        ppid: int | None = None
+        for line in status_path.read_text(encoding="utf-8", errors="replace").splitlines():
+            if line.startswith("Name:\t"):
+                name = line.split("\t", 1)[1].strip()
+            elif line.startswith("PPid:\t"):
+                parent = line.split("\t", 1)[1].strip()
+                ppid = int(parent) if parent.isdigit() else None
+
+        command_name = ""
+        try:
+            command_name = Path(
+                cmdline_path.read_bytes().split(b"\0", 1)[0].decode("utf-8", errors="replace")
+            ).name
+        except OSError:
+            command_name = ""
+
+        executable: str | None = None
+        try:
+            executable = os.readlink(proc_dir / "exe")
+        except OSError:
+            executable = None
+
+        display_name = command_name or name or (Path(executable).name if executable else f"pid-{pid}")
+        return ObservedProcess(pid=pid, ppid=ppid, name=display_name, executable=executable)
+    except OSError:
+        return None
 
 
 @contextmanager
@@ -768,6 +926,89 @@ def jvm_class_load_events(output: str, selected_classes: list[str]) -> list[Sand
                 )
             )
     return events
+
+
+def jvm_process_execution_events(processes: list[ObservedProcess]) -> list[SandboxTelemetryEvent]:
+    if not processes:
+        return []
+
+    samples = [f"{process.name} [pid {process.pid}]" for process in processes[:5]]
+    if len(processes) > 5:
+        samples.append(f"+{len(processes) - 5} more")
+
+    return [
+        SandboxTelemetryEvent(
+            type="jvm-process-execution-observed",
+            severity=Severity.HIGH,
+            message=(
+                "observed child process execution during JVM class load: "
+                + ", ".join(samples)
+            ),
+        )
+    ]
+
+
+def snapshot_filesystem_state(paths: Mapping[str, Path]) -> dict[str, FileSnapshot]:
+    snapshot: dict[str, FileSnapshot] = {}
+    for label, root in paths.items():
+        if not root.exists():
+            continue
+        try:
+            files = list(root.rglob("*"))
+        except OSError:
+            continue
+        for path in files:
+            if not path.is_file():
+                continue
+            relative = path.relative_to(root).as_posix()
+            key = f"{label}/{relative}"
+            if is_ignored_jvm_filesystem_path(key):
+                continue
+            try:
+                stat_result = path.stat()
+            except OSError:
+                continue
+            snapshot[key] = FileSnapshot(size=stat_result.st_size, mtime_ns=stat_result.st_mtime_ns)
+    return snapshot
+
+
+def is_ignored_jvm_filesystem_path(path: str) -> bool:
+    file_name = path.rsplit("/", 1)[-1]
+    return (
+        file_name == "JvmClassLoadProbe.java"
+        or file_name == "JvmClassLoadProbe.class"
+        or file_name.startswith("JvmClassLoadProbe$")
+    )
+
+
+def jvm_filesystem_write_events(
+    before: Mapping[str, FileSnapshot],
+    after: Mapping[str, FileSnapshot],
+) -> list[SandboxTelemetryEvent]:
+    created = sorted(path for path in after.keys() - before.keys())
+    modified = sorted(path for path in before.keys() & after.keys() if before[path] != after[path])
+    if not created and not modified:
+        return []
+
+    parts: list[str] = []
+    if created:
+        parts.append(f"created {summarize_examples(created)}")
+    if modified:
+        parts.append(f"modified {summarize_examples(modified)}")
+
+    return [
+        SandboxTelemetryEvent(
+            type="jvm-filesystem-write-observed",
+            severity=Severity.MEDIUM,
+            message="observed JVM filesystem writes in sandbox: " + "; ".join(parts),
+        )
+    ]
+
+
+def summarize_examples(values: list[str], limit: int = 5) -> str:
+    if len(values) <= limit:
+        return ", ".join(values)
+    return ", ".join(values[:limit]) + f", +{len(values) - limit} more"
 
 
 # ---------------------------------------------------------------------------
@@ -985,14 +1226,15 @@ def _cargo_tree_events(tree_output: str) -> list[SandboxTelemetryEvent]:
 
 async def post_cargo_build_inspection(
     project_dir: Path,
-) -> tuple[list[SandboxTelemetryEvent], bool]:
+) -> tuple[list[SandboxTelemetryEvent], bool, bool]:
     """Inspect OUT_DIR outputs and native artifacts produced by cargo build."""
     events: list[SandboxTelemetryEvent] = []
     violation = False
+    needs_hifi_detonation = False
 
     target_debug = project_dir / "target" / "debug"
     if not target_debug.exists():
-        return events, violation
+        return events, violation, needs_hifi_detonation
 
     out_dirs = sorted(target_debug.glob("build/*/out"))
     if out_dirs:
@@ -1018,5 +1260,19 @@ async def post_cargo_build_inspection(
         artifact_events, artifact_violation = _inspect_native_artifact(artifact)
         events.extend(artifact_events)
         violation = violation or artifact_violation
+        if artifact_violation:
+            needs_hifi_detonation = True
 
-    return events, violation
+    if needs_hifi_detonation:
+        events.append(
+            SandboxTelemetryEvent(
+                type="cargo-native-escalation-pending-hifi",
+                severity=Severity.CRITICAL,
+                message=(
+                    "native artifact with suspicious symbols detected; "
+                    "high-fidelity detonation required for definitive analysis"
+                ),
+            )
+        )
+
+    return events, violation, needs_hifi_detonation

@@ -4,10 +4,10 @@ mod manifest;
 mod py_ast;
 mod worker;
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
-use std::collections::BTreeSet;
 
 use aegiscudo_core::{ArtifactDigest, IndicatorDetails, Severity, StaticEvidence, StaticIndicator};
 use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
@@ -456,14 +456,16 @@ fn scan_zip_container(
         }
     }
 
-
     if is_java_archive && manifest_present {
         let summary = if manifest_attributes.is_empty() {
             "JAR manifest present".to_owned()
         } else {
             format!(
                 "JAR manifest present with attributes: {}",
-                manifest_attributes.into_iter().collect::<Vec<_>>().join(", ")
+                manifest_attributes
+                    .into_iter()
+                    .collect::<Vec<_>>()
+                    .join(", ")
             )
         };
         indicators.push(indicator(
@@ -558,7 +560,11 @@ fn scan_zip_container(
                 &format!(
                     "JAR contains manifest plus {} signature metadata entr{}: {}",
                     verified_aliases.len(),
-                    if verified_aliases.len() == 1 { "y" } else { "ies" },
+                    if verified_aliases.len() == 1 {
+                        "y"
+                    } else {
+                        "ies"
+                    },
                     verified_aliases.join(", ")
                 ),
                 None,
@@ -580,7 +586,9 @@ fn scan_zip_container(
 
 fn jar_signature_alias(entry_name_upper: &str, suffix: &str) -> Option<String> {
     let meta_inf = "META-INF/";
-    let stem = entry_name_upper.strip_prefix(meta_inf)?.strip_suffix(suffix)?;
+    let stem = entry_name_upper
+        .strip_prefix(meta_inf)?
+        .strip_suffix(suffix)?;
     (!stem.is_empty() && !stem.contains('/')).then(|| stem.to_owned())
 }
 
@@ -676,7 +684,11 @@ fn is_interesting_jar_resource(entry_name_lower: &str) -> bool {
 }
 
 fn summarize_examples(entries: &BTreeSet<String>, max_examples: usize) -> String {
-    let shown = entries.iter().take(max_examples).cloned().collect::<Vec<_>>();
+    let shown = entries
+        .iter()
+        .take(max_examples)
+        .cloned()
+        .collect::<Vec<_>>();
     let remaining = entries.len().saturating_sub(shown.len());
     if remaining == 0 {
         shown.join(", ")
@@ -703,13 +715,22 @@ fn scan_binary_content(
     }
 }
 
+fn jvm_execution_context(method_name: &str) -> &'static str {
+    if method_name == "<clinit>" || method_name == "<init>" {
+        "[load-time]"
+    } else {
+        "[exposed-api]"
+    }
+}
+
 fn disassemble_java_class(bytes: &[u8]) -> Option<String> {
     let class = parse_class(bytes).ok()?;
     let mut lines = vec![format!("class {}", class.this_class)];
 
     for method in &class.methods {
         let method_name = method.name.as_ref();
-        lines.push(format!("method {method_name}"));
+        let context = jvm_execution_context(method_name);
+        lines.push(format!("method {context} {method_name}"));
 
         for attribute in &method.attributes {
             let AttributeData::Code(code) = &attribute.data else {
@@ -721,7 +742,7 @@ fn disassemble_java_class(bytes: &[u8]) -> Option<String> {
 
             for (offset, opcode) in &bytecode.opcodes {
                 if let Some(rendered) = render_java_opcode(opcode) {
-                    lines.push(format!("{method_name}@{offset} {rendered}"));
+                    lines.push(format!("{context} {method_name}@{offset} {rendered}"));
                 }
             }
         }
@@ -827,6 +848,10 @@ fn scan_text(root: &Path, path: &Path, text: &str, indicators: &mut Vec<StaticIn
         || lower_path_str.ends_with(".dist-info/metadata")
     {
         manifest::scan_wheel_metadata(root, path, text, indicators);
+    }
+
+    if lower_path_str.ends_with("/top_level.txt") || lower_path_str == "top_level.txt" {
+        manifest::scan_python_top_level_txt(root, path, text, indicators);
     }
 
     // --- AST-backed scanning ------------------------------------------------
@@ -1713,7 +1738,10 @@ mod tests {
         assert!(types.contains(&"java-deserialization"), "{types:?}");
         assert!(types.contains(&"java-filesystem-access"), "{types:?}");
         assert!(types.contains(&"java-jni-load"), "{types:?}");
-        assert!(types.contains(&"java-hardcoded-endpoint-or-token"), "{types:?}");
+        assert!(
+            types.contains(&"java-hardcoded-endpoint-or-token"),
+            "{types:?}"
+        );
     }
 
     #[test]
@@ -1722,7 +1750,11 @@ mod tests {
         let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join(
             "../../samples/malicious/java/env-snoop/target/classes/com/example/envsnoop/EnvSnoop.class",
         );
-        fs::write(dir.path().join("EnvSnoop.class"), fs::read(fixture).unwrap()).unwrap();
+        fs::write(
+            dir.path().join("EnvSnoop.class"),
+            fs::read(fixture).unwrap(),
+        )
+        .unwrap();
 
         let evidence = scan_directory(dir.path(), ScanLimits::default()).unwrap();
         let types: Vec<_> = evidence
@@ -1777,7 +1809,9 @@ mod tests {
         let dir = tempdir().unwrap();
         fs::write(
             dir.path().join("payload.class"),
-            [0xca, 0xfe, 0xba, 0xbe, 0x00, 0x00, 0x00, 0x34, 0x00, 0x02, 0xff, 0xff],
+            [
+                0xca, 0xfe, 0xba, 0xbe, 0x00, 0x00, 0x00, 0x34, 0x00, 0x02, 0xff, 0xff,
+            ],
         )
         .unwrap();
 
@@ -1801,8 +1835,8 @@ mod tests {
             0x01, 0x00, 0x01, 0x58, // #2 Utf8 "X"
             0x07, 0x00, 0x04, // #3 Class -> #4
             0x01, 0x00, 0x10, // #4 Utf8 len 16
-            0x6a, 0x61, 0x76, 0x61, 0x2f, 0x6c, 0x61, 0x6e, 0x67, 0x2f, 0x4f, 0x62,
-            0x6a, 0x65, 0x63, 0x74, // java/lang/Object
+            0x6a, 0x61, 0x76, 0x61, 0x2f, 0x6c, 0x61, 0x6e, 0x67, 0x2f, 0x4f, 0x62, 0x6a, 0x65,
+            0x63, 0x74, // java/lang/Object
             0x00, 0x21, // access_flags
             0x00, 0x01, // this_class
             0x00, 0x03, // super_class
@@ -1896,7 +1930,10 @@ mod tests {
             .map(|i| i.indicator_type.as_str())
             .collect();
 
-        assert!(types.contains(&"jar-signature-metadata-incomplete"), "{types:?}");
+        assert!(
+            types.contains(&"jar-signature-metadata-incomplete"),
+            "{types:?}"
+        );
     }
 
     #[test]
@@ -2389,7 +2426,10 @@ cli = ["dep:serde"]
             .collect();
 
         assert!(types.contains(&"cargo-dev-dependency"), "{types:?}");
-        assert!(types.contains(&"cargo-target-specific-dependency"), "{types:?}");
+        assert!(
+            types.contains(&"cargo-target-specific-dependency"),
+            "{types:?}"
+        );
         assert!(types.contains(&"cargo-optional-dependency"), "{types:?}");
         assert!(types.contains(&"cargo-feature-graph"), "{types:?}");
     }
@@ -2485,8 +2525,10 @@ version = "0.1.0"
             evidence
                 .indicators
                 .iter()
-                .any(|indicator| indicator.file_path == "vendor/target/libpayload.bin"
-                    && indicator.indicator_type == "bundled-native-artifact"),
+                .any(
+                    |indicator| indicator.file_path == "vendor/target/libpayload.bin"
+                        && indicator.indicator_type == "bundled-native-artifact"
+                ),
             "nested package paths named target should still classify bundled native artifacts: {:#?}",
             evidence.indicators
         );
@@ -2544,8 +2586,10 @@ version = "0.1.0"
             evidence
                 .indicators
                 .iter()
-                .any(|indicator| indicator.file_path == "vendor/native/fatpayload.bin"
-                    && indicator.indicator_type == "bundled-native-artifact"),
+                .any(
+                    |indicator| indicator.file_path == "vendor/native/fatpayload.bin"
+                        && indicator.indicator_type == "bundled-native-artifact"
+                ),
             "fat Mach-O magic should still classify as a bundled native artifact: {:#?}",
             evidence.indicators
         );
@@ -2566,8 +2610,10 @@ version = "0.1.0"
             evidence
                 .indicators
                 .iter()
-                .any(|indicator| indicator.file_path == "target/debug/libpayload.bin"
-                    && indicator.indicator_type == "bundled-native-artifact"),
+                .any(
+                    |indicator| indicator.file_path == "target/debug/libpayload.bin"
+                        && indicator.indicator_type == "bundled-native-artifact"
+                ),
             "top-level target directories should only be ignored for Cargo source roots: {:#?}",
             evidence.indicators
         );
@@ -2747,6 +2793,26 @@ version = "0.1.0"
         assert!(
             types.contains(&"minified-js-payload"),
             "minified payload must be detected: {types:?}"
+        );
+    }
+
+    #[test]
+    fn detects_binary_blob_embedded_in_source() {
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("payload.js"),
+            b"const payload = \"abc\";\0\0\0\0\n",
+        )
+        .unwrap();
+        let evidence = scan_directory(dir.path(), ScanLimits::default()).unwrap();
+        let types: Vec<_> = evidence
+            .indicators
+            .iter()
+            .map(|i| i.indicator_type.as_str())
+            .collect();
+        assert!(
+            types.contains(&"binary-blob-embedded"),
+            "embedded binary blob must be detected: {types:?}"
         );
     }
 
@@ -3045,9 +3111,12 @@ fn main() {
         let artifact_path = tmp.path().join("evil-crate-0.1.0.crate");
         fs::write(&artifact_path, &tar_bytes).unwrap();
 
-        let (evidence, manifest_entries) =
-            crate::artifact::scan_artifact_package(&artifact_path, tmp.path(), ScanLimits::default())
-                .expect("scan must succeed");
+        let (evidence, manifest_entries) = crate::artifact::scan_artifact_package(
+            &artifact_path,
+            tmp.path(),
+            ScanLimits::default(),
+        )
+        .expect("scan must succeed");
 
         let types: Vec<_> = evidence
             .indicators
@@ -3109,9 +3178,12 @@ proc-macro = true
         let artifact_path = tmp.path().join("evil-macro-0.1.0.crate");
         fs::write(&artifact_path, &tar_bytes).unwrap();
 
-        let (evidence, _) =
-            crate::artifact::scan_artifact_package(&artifact_path, tmp.path(), ScanLimits::default())
-                .expect("scan must succeed");
+        let (evidence, _) = crate::artifact::scan_artifact_package(
+            &artifact_path,
+            tmp.path(),
+            ScanLimits::default(),
+        )
+        .expect("scan must succeed");
 
         let types: Vec<_> = evidence
             .indicators
@@ -3162,9 +3234,12 @@ build = false
         let artifact_path = tmp.path().join("safe-crate-0.2.0.crate");
         fs::write(&artifact_path, &tar_bytes).unwrap();
 
-        let (evidence, _) =
-            crate::artifact::scan_artifact_package(&artifact_path, tmp.path(), ScanLimits::default())
-                .expect("scan must succeed");
+        let (evidence, _) = crate::artifact::scan_artifact_package(
+            &artifact_path,
+            tmp.path(),
+            ScanLimits::default(),
+        )
+        .expect("scan must succeed");
 
         let types: Vec<_> = evidence
             .indicators
@@ -3224,9 +3299,12 @@ serde = { path = "../serde" }
         let artifact_path = tmp.path().join("override-crate-0.1.0.crate");
         fs::write(&artifact_path, &tar_bytes).unwrap();
 
-        let (evidence, _) =
-            crate::artifact::scan_artifact_package(&artifact_path, tmp.path(), ScanLimits::default())
-                .expect("scan must succeed");
+        let (evidence, _) = crate::artifact::scan_artifact_package(
+            &artifact_path,
+            tmp.path(),
+            ScanLimits::default(),
+        )
+        .expect("scan must succeed");
 
         let types: Vec<_> = evidence
             .indicators
@@ -3242,5 +3320,13 @@ serde = { path = "../serde" }
             types.contains(&"cargo-replace-override"),
             ".crate with [replace] must surface cargo-replace-override: {types:?}"
         );
+    }
+
+    #[test]
+    fn detects_jvm_static_init_as_load_time() {
+        assert_eq!(super::jvm_execution_context("<clinit>"), "[load-time]");
+        assert_eq!(super::jvm_execution_context("<init>"), "[load-time]");
+        assert_eq!(super::jvm_execution_context("doSomething"), "[exposed-api]");
+        assert_eq!(super::jvm_execution_context("main"), "[exposed-api]");
     }
 }

@@ -106,13 +106,15 @@ Use this matrix as the canonical summary for phase-gated platform support. Compo
 | SBOM, VEX, and compliance exports | Schema placeholders only | Not yet supported | Not yet supported | Not yet supported | Not yet supported | MVP for this capability | Expanded compliance/reporting |
 | Cargo and Maven ecosystems | Shared enums only | Not yet supported | Not yet supported | Explicit unsupported responses | Explicit unsupported responses | MVP for this capability | Supported |
 | OCI or Docker image scanning and proxying | Not yet supported | Not yet supported | Not yet supported | Not yet supported | Not yet supported | Design only | MVP for this capability |
-| IDE and extension ecosystem scanning | Not yet supported | Not yet supported | Not yet supported | Not yet supported | Not yet supported | Design only | MVP for this capability |
+| IDE and extension ecosystem scanning | Not yet supported | Not yet supported | Not yet supported | Not yet supported | Not yet supported | Design only | Local scanner plus design |
 
 ## Cross-Cutting Architecture
 
 - [Authentication and identity](auth-and-identity.md)
 - [Policy and decisions](policy-and-decisions.md)
 - [Policy DSL migration notes](policy-dsl-migration-notes.md)
+- [IDE extension scanning](ide-extension-scanning.md)
+- [High-fidelity detonation](high-fidelity-detonation.md)
 - [Data and storage](data-and-storage.md)
 - [Vector store scale-out path](vector-store-scale-out.md)
 - [External integrations and feeds](external-integrations.md)

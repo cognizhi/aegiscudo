@@ -18,6 +18,7 @@ pub struct ProxyMetrics {
     triage_latency_seconds: HistogramVec,
     upstream_latency_seconds: HistogramVec,
     cache_events_total: IntCounterVec,
+    rate_limit_events_total: IntCounterVec,
 }
 
 impl ProxyMetrics {
@@ -104,6 +105,20 @@ impl ProxyMetrics {
                 "outcome",
             ],
         )?;
+        let rate_limit_events_total = IntCounterVec::new(
+            Opts::new(
+                "aegiscudo_rate_limit_events_total",
+                "Rate limit rejection events by tenant, registry, adapter, limiter, and outcome",
+            ),
+            &[
+                "service",
+                "tenant_id",
+                "registry_config_id",
+                "adapter",
+                "limiter",
+                "outcome",
+            ],
+        )?;
 
         registry.register(Box::new(requests_total.clone()))?;
         registry.register(Box::new(request_duration_seconds.clone()))?;
@@ -112,6 +127,7 @@ impl ProxyMetrics {
         registry.register(Box::new(triage_latency_seconds.clone()))?;
         registry.register(Box::new(upstream_latency_seconds.clone()))?;
         registry.register(Box::new(cache_events_total.clone()))?;
+        registry.register(Box::new(rate_limit_events_total.clone()))?;
 
         Ok(Self {
             registry,
@@ -122,6 +138,7 @@ impl ProxyMetrics {
             triage_latency_seconds,
             upstream_latency_seconds,
             cache_events_total,
+            rate_limit_events_total,
         })
     }
 
@@ -240,6 +257,29 @@ impl ProxyMetrics {
         self.upstream_latency_seconds
             .with_label_values(&labels)
             .observe(elapsed.as_secs_f64());
+    }
+
+    pub fn observe_rate_limit(
+        &self,
+        tenant_id: Uuid,
+        registry_config_id: Uuid,
+        adapter: RegistryAdapter,
+        limiter: &'static str,
+        outcome: &'static str,
+    ) {
+        let tenant_label = tenant_id.to_string();
+        let registry_label = registry_config_id.to_string();
+        let labels = [
+            SERVICE_NAME,
+            tenant_label.as_str(),
+            registry_label.as_str(),
+            adapter_label(adapter),
+            limiter,
+            outcome,
+        ];
+        self.rate_limit_events_total
+            .with_label_values(&labels)
+            .inc();
     }
 
     pub fn render(&self) -> Result<String, prometheus::Error> {

@@ -11,6 +11,7 @@ from aegiscudo_common.contracts import (
     AuditEvent,
     DecisionResponse,
     FeedSnapshot,
+    PackageCoordinate,
     PolicyProfile,
     SandboxTelemetry,
     StaticEvidence,
@@ -36,12 +37,50 @@ def load_fixture(name: str) -> dict[str, object]:
         (SandboxTelemetry, "sandbox-telemetry.canary.json"),
         (AiExplanation, "ai-explanation.advisory.json"),
         (AttestationEvidence, "attestation-evidence.missing.json"),
+        (AttestationEvidence, "attestation-evidence.slsa-vsa.json"),
         (FeedSnapshot, "feed-snapshot.osv.json"),
         (AuditEvent, "audit-event.registry-create.json"),
     ],
 )
 def test_schema_fixtures_load_into_contract_models(model: type, fixture_name: str) -> None:
     assert model.model_validate(load_fixture(fixture_name))
+
+
+def test_attestation_evidence_rejects_invalid_slsa_build_level() -> None:
+    payload = load_fixture("attestation-evidence.slsa-vsa.json")
+    payload["slsa_build_level"] = 4
+
+    with pytest.raises(ValidationError):
+        AttestationEvidence.model_validate(payload)
+
+
+def test_attestation_evidence_rejects_failed_result_with_slsa_fields() -> None:
+    payload = load_fixture("attestation-evidence.slsa-vsa.json")
+    payload["result"] = "fail"
+
+    with pytest.raises(ValidationError):
+        AttestationEvidence.model_validate(payload)
+
+
+def test_attestation_evidence_rejects_mismatched_slsa_build_level() -> None:
+    payload = load_fixture("attestation-evidence.slsa-vsa.json")
+    payload["slsa_build_level"] = 2
+
+    with pytest.raises(ValidationError):
+        AttestationEvidence.model_validate(payload)
+
+
+def test_attestation_evidence_rejects_vsa_fields_with_non_vsa_predicate() -> None:
+    payload = load_fixture("attestation-evidence.slsa-vsa.json")
+    payload["predicate_type"] = "https://slsa.dev/provenance/v1"
+
+    with pytest.raises(ValidationError):
+        AttestationEvidence.model_validate(payload)
+
+
+def test_package_coordinate_accepts_phase3_ecosystems() -> None:
+    assert PackageCoordinate.model_validate({"ecosystem": "githubactions", "name": "actions/checkout"})
+    assert PackageCoordinate.model_validate({"ecosystem": "vscode-extension", "name": "publisher.extension"})
 
 
 def test_digest_rejects_non_sha256_hex() -> None:

@@ -12,7 +12,7 @@ use axum::{
     routing::{get, post},
 };
 use metrics::DecisionMetrics;
-use repository::{PolicyRepository, PolicyRepositoryError};
+use repository::{BoundDecisionContext, PolicyRepository, PolicyRepositoryError};
 use std::{
     collections::HashMap,
     sync::Arc,
@@ -55,21 +55,27 @@ impl DecisionCache {
         }
     }
 
-    async fn get(&self, cache_key: &str) -> Option<aegiscudo_protocol::DecisionResponse> {
+    async fn get(&self, cache_key: &str) -> Option<CachedDecision> {
         let now = Instant::now();
         self.entries
             .read()
             .await
             .get(cache_key)
             .filter(|entry| entry.expires_at > now)
-            .map(|entry| entry.response.clone())
+            .cloned()
     }
 
-    async fn put(&self, cache_key: String, response: &aegiscudo_protocol::DecisionResponse) {
+    async fn put(
+        &self,
+        cache_key: String,
+        response: &aegiscudo_protocol::DecisionResponse,
+        evidence_references: &[String],
+    ) {
         self.entries.write().await.insert(
             cache_key,
             CachedDecision {
                 response: response.clone(),
+                evidence_references: evidence_references.to_vec(),
                 expires_at: Instant::now() + self.ttl,
             },
         );
@@ -79,6 +85,7 @@ impl DecisionCache {
 #[derive(Debug, Clone)]
 struct CachedDecision {
     response: aegiscudo_protocol::DecisionResponse,
+    evidence_references: Vec<String>,
     expires_at: Instant,
 }
 
@@ -149,28 +156,36 @@ async fn evaluate_with_state(
     request: DecisionRequest,
 ) -> Result<aegiscudo_protocol::DecisionResponse, PolicyRepositoryError> {
     let cache_key = decision_cache_key(&request);
-    if let Some(mut response) = state.decision_cache.get(&cache_key).await {
+    if let Some(cached) = state.decision_cache.get(&cache_key).await {
+        let mut response = cached.response;
         response.trace_id = request.request.trace_id.clone();
         state
             .metrics
             .observe_cache(request.tenant_id, request.registry_config_id, "hit");
         state
             .policy_repository
-            .persist_decision_record(&request, &response)
+            .persist_evaluated_decision_record(&request, &response, &cached.evidence_references)
             .await?;
         return Ok(response);
     }
     state
         .metrics
         .observe_cache(request.tenant_id, request.registry_config_id, "miss");
-    let response = evaluate_with_policy_repository(
+    let evaluated = evaluate_with_policy_repository_with_context(
         &state.policy_repository,
         &state.decision_engine,
         request.clone(),
     )
     .await?;
-    state.decision_cache.put(cache_key, &response).await;
-    Ok(response)
+    state
+        .decision_cache
+        .put(
+            cache_key,
+            &evaluated.response,
+            &evaluated.evidence_references,
+        )
+        .await;
+    Ok(evaluated.response)
 }
 
 async fn simulate_with_state(
@@ -178,17 +193,21 @@ async fn simulate_with_state(
     request: DecisionRequest,
 ) -> Result<aegiscudo_protocol::DecisionResponse, PolicyRepositoryError> {
     let cache_key = decision_cache_key(&request);
-    if let Some(mut response) = state.decision_cache.get(&cache_key).await {
+    if let Some(cached) = state.decision_cache.get(&cache_key).await {
+        let mut response = cached.response;
         response.trace_id = request.request.trace_id.clone();
         return Ok(response);
     }
 
-    let bound_input = state
+    let bound_context = state
         .policy_repository
-        .bind_simulation_request(request.clone())
+        .bind_simulation_context(request.clone())
         .await?;
-    let response = state.decision_engine.evaluate(bound_input);
-    state.decision_cache.put(cache_key, &response).await;
+    let response = state.decision_engine.evaluate(bound_context.policy_input);
+    state
+        .decision_cache
+        .put(cache_key, &response, &bound_context.evidence_references)
+        .await;
     Ok(response)
 }
 
@@ -197,14 +216,19 @@ async fn query_with_state(
     request: DecisionQueryRequest,
 ) -> Result<aegiscudo_protocol::DecisionResponse, PolicyRepositoryError> {
     let cache_key = decision_query_cache_key(&request);
-    if let Some(mut response) = state.decision_cache.get(&cache_key).await {
+    if let Some(cached) = state.decision_cache.get(&cache_key).await {
+        let mut response = cached.response;
         response.trace_id = request.request.trace_id.clone();
         return Ok(response);
     }
 
-    let response = query_with_policy_repository(&state.policy_repository, &state.decision_engine, request.clone())
-        .await?;
-    state.decision_cache.put(cache_key, &response).await;
+    let response = query_with_policy_repository(
+        &state.policy_repository,
+        &state.decision_engine,
+        request.clone(),
+    )
+    .await?;
+    state.decision_cache.put(cache_key, &response, &[]).await;
     Ok(response)
 }
 
@@ -245,22 +269,55 @@ fn decision_query_cache_key(request: &DecisionQueryRequest) -> String {
     )
 }
 
+struct EvaluatedDecision {
+    response: aegiscudo_protocol::DecisionResponse,
+    evidence_references: Vec<String>,
+}
+
+async fn evaluate_with_policy_repository_with_context(
+    policy_repository: &PolicyRepository,
+    decision_engine: &DecisionEngine,
+    request: DecisionRequest,
+) -> Result<EvaluatedDecision, PolicyRepositoryError> {
+    let bound_context = policy_repository
+        .bind_evaluation_context(request.clone())
+        .await?;
+    let evidence_references = bound_context.evidence_references.clone();
+    let mut response = decision_engine.evaluate(bound_context.policy_input);
+    if bound_context.vulnerability_under_investigation {
+        append_openvex_rationale(
+            &mut response,
+            "vulnerability is under investigation per VEX statement",
+        );
+    }
+    policy_repository
+        .persist_evaluated_decision_record(&request, &response, &evidence_references)
+        .await?;
+    policy_repository
+        .create_analysis_job_if_needed(&request, &response)
+        .await?;
+    Ok(EvaluatedDecision {
+        response,
+        evidence_references,
+    })
+}
+
+fn append_openvex_rationale(response: &mut aegiscudo_protocol::DecisionResponse, note: &str) {
+    if !response.rationale.iter().any(|r| r == note) {
+        response.rationale.push(note.to_owned());
+    }
+}
+
+#[cfg(test)]
 async fn evaluate_with_policy_repository(
     policy_repository: &PolicyRepository,
     decision_engine: &DecisionEngine,
     request: DecisionRequest,
 ) -> Result<aegiscudo_protocol::DecisionResponse, PolicyRepositoryError> {
-    let bound_input = policy_repository
-        .bind_decision_request(request.clone())
-        .await?;
-    let response = decision_engine.evaluate(bound_input);
-    policy_repository
-        .persist_decision_record(&request, &response)
-        .await?;
-    policy_repository
-        .create_analysis_job_if_needed(&request, &response)
-        .await?;
-    Ok(response)
+    let evaluated =
+        evaluate_with_policy_repository_with_context(policy_repository, decision_engine, request)
+            .await?;
+    Ok(evaluated.response)
 }
 
 async fn query_with_policy_repository(
@@ -515,13 +572,7 @@ mod tests {
             })
             .await;
         repository
-            .remember_package_signal(
-                tenant_id,
-                coordinate.clone(),
-                None,
-                "known-malicious",
-                None,
-            )
+            .remember_package_signal(tenant_id, coordinate.clone(), None, "known-malicious", None)
             .await;
 
         let response = query_with_policy_repository(
@@ -544,7 +595,10 @@ mod tests {
         .await
         .expect("query should evaluate");
 
-        assert_eq!(response.decision, aegiscudo_core::PolicyDecision::BlockKnownMalicious);
+        assert_eq!(
+            response.decision,
+            aegiscudo_core::PolicyDecision::BlockKnownMalicious
+        );
         assert_eq!(response.policy_snapshot_id, snapshot_id);
         assert!(repository.decision_records().await.is_empty());
         assert!(repository.analysis_jobs().await.is_empty());

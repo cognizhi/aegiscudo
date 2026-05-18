@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 from dataclasses import dataclass
 from functools import lru_cache
+from ipaddress import ip_address, ip_network
 from pathlib import Path
 from time import perf_counter
 from typing import Any, Protocol
+from urllib.parse import urlparse
 
 import httpx
 from jsonschema import Draft202012Validator
@@ -32,10 +35,30 @@ except ModuleNotFoundError:  # pragma: no cover - exercised only when dependency
 
 
 PROMPT_TEMPLATE_VERSION = "analysis-preview-v1"
+OPENAI_BASE_URL = "https://api.openai.com/v1"
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 OPENROUTER_APP_REFERER = "https://github.com/cognizhi/aegiscudo"
 OPENROUTER_APP_TITLE = "Aegiscudo AI Analyst"
 OPENROUTER_TIMEOUT_SECONDS = 30.0
+OPENAI_COMPATIBLE_PROVIDER_TYPES = frozenset(
+    {
+        "openrouter",
+        "openai",
+        "openai-compatible",
+        "ollama",
+        "lm-studio",
+        "lmstudio",
+        "vllm",
+    }
+)
+RFC1918_IPV4_NETWORKS = tuple(
+    ip_network(network)
+    for network in (
+        "10.0.0.0/8",
+        "172.16.0.0/12",
+        "192.168.0.0/16",
+    )
+)
 OUTPUT_GUARDRAIL_FRAGMENTS = (
     "ignore previous instructions",
     "bypass guardrails",
@@ -48,6 +71,7 @@ OUTPUT_GUARDRAIL_FRAGMENTS = (
     "reveal the token",
     "return the credential",
 )
+LOGGER = logging.getLogger(__name__)
 
 
 class StructuredAdvisoryFields(BaseModel):
@@ -463,21 +487,24 @@ async def process_next_ai_job(
         validate_ai_explanation_schema(explanation_payload)
         langfuse_trace_id = advisory_response.explanation.langfuse_trace_id
         if active_trace_client is not None:
-            langfuse_trace_id = active_trace_client.record_generation(
-                trace_name="ai-analyst-job",
-                session_id=str(job.id),
-                provider=provider.display_name,
-                model=provider.model_id,
-                prompt_template_version=PROMPT_TEMPLATE_VERSION,
-                input_payload=advisory_response.redacted_evidence,
-                output_payload=explanation_payload,
-                metadata={
-                    "analysis_job_id": str(job.id),
-                    "tenant_id": str(job.tenant_id),
-                    "trace_id": job.trace_id,
-                    "provider_type": provider.provider_type,
-                },
-            )
+            try:
+                langfuse_trace_id = active_trace_client.record_generation(
+                    trace_name="ai-analyst-job",
+                    session_id=str(job.id),
+                    provider=provider.display_name,
+                    model=provider.model_id,
+                    prompt_template_version=PROMPT_TEMPLATE_VERSION,
+                    input_payload=advisory_response.redacted_evidence,
+                    output_payload=explanation_payload,
+                    metadata={
+                        "analysis_job_id": str(job.id),
+                        "tenant_id": str(job.tenant_id),
+                        "trace_id": job.trace_id,
+                        "provider_type": provider.provider_type,
+                    },
+                )
+            except Exception:
+                LOGGER.warning("langfuse trace recording failed; continuing without trace id")
         if langfuse_trace_id is not None:
             explanation_payload["langfuse_trace_id"] = langfuse_trace_id
             validate_ai_explanation_schema(explanation_payload)
@@ -549,6 +576,7 @@ async def process_next_ai_job_from_database(
 
 def validate_provider_credentials(provider: AiProviderConfig) -> None:
     if provider.is_local:
+        validate_local_provider_boundary(provider)
         return
     if provider.credential_env_var is None:
         raise RuntimeError("active AI provider config is missing a credential reference")
@@ -572,11 +600,41 @@ def should_degrade_without_ai_explanation(error: Exception) -> bool:
         "credential is not configured",
         "provider request failed",
         "provider response invalid",
+        "local provider boundary violation",
         "ai explanation schema validation failed",
         "ai explanation guardrail violation",
         "redaction incomplete",
     )
     return any(fragment in message for fragment in degradable_fragments)
+
+
+def validate_local_provider_boundary(provider: AiProviderConfig) -> None:
+    if provider.base_url is None:
+        raise RuntimeError("local provider boundary violation: base_url is required")
+    parsed = urlparse(provider.base_url)
+    if parsed.scheme not in {"http", "https"} or parsed.hostname is None:
+        raise RuntimeError("local provider boundary violation: base_url must be an HTTP URL")
+    if parsed.username is not None or parsed.password is not None:
+        raise RuntimeError("local provider boundary violation: userinfo is not allowed")
+    if not is_allowed_local_provider_host(parsed.hostname):
+        raise RuntimeError(
+            "local provider boundary violation: base_url host must be localhost, loopback, or RFC1918 private IPv4"
+        )
+
+
+def is_allowed_local_provider_host(hostname: str) -> bool:
+    normalized = hostname.strip("[]").lower()
+    if normalized == "localhost":
+        return True
+    try:
+        address = ip_address(normalized)
+    except ValueError:
+        return False
+    if address.is_loopback:
+        return True
+    if address.version == 4:
+        return any(address in network for network in RFC1918_IPV4_NETWORKS)
+    return False
 
 
 def validate_ai_explanation_schema(payload: dict[str, Any]) -> None:
@@ -624,6 +682,7 @@ async def build_advisory_response(
     *,
     http_client: httpx.AsyncClient | None = None,
 ) -> AdvisoryExecutionResult:
+    validate_provider_credentials(provider)
     started = perf_counter()
     preview = build_advisory_preview(
         AdvisoryPreviewRequest(
@@ -633,7 +692,7 @@ async def build_advisory_response(
             evidence=evidence,
         )
     )
-    if provider.provider_type != "openrouter":
+    if normalized_provider_type(provider) not in OPENAI_COMPATIBLE_PROVIDER_TYPES:
         return AdvisoryExecutionResult(
             redaction_complete=preview.redaction_complete,
             redacted_evidence=preview.redacted_evidence,
@@ -644,7 +703,7 @@ async def build_advisory_response(
             ),
         )
 
-    advisory_result = await request_openrouter_advisory_fields(
+    advisory_result = await request_openai_compatible_advisory_fields(
         provider,
         preview.redacted_evidence,
         http_client=http_client,
@@ -665,26 +724,24 @@ async def build_advisory_response(
     )
 
 
-async def request_openrouter_advisory_fields(
+async def request_openai_compatible_advisory_fields(
     provider: AiProviderConfig,
     redacted_evidence: dict[str, Any],
     *,
     http_client: httpx.AsyncClient | None = None,
 ) -> OpenRouterAdvisoryResult:
-    api_key = resolve_provider_api_key(provider)
-    request_payload = build_openrouter_request_payload(provider.model_id, redacted_evidence)
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-        "HTTP-Referer": OPENROUTER_APP_REFERER,
-        "X-OpenRouter-Title": OPENROUTER_APP_TITLE,
-    }
+    request_payload = build_openai_compatible_request_payload(provider.model_id, redacted_evidence)
+    headers = build_openai_compatible_headers(provider)
 
     owns_client = http_client is None
     client = http_client or httpx.AsyncClient(timeout=OPENROUTER_TIMEOUT_SECONDS)
     started = perf_counter()
     try:
-        response = await client.post(openrouter_chat_completions_url(provider), headers=headers, json=request_payload)
+        response = await client.post(
+            openai_compatible_chat_completions_url(provider),
+            headers=headers,
+            json=request_payload,
+        )
         response.raise_for_status()
     except httpx.HTTPStatusError as error:
         raise RuntimeError(
@@ -807,7 +864,7 @@ def coerce_float(value: Any) -> float | None:
     return None
 
 
-def build_openrouter_request_payload(model_id: str, redacted_evidence: dict[str, Any]) -> dict[str, Any]:
+def build_openai_compatible_request_payload(model_id: str, redacted_evidence: dict[str, Any]) -> dict[str, Any]:
     return {
         "model": model_id,
         "temperature": 0,
@@ -868,13 +925,31 @@ def build_openrouter_request_payload(model_id: str, redacted_evidence: dict[str,
     }
 
 
-def openrouter_chat_completions_url(provider: AiProviderConfig) -> str:
-    base_url = (provider.base_url or OPENROUTER_BASE_URL).rstrip("/")
+def openai_compatible_chat_completions_url(provider: AiProviderConfig) -> str:
+    provider_type = normalized_provider_type(provider)
+    default_base_url = OPENROUTER_BASE_URL if provider_type == "openrouter" else OPENAI_BASE_URL
+    base_url = (provider.base_url or default_base_url).rstrip("/")
     if base_url.endswith("/chat/completions"):
         return base_url
-    if not base_url.endswith("/api/v1"):
-        base_url = f"{base_url}/api/v1"
-    return f"{base_url}/chat/completions"
+    if base_url.endswith("/v1") or base_url.endswith("/api/v1"):
+        return f"{base_url}/chat/completions"
+    if provider_type == "openrouter":
+        return f"{base_url}/api/v1/chat/completions"
+    return f"{base_url}/v1/chat/completions"
+
+
+def build_openai_compatible_headers(provider: AiProviderConfig) -> dict[str, str]:
+    headers = {"Content-Type": "application/json"}
+    if provider.credential_env_var is not None:
+        headers["Authorization"] = f"Bearer {resolve_provider_api_key(provider)}"
+    if normalized_provider_type(provider) == "openrouter":
+        headers["HTTP-Referer"] = OPENROUTER_APP_REFERER
+        headers["X-OpenRouter-Title"] = OPENROUTER_APP_TITLE
+    return headers
+
+
+def normalized_provider_type(provider: AiProviderConfig) -> str:
+    return provider.provider_type.strip().lower().replace("_", "-").replace(" ", "-")
 
 
 def resolve_provider_api_key(provider: AiProviderConfig) -> str:

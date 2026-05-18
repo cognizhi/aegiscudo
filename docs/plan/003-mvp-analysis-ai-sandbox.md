@@ -37,7 +37,7 @@ Progress note: 2026-06 Surgeon now enforces a configurable per-job scan timeout 
 - [x] Surgeon safely unpacks npm and PyPI artifacts and emits schema-valid evidence.
 	- Closed: Surgeon safely unpacks npm `.tgz`, PyPI wheel, and PyPI sdist archives; emits schema-valid `static_analysis_reports`; rejects traversal, symlink escape, decompression bombs, too-many-files, and oversized archives.
 - [x] Surgeon detects MVP suspicious indicators, sleeper/deferred patterns, AI agent injection patterns, and worm/cross-package write patterns.
-	- Closed: all MVP indicator categories covered; sleeper/deferred-execution, AI agent injection, and worm/cross-package write patterns all fire on synthetic fixtures. Minified-payload, binary-blob, and import-time-network static detection deferred to Phase 2.
+	- Closed: all MVP indicator categories covered; sleeper/deferred-execution, AI agent injection, worm/cross-package write, minified-payload, unexpected binary blob, and import-time-network patterns all fire on synthetic fixtures or focused unit tests.
 - [x] Emergency Room runs npm and PyPI sandbox profiles with no customer secrets and no privileged host access.
 	- Closed for alpha: local Docker-based executor runs npm and PyPI profiles with no cloud credentials and no privileged containers. Full production enforcement (service accounts, no-host-mounts, CPU/memory limits, egress deny-all) requires Cloud Run Jobs adapter in Phase 2.
 - [x] Emergency Room plants canary secret and AI agent config files and records access or modification events.
@@ -61,7 +61,7 @@ Progress note: 2026-06 Surgeon now enforces a configurable per-job scan timeout 
 - [ ] Emit queue depth, latency, retry, and failure metrics.
 	- Deferred to Phase 2: OTEL hooks exist in `aegiscudo-telemetry`; job-level metric emission requires Phase 2 observability buildout. Owner: Aegiscudo Tech Lead | Deferred to Phase 2 | Date: 2026-05-10.
 - [x] Add tests for duplicate job submission and idempotent completion.
-	- Closed 2026-05-10: `test_worker_does_not_reprocess_completed_job` and `test_worker_claims_job_idempotently` added to `services/ai-analyst/tests/test_ai_analyst_worker.py`; 11 AI Analyst unit tests pass.
+	- Closed 2026-05-10: `test_worker_does_not_reprocess_completed_job` and `test_worker_claims_job_idempotently` added to `services/ai-analyst/tests/test_ai_analyst_worker.py`; 18 AI Analyst worker unit tests pass.
 
 ## Surgeon Archive Safety
 
@@ -93,20 +93,20 @@ Progress note: 2026-06 Surgeon now enforces a configurable per-job scan timeout 
 - [x] Parse Python `pyproject.toml`.
 - [x] Parse Python `setup.cfg` where practical.
 - [x] Treat `setup.py` as text evidence and never execute it.
-- [ ] Extract Python package top-level module hints.
-	- Deferred to Phase 2. Owner: Aegiscudo Tech Lead | Deferred to Phase 2 | Date: 2026-05-10.
+- [x] Extract Python package top-level module hints.
+	- Closed 2026-05-18: Surgeon now emits `python-top-level-module-hint` from wheel Core Metadata `Import-Name` / `Import-Namespace` headers and legacy `.dist-info/top_level.txt` files. Focused validation passed with `cargo test -p surgeon wheel_metadata_import_name_detected -- --test-threads=1` and `cargo test -p surgeon python_top_level_txt_detected -- --test-threads=1`.
 - [ ] Extract package repository URL, maintainers, publish time, license, and classifiers where available.
 	- Deferred to Phase 2. Owner: Aegiscudo Tech Lead | Deferred to Phase 2 | Date: 2026-05-10.
 - [ ] Compute minimum release age signal from metadata timestamp and request time.
 	- Deferred to Phase 2. Owner: Aegiscudo Tech Lead | Deferred to Phase 2 | Date: 2026-05-10.
 - [ ] Compute GitHub-to-registry publish gap when source release metadata is available.
 	- Deferred to Phase 2. Owner: Aegiscudo Tech Lead | Deferred to Phase 2 | Date: 2026-05-10.
-- [ ] Generate package-level SBOM fragment fields needed by Phase 2 SBOM service.
-	- Deferred to Phase 2. Owner: Aegiscudo Tech Lead | Deferred to Phase 2 | Date: 2026-05-10.
-- [ ] SBOM fragment must include `purl`, name, version, SHA-256 digest, ecosystem, and dependency relationships to be compatible with Phase 2 SBOM Service aggregation.
-	- Deferred to Phase 2. Owner: Aegiscudo Tech Lead | Deferred to Phase 2 | Date: 2026-05-10.
-- [ ] Add tests for valid, malformed, and missing manifests.
-	- Partial: valid npm `package.json` and Python wheel/pyproject.toml parse tests exist inline. Malformed and missing manifest edge cases deferred to Phase 2. Owner: Aegiscudo Tech Lead | Deferred to Phase 2 | Date: 2026-05-10.
+- [x] Generate package-level SBOM fragment fields needed by Phase 2 SBOM service.
+	- Closed 2026-05-14: Surgeon persists `analysis_sbom_fragments` for analyzed package roots, and SBOM Service can generate documents from `analysis_job_id` without caller-supplied component lists.
+- [x] SBOM fragment must include `purl`, name, version, SHA-256 digest, ecosystem, and dependency relationships to be compatible with Phase 2 SBOM Service aggregation.
+	- Closed 2026-05-18: stored Surgeon fragments include root component `purl`, name, version, namespace, ecosystem, and `sha256:` integrity plus an explicit dependency-edge array. Current fragments are root-package-only; richer ecosystem dependency edges remain tracked as Phase 2 follow-up in the SBOM tracker. Validation passed with `cargo test -p surgeon package_sbom_fragment_json_emits_root_component_fields -- --test-threads=1` and `cargo test -p surgeon package_sbom_fragment_json_preserves_namespace_when_present -- --test-threads=1`.
+- [x] Add tests for valid, malformed, and missing manifests.
+	- Closed 2026-05-18: valid npm `package.json`, Python wheel metadata, `pyproject.toml`, and `setup.cfg` parse tests exist inline; malformed npm `package.json`, missing npm `package.json`, and malformed `pyproject.toml` edge cases now have focused coverage. Validation passed with `cargo test -p surgeon package_json_safely -- --test-threads=1` and `cargo test -p surgeon pyproject_toml_malformed_emits_diagnostic -- --test-threads=1`.
 
 ## Surgeon Suspicious Indicator Extraction
 
@@ -123,15 +123,15 @@ Progress note: 2026-06 Surgeon now enforces a configurable per-job scan timeout 
 - [x] Detect Python `eval` usage.
 - [x] Detect Python dynamic import abuse.
 - [x] Detect Python `subprocess`, `socket`, `requests`, and `urllib` suspicious patterns.
-- [ ] Detect import-time network behavior patterns statically where possible.
-	- Deferred to Phase 2: requires more sophisticated static data-flow analysis. Owner: Aegiscudo Tech Lead | Deferred to Phase 2 | Date: 2026-05-10.
+- [x] Detect import-time network behavior patterns statically where possible.
+	- Closed 2026-05-18: the static rule set flags module-level Python calls through `requests`, `urllib`, `http.client`, `httplib`, `aiohttp`, and `httpx` as `python-import-time-network`. Validation passed with `cargo test -p surgeon detects_python_import_time_network -- --test-threads=1`.
 - [x] Detect high-entropy strings.
 - [x] Detect large base64-like blobs.
 - [x] Detect hex-encoded or folded suspicious strings.
-- [ ] Detect minified payloads embedded in metadata.
-	- Deferred to Phase 2: minified payload detection in metadata fields requires heuristic expansion beyond current indicator set. Owner: Aegiscudo Tech Lead | Deferred to Phase 2 | Date: 2026-05-10.
-- [ ] Detect unexpected binary blobs.
-	- Deferred to Phase 2. Owner: Aegiscudo Tech Lead | Deferred to Phase 2 | Date: 2026-05-10.
+- [x] Detect minified payloads embedded in metadata.
+	- Closed 2026-05-18: text scanning now flags extremely long single-line payloads as `minified-js-payload`, including manifest and metadata text inputs that pass through the shared scan path. Validation passed with `cargo test -p surgeon detects_minified_js_payload -- --test-threads=1`.
+- [x] Detect unexpected binary blobs.
+	- Closed 2026-05-18: Surgeon now flags null-byte binary payloads embedded in source-like text as `binary-blob-embedded`, in addition to the existing native-artifact classification for packaged binary files. Validation passed with `cargo test -p surgeon detects_binary_blob_embedded_in_source -- --test-threads=1`.
 - [x] Detect sleeper and deferred execution gates using date, environment, hostname, CI markers, counters, and remote configuration fetches.
 	- Closed: Surgeon detects `process.env` access, date-based branching, hostname checks, and counter/configuration fetch patterns. CI-marker and counter-gate fixtures pass in malicious fixture tests.
 - [x] Detect AI agent injection content in `.cursorrules`, `AGENTS.md`, `.github/copilot-instructions.md`, `.claude/`, README, descriptions, and comments.
@@ -248,8 +248,8 @@ Progress note: 2026-06 Surgeon now enforces a configurable per-job scan timeout 
 	- Deferred to Phase 2: requires mock metadata endpoint (169.254.169.254) in Cloud Run Jobs network namespace. Owner: Aegiscudo Tech Lead | Deferred to Phase 2 | Date: 2026-05-10.
 - [x] Plant fake `.env` with structured key-value pairs.
 - [x] Plant fake KUBECONFIG.
-- [ ] Plant fake Cursor and VS Code settings paths.
-	- Deferred to Phase 2: additional AI agent config canary paths for Cursor and VS Code settings directories. Owner: Aegiscudo Tech Lead | Deferred to Phase 2 | Date: 2026-05-10.
+- [x] Plant fake Cursor and VS Code settings paths.
+	- Closed 2026-05-18: Emergency Room now plants `.cursor/settings.json` and `.vscode/settings.json` canaries alongside `.cursorrules`, Copilot instructions, `AGENTS.md`, and `.claude/settings.json`. Validation passed with `pytest services/emergency-room/tests/test_emergency_room_sandbox.py -q -k ai_editor_settings_canaries_are_planted`.
 - [x] Plant `.github/copilot-instructions.md` canary.
 - [x] Plant `.cursorrules` canary.
 - [x] Plant `AGENTS.md` canary.
@@ -262,8 +262,8 @@ Progress note: 2026-06 Surgeon now enforces a configurable per-job scan timeout 
 - [x] Define evidence input schema accepted from Surgeon/Emergency Room.
 - [x] Implement redaction before prompt construction.
 - [x] Validate no secrets remain in prompt input.
-- [ ] Implement provider abstraction for OpenAI.
-	- Deferred to Phase 2. Owner: Aegiscudo Tech Lead | Deferred to Phase 2 | Date: 2026-05-10.
+- [x] Implement provider abstraction for OpenAI.
+	- Closed 2026-05-18: AI Analyst now routes `openai` provider configs through the shared OpenAI-compatible chat-completions adapter with credential validation and structured JSON response validation.
 - [ ] Implement provider abstraction for Anthropic.
 	- Deferred to Phase 2. Owner: Aegiscudo Tech Lead | Deferred to Phase 2 | Date: 2026-05-10.
 - [ ] Implement provider abstraction for Google Gemini.
@@ -271,18 +271,18 @@ Progress note: 2026-06 Surgeon now enforces a configurable per-job scan timeout 
 - [ ] Implement provider abstraction for Google Vertex AI.
 	- Deferred to Phase 2. Owner: Aegiscudo Tech Lead | Deferred to Phase 2 | Date: 2026-05-10.
 - [x] Implement provider abstraction for OpenRouter.
-- [ ] Implement provider abstraction for Ollama.
-	- Deferred to Phase 2. Owner: Aegiscudo Tech Lead | Deferred to Phase 2 | Date: 2026-05-10.
-- [ ] Implement provider abstraction for LM Studio.
-	- Deferred to Phase 2. Owner: Aegiscudo Tech Lead | Deferred to Phase 2 | Date: 2026-05-10.
-- [ ] Implement provider abstraction for vLLM.
-	- Deferred to Phase 2. Owner: Aegiscudo Tech Lead | Deferred to Phase 2 | Date: 2026-05-10.
-- [ ] Implement provider abstraction for generic OpenAI-compatible endpoints.
-	- Deferred to Phase 2. Owner: Aegiscudo Tech Lead | Deferred to Phase 2 | Date: 2026-05-10.
-- [ ] Enforce local-only evidence boundary for local providers.
-	- Deferred to Phase 2: all sub-items below require multi-provider abstraction. Owner: Aegiscudo Tech Lead | Deferred to Phase 2 | Date: 2026-05-10.
- - [ ] Verify `is_local` provider flag at startup and before each LLM request, not only at startup (PRD §3.6 data-exfiltration risk).
-	 - Deferred to Phase 2: requires multi-provider abstraction. Owner: Aegiscudo Tech Lead | Deferred to Phase 2 | Date: 2026-05-10.
+- [x] Implement provider abstraction for Ollama.
+	- Closed 2026-05-18: `ollama` provider configs use the OpenAI-compatible chat-completions adapter and require a loopback or RFC1918 local base URL.
+- [x] Implement provider abstraction for LM Studio.
+	- Closed 2026-05-18: `lm-studio` / `lmstudio` provider configs use the shared OpenAI-compatible chat-completions adapter with the local provider boundary checks.
+- [x] Implement provider abstraction for vLLM.
+	- Closed 2026-05-18: `vllm` provider configs use the shared OpenAI-compatible chat-completions adapter with the local provider boundary checks.
+- [x] Implement provider abstraction for generic OpenAI-compatible endpoints.
+	- Closed 2026-05-18: `openai-compatible` provider configs use the shared chat-completions adapter, structured JSON response contract, usage parsing, and credential handling.
+- [x] Enforce local-only evidence boundary for local providers.
+	- Closed 2026-05-18: local provider configs reject missing base URLs, URL userinfo, non-HTTP URLs, and hosts outside `localhost`, loopback, and RFC1918 private IPv4 ranges before provider requests are issued.
+ - [x] Verify `is_local` provider flag before each LLM request (PRD §3.6 data-exfiltration risk).
+	 - Closed 2026-05-18: `build_advisory_response` revalidates provider credentials and local boundary constraints for every AI job, including fake-repository tests that bypass database loading.
  - [ ] Emit an explicit startup log and health-detail field stating whether evidence is routed to a local provider or a cloud provider.
 	 - Deferred to Phase 2. Owner: Aegiscudo Tech Lead | Deferred to Phase 2 | Date: 2026-05-10.
  - [ ] Implement cloud-provider privacy boundary notice fields.
@@ -290,15 +290,15 @@ Progress note: 2026-06 Surgeon now enforces a configurable per-job scan timeout 
  - [ ] Enforce tenant-level and package-level LLM budget quotas before issuing AI requests; quota exhaustion must degrade explanations without blocking deterministic policy decisions.
 	 - Deferred to Phase 2. Owner: Aegiscudo Tech Lead | Deferred to Phase 2 | Date: 2026-05-10.
 - [x] Fetch active provider config from database.
-- [ ] Require at least one active provider before AI jobs execute.
-	- Deferred to Phase 2: multi-provider abstraction needed for robust enforcement. Owner: Aegiscudo Tech Lead | Deferred to Phase 2 | Date: 2026-05-10.
+- [x] Require at least one active provider before AI jobs execute.
+	- Closed 2026-05-18: missing active provider config degrades the advisory explanation and advances deterministic finalization without blocking policy decisions; covered by `test_process_next_ai_job_degrades_when_no_active_provider_exists`.
 - [x] Build structured JSON prompts from redacted evidence only.
 - [x] Clearly separate observed behavior from inference in output schema.
 - [x] Validate LLM response against JSON schema.
 - [x] Reject outputs that attempt to change policy, bypass guardrails, request secrets, or self-authorize.
 - [x] Store explanation with model, provider, prompt template version, redaction result, output hash, and evidence hash.
-- [ ] Add unit tests for redaction, schema validation, provider failures, local boundary enforcement, and hallucination guardrails.
-	- Partial 2026-05-10: `test_rejects_explanation_with_secret_residue` (redaction failure) and `test_rejects_prompt_injection_in_explanation` (hallucination/injection guardrail) added and passing. Provider failure, local boundary enforcement, and schema validation post-response tests remain for Phase 2 multi-provider expansion.
+- [x] Add unit tests for redaction, schema validation, provider failures, local boundary enforcement, and hallucination guardrails.
+	- Closed 2026-05-18: AI Analyst worker tests now cover provider failure degradation, invalid provider response degradation, missing active provider degradation, Langfuse trace failure continuation, local provider URL boundary rejection, credential validation, and hallucination guardrail rejection; focused validation passed with `pytest services/ai-analyst/tests/test_ai_analyst_worker.py -q`.
 
 ## Langfuse Instrumentation
 

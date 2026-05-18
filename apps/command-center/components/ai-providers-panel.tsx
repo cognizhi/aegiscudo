@@ -23,7 +23,39 @@ interface ProviderRowProps {
   provider: AiProviderConfig;
 }
 
+function isAllowedLocalProviderUrl(baseUrl: string | null | undefined): boolean {
+  if (!baseUrl) {
+    return false;
+  }
+  try {
+    const parsed = new URL(baseUrl);
+    const hostname = parsed.hostname.replace(/^\[|\]$/g, "").toLowerCase();
+    if ((parsed.protocol !== "http:" && parsed.protocol !== "https:") || parsed.username || parsed.password) {
+      return false;
+    }
+    if (hostname === "localhost" || hostname === "::1") {
+      return true;
+    }
+    const octets = hostname.split(".").map((part) => Number(part));
+    if (octets.length !== 4 || octets.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) {
+      return false;
+    }
+    const first = octets[0] ?? -1;
+    const second = octets[1] ?? -1;
+    return (
+      first === 127 ||
+      first === 10 ||
+      (first === 172 && second >= 16 && second <= 31) ||
+      (first === 192 && second === 168)
+    );
+  } catch {
+    return false;
+  }
+}
+
 function ProviderRow({ provider }: ProviderRowProps) {
+  const boundaryWarning = provider.is_local && !isAllowedLocalProviderUrl(provider.base_url);
+
   return (
     <motion.tr
       layout
@@ -55,6 +87,15 @@ function ProviderRow({ provider }: ProviderRowProps) {
         >
           {provider.is_local ? "Local" : "Cloud"}
         </span>
+        {boundaryWarning && (
+          <span
+            className="mt-1 inline-flex items-center gap-1 rounded border border-amber-500/40 bg-amber-500/10 px-2 py-0.5 text-xs font-medium text-amber-200"
+            title="Local provider URL must use localhost, loopback, or RFC1918 private IPv4"
+          >
+            <AlertTriangle size={12} />
+            Boundary warning
+          </span>
+        )}
       </td>
       <td className="px-4 py-3">
         {provider.active ? (

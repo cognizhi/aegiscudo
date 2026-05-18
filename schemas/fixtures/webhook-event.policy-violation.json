@@ -1,0 +1,42 @@
+{
+  "id": "00000000-0000-0000-0000-000000000901",
+  "schema_version": "webhook-event/v1",
+  "event_type": "policy_violation.detected",
+  "tenant_ref": "tenant-acme-prod-01",
+  "occurred_at": "2026-05-18T18:00:00Z",
+  "trace_id": "trace-webhook-policy-violation",
+  "severity": "critical",
+  "summary": "Package request blocked by tenant policy.",
+  "subject": {
+    "kind": "package",
+    "id": "pkg:npm/left-pad@1.3.0",
+    "display": "npm:left-pad@1.3.0",
+    "package": {
+      "ecosystem": "npm",
+      "name": "left-pad",
+      "version": "1.3.0",
+      "purl": "pkg:npm/left-pad@1.3.0"
+    }
+  },
+  "policy": {
+    "decision": "block",
+    "decision_id": "00000000-0000-0000-0000-000000000701",
+    "policy_profile_id": "00000000-0000-0000-0000-000000000801",
+    "policy_version": "2026-05-18.1"
+  },
+  "evidence": [
+    {
+      "type": "decision",
+      "reference": "decision/00000000-0000-0000-0000-000000000701",
+      "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    }
+  ],
+  "metadata": {
+    "registry": "npm",
+    "adapter": "npm"
+  },
+  "redaction": {
+    "profile": "external-webhook-v1",
+    "omitted_fields": ["raw_package", "auth_headers", "internal_audit_metadata"]
+  }
+}

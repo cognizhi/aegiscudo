@@ -79,7 +79,7 @@ Progress note: 2026-05-10 closed one stale optional-publication checklist item w
 - [x] Release workflows are configured and tested through dry-run where possible.
 	- Closed: `release.yml` with release-please, `docker-publish.yml` with Buildx matrix, and `security.yml` with Semgrep are wired. Dry-run for release-please requires a real `v*.*.*` tag push or a manual GitHub Actions dispatch — branch protection and Docker Hub secrets must be configured by repo admin before first release.
 - [x] Security, operations, and developer onboarding docs are complete.
-	- Closed 2026-05-10: override/emergency bypass runbook, security incident response guide, and release/rollback guide created. Feed Harvester operations guide deferred to Phase 2 (service not yet implemented). All other operations docs completed in prior sessions.
+	- Closed 2026-05-10: override/emergency bypass runbook, security incident response guide, release/rollback guide, and Feed Harvester operations guide created. All other operations docs completed in prior sessions.
 
 ## CI Quality Gates
 
@@ -109,7 +109,7 @@ Progress note: 2026-05-10 closed one stale optional-publication checklist item w
 - [x] Enforce per-service coverage thresholds.
 - [x] Enforce zero lint warnings.
 - [ ] Block PR merge on failed required checks.
-	- Blocker: CI workflow now includes dedicated Playwright and contract-test jobs; integration, seeded E2E, coverage, SARIF publication, richer test-result publication, and branch protection still need full wiring.
+	- Blocker: CI workflow coverage, integration, seeded E2E, SARIF publication, and test-result publication are wired. Branch protection still requires repository-owner configuration in GitHub settings.
 	- Note: Branch protection (require passing CI status checks, require at least one PR review before merging) must be configured manually by the repository owner in GitHub repository settings → Branches → Branch protection rules for `main`. This cannot be automated via CI or code; all current CI jobs pass on `main`.
 
 ## Security Workflows
@@ -217,8 +217,8 @@ Progress note: 2026-05-10 closed one stale optional-publication checklist item w
 	- Closed 2026-05-10: `rejects_expanded_bytes_over_limit` Surgeon unit test passes.
 - [x] Oversized package limits are enforced.
 	- Closed 2026-05-10: `rejects_large_single_file` and `rejects_too_many_files` Surgeon unit tests pass.
-- [ ] Malformed metadata is handled safely.
-	- Partial: Surgeon uses strict JSON deserialization and rejects malformed manifests; `aegiscudo-api` override handler returns `422` on malformed JSON. Broader malformed-metadata edge case tests deferred to Phase 2.
+- [x] Malformed metadata is handled safely.
+	- Closed 2026-05-18: Surgeon emits diagnostic indicators instead of panicking for malformed npm `package.json` and malformed `pyproject.toml`, and safely scans archives with missing npm manifests without treating absence as malformed metadata. Validation passed with `cargo test -p surgeon package_json_safely -- --test-threads=1` and `cargo test -p surgeon pyproject_toml_malformed_emits_diagnostic -- --test-threads=1`.
 - [x] Prompt injection in README/comments/package description is inert.
 	- Closed 2026-05-10: `test_rejects_prompt_injection_in_explanation` AI Analyst unit test passes.
 - [x] Secret redaction failures are detected.
@@ -227,10 +227,10 @@ Progress note: 2026-05-10 closed one stale optional-publication checklist item w
 	- Closed 2026-05-10: `POST /v1/overrides` missing-fields returns `422`; non-admin actor returns `403`. Contract tests in `services/aegiscudo-api/src/lib.rs`.
 - [x] Tenant isolation violations are prevented.
 	- Closed 2026-05-10: DB-backed contract tests assert cross-tenant `404`; admin actor isolation proven in focused route tests.
-- [ ] Lockfile integrity substitution regression is covered.
-	- Deferred to Phase 2: requires dedicated lockfile substitution attack fixtures and Mosquito Net proxy layer enforcement tests. Owner: Aegiscudo Tech Lead | Deferred to Phase 2 | Date: 2026-05-10.
-- [ ] Registry protocol compatibility regression is covered.
-	- Note: npm and PyPI live-local tests cover the core proxy protocol path. Cargo, Maven, and Docker adapters are Phase 2.
+- [x] Lockfile integrity substitution regression is covered.
+	- Closed 2026-05-10: the ignored live-local Mosquito Net `npm_ci_lockfile_install_does_not_fallback_against_live_local_proxy` regression proves a lockfile with pinned integrity for `1.2.0` is not silently substituted to the fallback `1.0.0` candidate.
+- [x] Registry protocol compatibility regression is covered.
+	- Closed 2026-05-18: npm and PyPI live-local proxy tests cover the MVP protocols, while Phase 2 added Cargo sparse-registry `cargo search` / `cargo fetch` live-local proofs and Maven repository-layout direct JAR, POM, metadata, checksum, and `mvn dependency:get` smoke coverage. Docker/OCI remains Phase 3, not part of this gate.
 - [x] Sandbox timeout and resource exhaustion are handled.
 	- Closed 2026-05-10: ER sandbox slow-npm and slow-Python fixtures trigger `sandbox-timeout` telemetry event in focused pytest tests. Resource exhaustion enforcement requires Cloud Run adapter (deferred to Phase 2).
 - [x] Canary credential access detection is covered.
@@ -260,10 +260,10 @@ _Note: all items in this section require production-like load or sustained fixtu
 	- Deferred to Phase 2.
 - [ ] Fail-open/fail-closed policy behavior is tested for Triage outage.
 	- Note: fail-open behavior is tested in focused Mosquito Net unit tests (warn-mode and shadow-mode). Full Triage outage simulation deferred to Phase 2.
-- [ ] Stale feed behavior records feed snapshot age.
-	- Deferred to Phase 2: requires Feed Harvester implementation.
-- [ ] AI Analyst and Langfuse outages degrade explanations without blocking deterministic decisions.
-	- Deferred to Phase 2.
+- [x] Stale feed behavior records feed snapshot age.
+	- Closed 2026-05-18: Triage Counter binds latest feed state and `feed_snapshot_age_seconds`, and stale deps.dev snapshots mark the bound context stale. Focused validation passed with `cargo test -p triage-counter feed_snapshots_bind_state_and_age -- --test-threads=1` and `cargo test -p triage-counter deps_dev_feed_snapshot_age_can_mark_bound_state_stale -- --test-threads=1`.
+- [x] AI Analyst and Langfuse outages degrade explanations without blocking deterministic decisions.
+	- Closed 2026-05-18: provider failures, invalid provider responses, missing active providers, and Langfuse trace recording failures all advance AI jobs to deterministic finalization without blocking policy decisions. Focused validation passed with `pytest services/ai-analyst/tests/test_ai_analyst_worker.py -q`.
 - [ ] Sandbox worker outage records missing sandbox evidence and follows tenant policy.
 	- Deferred to Phase 2.
 - [ ] Upstream registry outage serves only verified cached metadata/artifacts.
@@ -279,8 +279,8 @@ _Note: all items in this section require production-like load or sustained fixtu
 	- Deferred to Phase 2: attestation verification requires production npm registry signed fixtures and `npm audit signatures` integration. Owner: Aegiscudo Tech Lead | Deferred to Phase 2 | Date: 2026-05-10.
 - [ ] PyPI digital attestation verification tests pass against provenance fixtures.
 	- Deferred to Phase 2: requires PEP 740 signed fixtures and sigstore verification integration. Owner: Aegiscudo Tech Lead | Deferred to Phase 2 | Date: 2026-05-10.
-- [ ] Lockfile integrity substitution regression tests pass.
-	- Deferred to Phase 2: requires lockfile tamper detection test fixtures. Owner: Aegiscudo Tech Lead | Deferred to Phase 2 | Date: 2026-05-10.
+- [x] Lockfile integrity substitution regression tests pass.
+	- Closed 2026-05-18: the ignored live-local Mosquito Net `npm_ci_lockfile_install_does_not_fallback_against_live_local_proxy` regression proves pinned lockfile integrity requests install the requested artifact through the proxy without being silently substituted to an approved fallback candidate. Lockfile tamper-detection fixtures remain a future enhancement outside this substitution gate.
 - [x] Archive traversal tests pass.
 - [x] Decompression-bomb tests pass.
 	- Closed 2026-05-10: `rejects_expanded_bytes_over_limit` Surgeon unit test passes.
@@ -306,7 +306,7 @@ _Note: all items in this section require production-like load or sustained fixtu
 - [x] Emergency bypass requires scope, reason, approver, and expiry.
 	- Closed 2026-05-10: override schema enforces `scope`, `reason`, `approver`, and `expires_at`; missing-field `422` contract tests pass in `aegiscudo-api`.
 - [ ] Feed Harvester freshness alerts trigger when feed data is more than 24 hours stale.
-	- Deferred to Phase 2: Feed Harvester service is not yet implemented. Owner: Aegiscudo Tech Lead | Deferred to Phase 2 | Date: 2026-05-10.
+	- Deferred to Phase 2: Feed Harvester now exposes `aegiscudo_feed_last_success_timestamp_seconds`, but production alert rules and notification routing require the monitoring stack deployment. Owner: Aegiscudo Tech Lead | Deferred to Phase 2 | Date: 2026-05-10.
 
 ## Operations Documentation
 
@@ -317,8 +317,8 @@ _Note: all items in this section require production-like load or sustained fixtu
 - [x] Write policy authoring guide.
 - [x] Write override and emergency bypass runbook.
 	- Closed 2026-05-10: `docs/development/runbook-override-emergency-bypass.md` created.
-- [ ] Write feed harvester operations guide.
-	- Deferred to Phase 2: depends on Feed Harvester implementation. Owner: Aegiscudo Tech Lead | Deferred to Phase 2 | Date: 2026-05-10.
+- [x] Write feed harvester operations guide.
+	- Closed 2026-05-10: `docs/development/feed-harvester-operations.md` created for runtime contract, refresh operations, metrics, incident handling, and focused validation.
 - [x] Write sandbox operations and safety boundary guide.
 - [x] Write AI provider and Langfuse operations guide.
 - [x] Write incident response guide for blocked malicious package.

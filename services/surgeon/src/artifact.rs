@@ -282,13 +282,22 @@ mod tests {
             .map(|indicator| indicator.indicator_type.as_str())
             .collect();
 
-        assert!(indicator_types.contains(&"java-outbound-http"), "{indicator_types:?}");
-        assert!(indicator_types.contains(&"java-env-read"), "{indicator_types:?}");
+        assert!(
+            indicator_types.contains(&"java-outbound-http"),
+            "{indicator_types:?}"
+        );
+        assert!(
+            indicator_types.contains(&"java-env-read"),
+            "{indicator_types:?}"
+        );
         assert!(
             indicator_types.contains(&"java-hardcoded-endpoint-or-token"),
             "{indicator_types:?}"
         );
-        assert!(indicator_types.contains(&"maven-build-plugin"), "{indicator_types:?}");
+        assert!(
+            indicator_types.contains(&"maven-build-plugin"),
+            "{indicator_types:?}"
+        );
     }
 
     #[test]
@@ -342,7 +351,10 @@ mod tests {
             .map(|indicator| indicator.indicator_type.as_str())
             .collect();
 
-        assert!(indicator_types.contains(&"maven-build-plugin"), "{indicator_types:?}");
+        assert!(
+            indicator_types.contains(&"maven-build-plugin"),
+            "{indicator_types:?}"
+        );
     }
 
     #[test]
@@ -409,7 +421,11 @@ fn main() {
                 .unwrap();
 
         assert!(!manifest.is_empty());
-        assert!(manifest.iter().any(|entry| entry.path.ends_with("Cargo.toml")));
+        assert!(
+            manifest
+                .iter()
+                .any(|entry| entry.path.ends_with("Cargo.toml"))
+        );
         let indicator_types: Vec<_> = evidence
             .indicators
             .iter()
@@ -749,6 +765,41 @@ edition = "2024"
                 .iter()
                 .any(|ind| ind.indicator_type == "malformed-package-json"),
             "expected malformed-package-json indicator"
+        );
+    }
+
+    #[test]
+    fn handles_missing_package_json_safely() {
+        let artifact_dir = tempdir().unwrap();
+        let artifact_path = artifact_dir.path().join("missing-manifest.tgz");
+        write_tar_gz(&artifact_path, |builder| {
+            let content = b"console.log('benign fixture');\n";
+            let mut header = Header::new_gnu();
+            header.set_entry_type(EntryType::Regular);
+            header.set_size(content.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, "package/index.js", content.as_slice())
+                .unwrap();
+        });
+
+        let unpack_dir = tempdir().unwrap();
+        let (evidence, manifest) =
+            scan_artifact_package(&artifact_path, unpack_dir.path(), ScanLimits::default())
+                .unwrap();
+
+        assert!(
+            manifest
+                .iter()
+                .any(|entry| entry.path.ends_with("index.js"))
+        );
+        assert!(
+            evidence
+                .indicators
+                .iter()
+                .all(|ind| ind.indicator_type != "malformed-package-json"),
+            "missing package.json must not be treated as malformed"
         );
     }
 

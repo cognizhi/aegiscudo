@@ -259,11 +259,11 @@ Auth boundary is defined by [ADR 0005](../adr/0005-interface-auth-boundary-for-l
 - [ ] Audit active provider transition.
 	- Deferred to Phase 2. Owner: Aegiscudo Tech Lead | Deferred to Phase 2 | Date: 2026-05-10.
 - [x] Show Local/Cloud badge.
-- [ ] Warn when local provider URL is not loopback or RFC 1918 private range.
-	- Deferred to Phase 2. Owner: Aegiscudo Tech Lead | Deferred to Phase 2 | Date: 2026-05-10.
+- [x] Warn when local provider URL is not loopback or RFC 1918 private range.
+	- Closed 2026-05-18: AI Providers table now shows a boundary warning for local provider URLs outside localhost, loopback, and RFC1918 private IPv4 ranges. Focused validation passed with `pnpm --filter @aegiscudo/command-center playwright test test/e2e/admin-pages.spec.ts --grep "AI Providers"`.
 - [x] Never display actual API key after save.
 - [ ] Add tests for model selector fallback, local boundary warning, and active provider transition.
-	- Deferred to Phase 2 (depends on multi-provider abstractions above). Owner: Aegiscudo Tech Lead | Deferred to Phase 2 | Date: 2026-05-10.
+	- Partial 2026-05-18: local boundary warning is covered in the AI Providers Playwright scenario. Model selector fallback and active provider transition coverage remain deferred with their corresponding UI workflows.
 
 ## Integrations Admin
 
@@ -306,8 +306,8 @@ Auth boundary is defined by [ADR 0005](../adr/0005-interface-auth-boundary-for-l
 	- Deferred to Phase 2. Owner: Aegiscudo Tech Lead | Deferred to Phase 2 | Date: 2026-05-10.
 - [ ] Filter by time range.
 	- Deferred to Phase 2. Owner: Aegiscudo Tech Lead | Deferred to Phase 2 | Date: 2026-05-10.
-- [ ] Export audit log to CSV.
-	- Deferred to Phase 2. Owner: Aegiscudo Tech Lead | Deferred to Phase 2 | Date: 2026-05-10.
+- [x] Export audit log to CSV.
+	- Closed 2026-05-18: `aegiscudo-api` exposes `/v1/tenants/{tenant_id}/audit-events/export.csv`, the Command Center proxies it through `/api/tenants/{tenantId}/audit-events/export.csv`, and the Audit Log panel renders a filtered download link. Coverage exists in the DB-backed `audit_events_csv_export_returns_filtered_csv` contract test and the admin Playwright Audit Log scenario.
 - [ ] Implement CISO report filters by time range, tenant, registry ecosystem, team, and policy version.
 	- Deferred to Phase 2. Owner: Aegiscudo Tech Lead | Deferred to Phase 2 | Date: 2026-05-10.
 - [ ] Export MVP reports to CSV.

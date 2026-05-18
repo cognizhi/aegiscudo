@@ -138,14 +138,9 @@ pub async fn refresh_fixture_feeds(
     let http_client = build_http_client()?;
     let mut snapshots = Vec::new();
     for feed in FEEDS {
-        snapshots.push(ingest_feed_fixture(
-            pool,
-            fixture_dir,
-            &http_client,
-            &live_sources,
-            *feed,
-        )
-        .await?);
+        snapshots.push(
+            ingest_feed_fixture(pool, fixture_dir, &http_client, &live_sources, *feed).await?,
+        );
     }
     Ok(snapshots)
 }
@@ -424,7 +419,10 @@ async fn persist_scorecard_records(
 fn build_http_client() -> Result<Client, ApiError> {
     reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(FEED_HTTP_TIMEOUT_SECS))
-        .user_agent(format!("aegiscudo-feed-harvester/{}", env!("CARGO_PKG_VERSION")))
+        .user_agent(format!(
+            "aegiscudo-feed-harvester/{}",
+            env!("CARGO_PKG_VERSION")
+        ))
         .build()
         .map_err(ApiError::Http)
 }
@@ -1195,7 +1193,10 @@ fn parse_scorecard_check(value: &Value) -> Option<ScorecardCheckRecord> {
     Some(ScorecardCheckRecord {
         name: value.get("name").and_then(Value::as_str)?.to_owned(),
         score: value.get("score").and_then(Value::as_f64)?,
-        reason: value.get("reason").and_then(Value::as_str).map(str::to_owned),
+        reason: value
+            .get("reason")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
         details: value.get("details").cloned().unwrap_or_else(|| json!([])),
     })
 }
@@ -1214,10 +1215,29 @@ fn cross_ecosystem_ioc_records(feed: FeedSource, value: &Value) -> Vec<CrossEcos
                     IOC_INDICATOR_PACKAGE_NAME,
                     package_indicator_value(identity.namespace.as_deref(), &identity.name),
                 )];
-                indicators.extend(indicator_values(package, &["maintainerIdentity", "maintainerIdentities", "maintainers"]).into_iter().map(|value| (IOC_INDICATOR_MAINTAINER_IDENTITY, value)));
-                indicators.extend(indicator_values(package, &["domains", "domain"]).into_iter().map(|value| (IOC_INDICATOR_DOMAIN, value)));
-                indicators.extend(indicator_values(package, &["ips", "ip"]).into_iter().map(|value| (IOC_INDICATOR_IP, value)));
-                indicators.extend(indicator_values(package, &["urls", "url"]).into_iter().map(|value| (IOC_INDICATOR_URL, value)));
+                indicators.extend(
+                    indicator_values(
+                        package,
+                        &["maintainerIdentity", "maintainerIdentities", "maintainers"],
+                    )
+                    .into_iter()
+                    .map(|value| (IOC_INDICATOR_MAINTAINER_IDENTITY, value)),
+                );
+                indicators.extend(
+                    indicator_values(package, &["domains", "domain"])
+                        .into_iter()
+                        .map(|value| (IOC_INDICATOR_DOMAIN, value)),
+                );
+                indicators.extend(
+                    indicator_values(package, &["ips", "ip"])
+                        .into_iter()
+                        .map(|value| (IOC_INDICATOR_IP, value)),
+                );
+                indicators.extend(
+                    indicator_values(package, &["urls", "url"])
+                        .into_iter()
+                        .map(|value| (IOC_INDICATOR_URL, value)),
+                );
 
                 for (indicator_type, indicator_value) in indicators {
                     if seen.insert((
@@ -1299,7 +1319,10 @@ fn openssf_package_analysis_results(value: &Value) -> Vec<&Value> {
 }
 
 fn feed_package_identity(value: &Value) -> Option<FeedPackageIdentity> {
-    let package = value.get("package").filter(|value| value.is_object()).unwrap_or(value);
+    let package = value
+        .get("package")
+        .filter(|value| value.is_object())
+        .unwrap_or(value);
     let ecosystem = package
         .get("ecosystem")
         .and_then(Value::as_str)?
@@ -1407,15 +1430,7 @@ fn collect_stringish_values(target: &mut BTreeSet<String>, value: &Value) {
         }
         Value::Object(object) => {
             for key in [
-                "value",
-                "id",
-                "name",
-                "email",
-                "url",
-                "domain",
-                "ip",
-                "handle",
-                "login",
+                "value", "id", "name", "email", "url", "domain", "ip", "handle", "login",
             ] {
                 if let Some(candidate) = object.get(key) {
                     collect_stringish_values(target, candidate);
@@ -1442,8 +1457,14 @@ fn package_identity_from_value(value: &Value) -> Option<ParsedPurl> {
 
     let ecosystem = value.get("ecosystem").and_then(Value::as_str)?;
     let name = value.get("name").and_then(Value::as_str)?;
-    let namespace = value.get("namespace").and_then(Value::as_str).map(str::to_owned);
-    let version = value.get("version").and_then(Value::as_str).map(str::to_owned);
+    let namespace = value
+        .get("namespace")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let version = value
+        .get("version")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
 
     Some(ParsedPurl {
         purl: build_purl(ecosystem, namespace.as_deref(), name, version.as_deref()),
@@ -1476,9 +1497,15 @@ fn package_identity_from_version_key(value: &Value) -> Option<ParsedPurl> {
 fn deps_dev_version_key_from_value(value: &Value) -> Option<DepsDevVersionKey> {
     if let Some(version_key) = value.get("versionKey") {
         return Some(DepsDevVersionKey {
-            system: version_key.get("system").and_then(Value::as_str)?.to_owned(),
+            system: version_key
+                .get("system")
+                .and_then(Value::as_str)?
+                .to_owned(),
             name: version_key.get("name").and_then(Value::as_str)?.to_owned(),
-            version: version_key.get("version").and_then(Value::as_str)?.to_owned(),
+            version: version_key
+                .get("version")
+                .and_then(Value::as_str)?
+                .to_owned(),
         });
     }
 
@@ -1597,14 +1624,21 @@ fn value_to_purl(value: &Value) -> Option<String> {
 fn parse_purl(purl: &str) -> Option<ParsedPurl> {
     let raw = purl.trim().strip_prefix("pkg:")?;
     let (ecosystem, remainder) = raw.split_once('/')?;
-    let remainder = remainder.split_once('#').map_or(remainder, |(main, _)| main);
-    let remainder = remainder.split_once('?').map_or(remainder, |(main, _)| main);
+    let remainder = remainder
+        .split_once('#')
+        .map_or(remainder, |(main, _)| main);
+    let remainder = remainder
+        .split_once('?')
+        .map_or(remainder, |(main, _)| main);
     let (path_part, version) = match remainder.rsplit_once('@') {
         Some((path, version)) if !version.trim().is_empty() => (path, Some(version.to_owned())),
         Some((path, _)) => (path, None),
         None => (remainder, None),
     };
-    let mut segments: Vec<&str> = path_part.split('/').filter(|segment| !segment.is_empty()).collect();
+    let mut segments: Vec<&str> = path_part
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .collect();
     let name = segments.pop()?.to_owned();
     let namespace = (!segments.is_empty()).then(|| segments.join("/"));
 
@@ -1677,10 +1711,7 @@ fn feed_state_db_value(state: &FeedState) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::{
-        Router,
-        routing::get,
-    };
+    use axum::{Router, routing::get};
     use std::path::PathBuf;
 
     #[test]
@@ -1828,7 +1859,11 @@ mod tests {
     fn all_feed_sources_have_distinct_file_names() {
         let file_names: Vec<_> = FEEDS.iter().map(|f| f.file_name()).collect();
         let unique: std::collections::HashSet<_> = file_names.iter().collect();
-        assert_eq!(file_names.len(), unique.len(), "feed file names must be unique");
+        assert_eq!(
+            file_names.len(),
+            unique.len(),
+            "feed file names must be unique"
+        );
     }
 
     #[test]
@@ -1882,8 +1917,16 @@ mod tests {
         let edges = deps_dev_dependency_edges(&value);
 
         assert_eq!(edges.len(), 2);
-        assert!(edges.iter().any(|edge| edge.dependency_purl == "pkg:npm/body-parser@1.20.2"));
-        assert!(edges.iter().any(|edge| edge.dependency_purl == "pkg:npm/debug@4.3.4"));
+        assert!(
+            edges
+                .iter()
+                .any(|edge| edge.dependency_purl == "pkg:npm/body-parser@1.20.2")
+        );
+        assert!(
+            edges
+                .iter()
+                .any(|edge| edge.dependency_purl == "pkg:npm/debug@4.3.4")
+        );
     }
 
     #[test]
@@ -2000,8 +2043,7 @@ mod tests {
                 && record.indicator_value == "evil.example"
         }));
         assert!(records.iter().any(|record| {
-            record.indicator_type == IOC_INDICATOR_IP
-                && record.indicator_value == "203.0.113.10"
+            record.indicator_type == IOC_INDICATOR_IP && record.indicator_value == "203.0.113.10"
         }));
         assert!(records.iter().any(|record| {
             record.indicator_type == IOC_INDICATOR_URL
@@ -2032,7 +2074,10 @@ mod tests {
         let records = cross_ecosystem_ioc_records(FeedSource::OpenSsfPackageAnalysis, &value);
 
         assert_eq!(records.len(), 1);
-        assert_eq!(records[0].indicator_type, IOC_INDICATOR_BEHAVIORAL_FINGERPRINT);
+        assert_eq!(
+            records[0].indicator_type,
+            IOC_INDICATOR_BEHAVIORAL_FINGERPRINT
+        );
         assert_eq!(records[0].indicator_value, "exec_binary|network_access");
         assert_eq!(records[0].package_name, "malware-sample");
     }
@@ -2101,7 +2146,10 @@ mod tests {
 
         assert_eq!(state, FeedState::Fresh);
         let bytes = bytes.expect("live bytes should exist");
-        assert_eq!(normalized_record_count(FeedSource::DepsDev, &bytes).unwrap(), 1);
+        assert_eq!(
+            normalized_record_count(FeedSource::DepsDev, &bytes).unwrap(),
+            1
+        );
     }
 
     #[tokio::test]
@@ -2139,7 +2187,10 @@ mod tests {
 
         assert_eq!(state, FeedState::Fresh);
         let bytes = bytes.expect("live bytes should exist");
-        assert_eq!(normalized_record_count(FeedSource::DepsDev, &bytes).unwrap(), 2);
+        assert_eq!(
+            normalized_record_count(FeedSource::DepsDev, &bytes).unwrap(),
+            2
+        );
         let edges = deps_dev_dependency_edges(&serde_json::from_slice::<Value>(&bytes).unwrap());
         assert_eq!(edges.len(), 1);
     }
@@ -2224,7 +2275,10 @@ mod tests {
         handle.abort();
 
         assert_eq!(state, FeedState::Unavailable);
-        assert!(bytes.is_none(), "missing fallback fixture should stay unavailable");
+        assert!(
+            bytes.is_none(),
+            "missing fallback fixture should stay unavailable"
+        );
     }
 
     #[tokio::test]
@@ -2374,25 +2428,27 @@ mod tests {
             )
             .route(
                 "/v3/{*path}",
-                get(move |axum::extract::Path(path): axum::extract::Path<String>| {
-                    let graph_routes = graph_routes.clone();
-                    async move {
-                        let route_path = format!("/v3/{path}");
-                        if let Some((_, body)) = graph_routes
-                            .iter()
-                            .find(|(candidate_path, _)| candidate_path == &route_path)
-                        {
-                            (
-                                StatusCode::OK,
-                                [(axum::http::header::CONTENT_TYPE, "application/json")],
-                                body.clone(),
-                            )
-                                .into_response()
-                        } else {
-                            StatusCode::NOT_FOUND.into_response()
+                get(
+                    move |axum::extract::Path(path): axum::extract::Path<String>| {
+                        let graph_routes = graph_routes.clone();
+                        async move {
+                            let route_path = format!("/v3/{path}");
+                            if let Some((_, body)) = graph_routes
+                                .iter()
+                                .find(|(candidate_path, _)| candidate_path == &route_path)
+                            {
+                                (
+                                    StatusCode::OK,
+                                    [(axum::http::header::CONTENT_TYPE, "application/json")],
+                                    body.clone(),
+                                )
+                                    .into_response()
+                            } else {
+                                StatusCode::NOT_FOUND.into_response()
+                            }
                         }
-                    }
-                }),
+                    },
+                ),
             );
         let handle = tokio::spawn(async move {
             let _ = axum::serve(listener, app).await;

@@ -1,5 +1,5 @@
-use std::fs;
 use std::fmt::Write as _;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::OnceLock;
@@ -392,10 +392,8 @@ async fn persist_static_report(
     let mut transaction = pool.begin().await?;
     let report_json = validated_static_report_json(&report)?;
     let embedding_literal = static_report_embedding_literal(&report);
-    let sbom_fragment = package_sbom_fragment_json(
-        &claimed.job.coordinate,
-        &claimed.job.artifact_digest,
-    );
+    let sbom_fragment =
+        package_sbom_fragment_json(&claimed.job.coordinate, &claimed.job.artifact_digest);
     let externalized_report =
         maybe_externalize_static_report(artifact_store_dir, claimed.job.tenant_id, &report_json)?;
 
@@ -473,7 +471,7 @@ async fn persist_static_report(
     .bind(claimed.job.id)
     .bind(artifact_id)
     .bind(claimed.job.policy_snapshot_id)
-        .bind(embedding_literal.as_deref())
+    .bind(embedding_literal.as_deref())
     .bind(sqlx::types::Json(report_json))
     .bind(
         externalized_report
@@ -495,8 +493,8 @@ async fn persist_static_report(
     .execute(&mut *transaction)
     .await?;
 
-        sqlx::query(
-                r#"
+    sqlx::query(
+        r#"
                 INSERT INTO analysis_sbom_fragments (
                     analysis_job_id,
                     artifact_id,
@@ -511,14 +509,14 @@ async fn persist_static_report(
                     source = EXCLUDED.source,
                     fragment = EXCLUDED.fragment
                 "#,
-        )
-        .bind(claimed.job.id)
-        .bind(artifact_id)
-        .bind(claimed.job.tenant_id)
-        .bind(claimed.job.coordinate.purl())
-        .bind(sqlx::types::Json(sbom_fragment))
-        .execute(&mut *transaction)
-        .await?;
+    )
+    .bind(claimed.job.id)
+    .bind(artifact_id)
+    .bind(claimed.job.tenant_id)
+    .bind(claimed.job.coordinate.purl())
+    .bind(sqlx::types::Json(sbom_fragment))
+    .execute(&mut *transaction)
+    .await?;
 
     sqlx::query(
         r#"
@@ -683,9 +681,8 @@ fn static_report_embedding_literal(report: &StaticEvidence) -> Option<String> {
     for indicator in &report.indicators {
         for token in static_indicator_embedding_tokens(indicator) {
             let digest = Sha256::digest(token.as_bytes());
-            let dimension =
-                usize::from(u16::from_be_bytes([digest[0], digest[1]]))
-                    % STATIC_REPORT_EMBEDDING_DIMENSIONS;
+            let dimension = usize::from(u16::from_be_bytes([digest[0], digest[1]]))
+                % STATIC_REPORT_EMBEDDING_DIMENSIONS;
             let sign = if digest[2] & 1 == 0 { 1_f32 } else { -1_f32 };
             embedding[dimension] += sign;
             token_count += 1;
@@ -704,7 +701,11 @@ fn static_report_embedding_literal(report: &StaticEvidence) -> Option<String> {
         return None;
     }
 
-    let magnitude = embedding.iter().map(|value| value * value).sum::<f32>().sqrt();
+    let magnitude = embedding
+        .iter()
+        .map(|value| value * value)
+        .sum::<f32>()
+        .sqrt();
     if magnitude <= f32::EPSILON {
         return None;
     }
@@ -893,7 +894,10 @@ mod tests {
         let second = static_report_embedding_literal(&report).unwrap();
 
         assert_eq!(first, second);
-        assert_eq!(parse_vector_literal(&first).len(), STATIC_REPORT_EMBEDDING_DIMENSIONS);
+        assert_eq!(
+            parse_vector_literal(&first).len(),
+            STATIC_REPORT_EMBEDDING_DIMENSIONS
+        );
     }
 
     #[test]
@@ -945,17 +949,16 @@ mod tests {
 
     #[test]
     fn package_sbom_fragment_json_preserves_namespace_when_present() {
-        let coordinate = PackageCoordinate::new(
-            PackageEcosystem::Npm,
-            "core",
-            Some("7.29.0"),
-            Some("babel"),
-        );
+        let coordinate =
+            PackageCoordinate::new(PackageEcosystem::Npm, "core", Some("7.29.0"), Some("babel"));
         let artifact_digest = ArtifactDigest::sha256("c".repeat(64)).unwrap();
 
         let fragment = package_sbom_fragment_json(&coordinate, &artifact_digest);
 
-        assert_eq!(fragment["components"][0]["purl"], "pkg:npm/babel/core@7.29.0");
+        assert_eq!(
+            fragment["components"][0]["purl"],
+            "pkg:npm/babel/core@7.29.0"
+        );
         assert_eq!(fragment["components"][0]["namespace"], "babel");
     }
 

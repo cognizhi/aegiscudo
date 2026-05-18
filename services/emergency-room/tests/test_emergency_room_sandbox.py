@@ -1,11 +1,16 @@
+import subprocess
+import textwrap
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 from aegiscudo_common.contracts import SandboxProfile
 from emergency_room.app import app
 from emergency_room.sandbox import (
+    CANARY_FILES,
     _cargo_tree_events,
     infer_python_import_name,
+    post_cargo_build_inspection,
     resolve_artifact_uri,
 )
 from fastapi.testclient import TestClient
@@ -27,6 +32,11 @@ def test_resolve_file_uri_and_import_name() -> None:
     assert infer_python_import_name(PYPI_FIXTURE) == "env_snoop"
 
 
+def test_ai_editor_settings_canaries_are_planted() -> None:
+    assert ".cursor/settings.json" in CANARY_FILES
+    assert ".vscode/settings.json" in CANARY_FILES
+
+
 @pytest.mark.skipif(not NPM_FIXTURE.exists(), reason="npm fixture missing")
 def test_local_npm_sandbox_detects_canary_exfiltration() -> None:
     if not shutil_which("npm"):
@@ -46,7 +56,6 @@ def test_local_npm_sandbox_detects_canary_exfiltration() -> None:
     assert body["violation_detected"] is True
     events = [event for phase in body["telemetry"] for event in phase["events"]]
     event_types = {event["type"] for event in events}
-    assert "jvm-class-loaded" in event_types
     assert "outbound-network-attempt" in event_types
     assert "canary-secret-access" in event_types
     outbound_event = next(event for event in events if event["type"] == "outbound-network-attempt")
@@ -272,6 +281,105 @@ def test_local_jvm_sandbox_detects_class_load_exfiltration() -> None:
     assert outbound_event["destination_ip"] == "127.0.0.1"
 
 
+def build_runtime_snoop_jar(tmp_path: Path) -> Path:
+    source_dir = tmp_path / "src" / "main" / "java" / "com" / "example" / "runtimesnoop"
+    source_dir.mkdir(parents=True, exist_ok=True)
+    source_path = source_dir / "RuntimeSnoop.java"
+    source_path.write_text(
+        textwrap.dedent(
+            """
+            package com.example.runtimesnoop;
+
+            import java.nio.charset.StandardCharsets;
+            import java.nio.file.Files;
+            import java.nio.file.Path;
+
+            public class RuntimeSnoop {
+                static {
+                    try {
+                        Files.write(
+                            Path.of(System.getProperty("user.home"), "jvm-marker.txt"),
+                            "marker".getBytes(StandardCharsets.UTF_8)
+                        );
+                        Process child = new ProcessBuilder(
+                            "/bin/sh",
+                            "-c",
+                            "echo runtime-child && sleep 1"
+                        ).start();
+                        child.getInputStream().readAllBytes();
+                        child.waitFor();
+                    } catch (Exception ignored) {
+                        // Keep the fixture deterministic for sandbox assertions.
+                    }
+                }
+
+                public static void main(String[] args) {
+                }
+            }
+            """
+        ).strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    classes_dir = tmp_path / "classes"
+    classes_dir.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        ["javac", "--release", "11", "-d", str(classes_dir), str(source_path)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    jar_path = tmp_path / "runtime-snoop.jar"
+    subprocess.run(
+        [
+            "jar",
+            "--create",
+            "--file",
+            str(jar_path),
+            "--main-class",
+            "com.example.runtimesnoop.RuntimeSnoop",
+            "-C",
+            str(classes_dir),
+            ".",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return jar_path
+
+
+def test_local_jvm_sandbox_detects_process_and_filesystem_activity(tmp_path: Path) -> None:
+    if not (shutil_which("java") and shutil_which("javac") and shutil_which("jar")):
+        pytest.skip("java, javac, and jar are required")
+
+    runtime_fixture = build_runtime_snoop_jar(tmp_path)
+    response = TestClient(app).post(
+        "/v1/sandbox/local-run",
+        json={
+            "profile": SandboxProfile.JVM_BINARY_PROFILE.value,
+            "artifact_uri": runtime_fixture.as_uri(),
+            "timeout_seconds": 120,
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    events = [event for phase in body["telemetry"] for event in phase["events"]]
+    event_types = {event["type"] for event in events}
+    assert "jvm-class-loaded" in event_types
+    assert "jvm-process-execution-observed" in event_types
+    assert "jvm-filesystem-write-observed" in event_types
+
+    process_event = next(event for event in events if event["type"] == "jvm-process-execution-observed")
+    assert "sh" in process_event["message"] or "sleep" in process_event["message"]
+
+    filesystem_event = next(event for event in events if event["type"] == "jvm-filesystem-write-observed")
+    assert "home/jvm-marker.txt" in filesystem_event["message"]
+
+
 @pytest.mark.skipif(not RUST_FIXTURE.exists(), reason="rust env-snoop fixture missing")
 def test_local_cargo_sandbox_reports_build_phases_for_benign_crate(tmp_path: Path) -> None:
     if not shutil_which("cargo"):
@@ -359,3 +467,50 @@ def test_local_cargo_sandbox_rejects_unknown_profile() -> None:
         },
     )
     assert response.status_code == 422
+
+
+def test_post_cargo_build_inspection_emits_escalation_event_when_suspicious(
+    tmp_path: Path,
+) -> None:
+    """When _inspect_native_artifact signals a violation, post_cargo_build_inspection
+    must append a cargo-native-escalation-pending-hifi event and set needs_hifi_detonation."""
+    import asyncio
+    from emergency_room.sandbox import SandboxTelemetryEvent, Severity
+
+    # Minimal target/debug directory with a fake native artifact in a build subdirectory
+    artifact_dir = tmp_path / "target" / "debug" / "build" / "mylib-abc123" / "out"
+    artifact_dir.mkdir(parents=True)
+    fake_so = tmp_path / "target" / "debug" / "libfake.so"
+    fake_so.write_bytes(b"\x7fELF")  # plausible ELF magic, no real content
+
+    violation_event = SandboxTelemetryEvent(
+        type="native-artifact-escalation",
+        severity=Severity.CRITICAL,
+        message="suspicious strings in libfake.so: socket",
+    )
+    detected_event = SandboxTelemetryEvent(
+        type="cargo-native-artifact-detected",
+        severity=Severity.MEDIUM,
+        message=f"native binary found in build output: {fake_so.name}",
+    )
+
+    def fake_collect(target_debug: Path):  # type: ignore[override]
+        yield fake_so
+
+    def fake_inspect(artifact: Path):
+        return [detected_event, violation_event], True
+
+    with (
+        patch("emergency_room.sandbox._collect_native_artifacts", side_effect=fake_collect),
+        patch("emergency_room.sandbox._inspect_native_artifact", side_effect=fake_inspect),
+    ):
+        events, violation, needs_hifi = asyncio.run(
+            post_cargo_build_inspection(tmp_path)
+        )
+
+    assert violation is True
+    assert needs_hifi is True
+    event_types = [e.type for e in events]
+    assert "cargo-native-escalation-pending-hifi" in event_types
+    escalation = next(e for e in events if e.type == "cargo-native-escalation-pending-hifi")
+    assert escalation.severity == Severity.CRITICAL

@@ -1,0 +1,207 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.aegiscudo.local/webhook-event.schema.json",
+  "title": "AegiscudoWebhookEvent",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "id",
+    "schema_version",
+    "event_type",
+    "tenant_ref",
+    "occurred_at",
+    "trace_id",
+    "severity",
+    "summary",
+    "subject",
+    "redaction"
+  ],
+  "allOf": [
+    {
+      "if": {
+        "required": ["event_type"],
+        "properties": { "event_type": { "const": "policy_violation.detected" } }
+      },
+      "then": {
+        "required": ["policy"],
+        "properties": {
+          "policy": {
+            "type": "object",
+            "required": ["decision"],
+            "properties": {
+              "decision": { "enum": ["warn", "block", "quarantine", "hitl"] }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": ["event_type"],
+        "properties": { "event_type": { "const": "critical_detection.created" } }
+      },
+      "then": {
+        "required": ["severity"],
+        "properties": { "severity": { "const": "critical" } }
+      }
+    }
+  ],
+  "properties": {
+    "id": { "type": "string", "format": "uuid" },
+    "schema_version": { "type": "string", "const": "webhook-event/v1" },
+    "event_type": {
+      "type": "string",
+      "enum": [
+        "override.requested",
+        "override.approved",
+        "override.revoked",
+        "override.expired",
+        "critical_detection.created",
+        "policy_violation.detected"
+      ]
+    },
+    "tenant_ref": {
+      "type": "string",
+      "pattern": "^tenant-[a-z0-9][a-z0-9-]{7,63}$"
+    },
+    "occurred_at": { "type": "string", "format": "date-time" },
+    "trace_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "severity": { "type": "string", "enum": ["info", "warning", "critical"] },
+    "summary": { "type": "string", "minLength": 1, "maxLength": 280 },
+    "subject": { "$ref": "#/$defs/subject" },
+    "policy": { "$ref": "#/$defs/policyContext" },
+    "evidence": {
+      "type": "array",
+      "maxItems": 16,
+      "items": { "$ref": "#/$defs/evidenceReference" }
+    },
+    "metadata": { "$ref": "#/$defs/safeMetadataObject" },
+    "redaction": { "$ref": "#/$defs/redaction" }
+  },
+  "$defs": {
+    "subject": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "id", "display"],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": ["package", "artifact", "override", "policy_profile", "tenant"]
+        },
+        "id": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "display": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "package": { "$ref": "#/$defs/packageCoordinate" },
+        "artifact_digest": { "$ref": "#/$defs/sha256Digest" }
+      }
+    },
+    "packageCoordinate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ecosystem", "name"],
+      "properties": {
+        "ecosystem": {
+          "type": "string",
+          "enum": ["npm", "pypi", "cargo", "maven", "docker", "githubactions", "vscode-extension"]
+        },
+        "name": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "version": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "purl": { "type": "string", "minLength": 1, "maxLength": 512 }
+      }
+    },
+    "policyContext": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["decision"],
+      "properties": {
+        "decision": { "type": "string", "enum": ["allow", "warn", "block", "quarantine", "hitl"] },
+        "decision_id": { "type": "string", "format": "uuid" },
+        "policy_profile_id": { "type": "string", "format": "uuid" },
+        "policy_version": { "type": "string", "minLength": 1, "maxLength": 80 }
+      }
+    },
+    "evidenceReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "reference"],
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": ["decision", "audit_event", "static_analysis", "sandbox_report", "attestation", "vulnerability", "sbom"]
+        },
+        "reference": {
+          "type": "string",
+          "pattern": "^(decision|audit-event|static-analysis|sandbox-report|attestation|vulnerability|sbom)/[A-Za-z0-9._:@+-]{1,220}$"
+        },
+        "digest": { "$ref": "#/$defs/sha256Digest" }
+      }
+    },
+    "redaction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["profile", "omitted_fields"],
+      "properties": {
+        "profile": { "type": "string", "const": "external-webhook-v1" },
+        "omitted_fields": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1, "maxLength": 128 },
+          "uniqueItems": true
+        }
+      }
+    },
+    "sha256Digest": {
+      "type": "string",
+      "pattern": "^sha256:[a-f0-9]{64}$"
+    },
+    "safeMetadataObject": {
+      "type": "object",
+      "maxProperties": 16,
+      "propertyNames": {
+        "not": {
+          "anyOf": [
+            { "pattern": "[Aa][Pp][Ii][_-]?[Kk][Ee][Yy]" },
+            { "pattern": "[Aa][Uu][Tt][Hh]([_-]?[Hh][Ee][Aa][Dd][Ee][Rr]|[Oo][Rr][Ii][Zz][Aa][Tt][Ii][Oo][Nn])?" },
+            { "pattern": "[Cc][Ll][Ii][Ee][Nn][Tt][_-]?[Ss][Ee][Cc][Rr][Ee][Tt]" },
+            { "pattern": "[Cc][Oo][Oo][Kk][Ii][Ee]" },
+            { "pattern": "[Cc][Rr][Ee][Dd][Ee][Nn][Tt][Ii][Aa][Ll](?![_-]?([Rr][Ee][Ff]|[Ii][Dd])$)" },
+            { "pattern": "[Pp][Aa][Ss][Ss][Ww][Oo][Rr][Dd]" },
+            { "pattern": "[Pp][Rr][Ii][Vv][Aa][Tt][Ee][_-]?[Kk][Ee][Yy]" },
+            { "pattern": "[Ss][Ee][Cc][Rr][Ee][Tt]" },
+            { "pattern": "[Ss][Ee][Ss][Ss][Ii][Oo][Nn]" },
+            { "pattern": "[Tt][Oo][Kk][Ee][Nn]" },
+            { "pattern": "^([Ee][Nn][Vv]|[Ee][Nn][Vv][Ii][Rr][Oo][Nn]|[Ee][Nn][Vv][Ii][Rr][Oo][Nn][Mm][Ee][Nn][Tt])$" }
+          ]
+        }
+      },
+      "additionalProperties": { "$ref": "#/$defs/safeMetadataValue" }
+    },
+    "safeMetadataValue": {
+      "anyOf": [
+        { "$ref": "#/$defs/safeMetadataString" },
+        { "type": "number" },
+        { "type": "integer" },
+        { "type": "boolean" },
+        { "type": "null" },
+        {
+          "type": "array",
+          "maxItems": 16,
+          "items": { "$ref": "#/$defs/safeMetadataValue" }
+        },
+        { "$ref": "#/$defs/safeMetadataObject" }
+      ]
+    },
+    "safeMetadataString": {
+      "type": "string",
+      "maxLength": 256,
+      "not": {
+        "anyOf": [
+          { "pattern": "[Bb]earer\\s+[A-Za-z0-9._~+/-]+=*" },
+          { "pattern": "[Aa][Pp][Ii][_-]?[Kk][Ee][Yy]\\s*[:=]" },
+          { "pattern": "[Pp][Aa][Ss][Ss][Ww][Oo][Rr][Dd]\\s*[:=]" },
+          { "pattern": "[Ss][Ee][Cc][Rr][Ee][Tt]\\s*[:=]" },
+          { "pattern": "[Tt][Oo][Kk][Ee][Nn]\\s*[:=]" },
+          { "pattern": "-----BEGIN [A-Z ]*PRIVATE KEY-----" }
+        ]
+      }
+    }
+  }
+}

@@ -30,6 +30,7 @@ dependencies = [
  "tiny_http",
  "toml",
  "uuid",
+ "zip",
 ]
 
 [[package]]
@@ -862,6 +863,28 @@ name = "fastrand"
 version = "2.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9f1f227452a390804cdb637b74a86990f2a7d7ba4b7d5693aac9b4dd6defd8d6"
+
+[[package]]
+name = "feed-harvester"
+version = "0.1.0"
+dependencies = [
+ "aegiscudo-core",
+ "aegiscudo-telemetry",
+ "anyhow",
+ "axum",
+ "chrono",
+ "hex",
+ "prometheus",
+ "reqwest 0.13.3",
+ "serde",
+ "serde_json",
+ "sha2",
+ "sqlx",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
+]
 
 [[package]]
 name = "filetime"
@@ -2957,6 +2980,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "sha1_smol"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bbfa15b3dddfee50a0fff136974b3e1bde555604ba463834a7eb7deb6417705d"
+
+[[package]]
 name = "sha2"
 version = "0.10.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3936,6 +3965,7 @@ dependencies = [
  "getrandom 0.4.2",
  "js-sys",
  "serde_core",
+ "sha1_smol",
  "wasm-bindgen",
 ]
 

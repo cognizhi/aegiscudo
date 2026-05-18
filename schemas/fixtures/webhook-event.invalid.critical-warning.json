@@ -1,0 +1,19 @@
+{
+  "id": "00000000-0000-0000-0000-000000000904",
+  "schema_version": "webhook-event/v1",
+  "event_type": "critical_detection.created",
+  "tenant_ref": "tenant-acme-prod-01",
+  "occurred_at": "2026-05-18T18:20:00Z",
+  "trace_id": "trace-webhook-critical-warning",
+  "severity": "warning",
+  "summary": "Critical detection event must carry critical severity.",
+  "subject": {
+    "kind": "artifact",
+    "id": "artifact/sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "display": "artifact sha256:cccccccccccc"
+  },
+  "redaction": {
+    "profile": "external-webhook-v1",
+    "omitted_fields": ["raw_package"]
+  }
+}

@@ -178,7 +178,8 @@ Progress note: 2026-05-07 Feed Harvester MVP service ingests deterministic OSV, 
 - [x] Implement tarball download proxy route.
 - [x] Preserve npm package-manager compatibility for npm, yarn, pnpm, and bun fixture clients where practical.
 - [x] Preserve `dist.integrity`, `dist.shasum`, and tarball digest evidence.
-- [ ] Implement dist-tag policy rewrite for eligible `latest` resolution.
+- [x] Implement dist-tag policy rewrite for eligible `latest` resolution.
+	- Closed 2026-05-10: Mosquito Net rewrites versionless npm packument `dist-tags.latest` to the approved fallback candidate while pruning disallowed versions. The live-local fallback test proves `npm install aegiscudo-benign-npm-fixture` resolves the prior approved `1.0.0` candidate through the proxy.
 - [x] Implement fallback to newest approved candidate when policy permits.
 - [x] Add explicit guard preventing fallback for explicit version route.
 - [x] Add explicit guard preventing fallback for tarball URL requests.
@@ -193,8 +194,8 @@ Progress note: 2026-05-07 Feed Harvester MVP service ingests deterministic OSV, 
 - [ ] Store normalized attestation evidence and raw attestation object digest.
 - [ ] Treat missing attestation as configurable risk signal, not automatic block.
 - [ ] Add fixture tests for signed, unsigned, stale-key, invalid-signature, and missing-provenance packages.
-- [ ] Add fixture tests for `latest` fallback and lockfile substitution regression.
-	- Partial: Mosquito Net regression tests now cover fallback metadata substitution and explicit version/tarball non-substitution. End-to-end package-manager fixture client coverage remains open.
+- [x] Add fixture tests for `latest` fallback and lockfile substitution regression.
+	- Closed 2026-05-10: ignored live-local Mosquito Net tests cover both package-manager paths: versionless `npm install` falls back to the approved `1.0.0` metadata candidate, while `npm ci` with a lockfile generated against pinned `1.2.0` integrity installs that pinned artifact through the proxy without fallback.
 
 ## PyPI Adapter
 
@@ -228,7 +229,8 @@ Progress note: 2026-05-07 Feed Harvester MVP service ingests deterministic OSV, 
 - [x] Implement FIRST EPSS batch or CSV ingestion; support historic-date queries for trend data where practical.
 	- Fixture-backed CSV ingestion is implemented; historic-date live queries remain open.
 - [ ] Implement optional GCVE ingestion if MVP capacity permits.
-- [ ] Add OpenSSF Package Analysis (GCS public bucket) ingestion as an optional Phase 1A feed; defer to Phase 2 if capacity is insufficient.
+- [x] Add OpenSSF Package Analysis (GCS public bucket) ingestion as an optional Phase 1A feed; defer to Phase 2 if capacity is insufficient.
+	- Closed 2026-05-12: Feed Harvester now includes `openssf-package-analysis` as a first-class feed source, fixture file, normalized snapshot input, and IOC behavioral-fingerprint source. Focused feed-harvester tests cover record counts and behavioral-fingerprint IOC extraction.
 - [x] Persist normalized last-successful snapshot per feed.
 - [x] Expose feed state as `fresh`, `stale`, `degraded`, or `unavailable`.
 - [ ] Implement conditional requests where supported.

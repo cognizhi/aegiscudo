@@ -198,13 +198,8 @@ async fn generate_sbom(
     let size_bytes = bytes.len() as u64;
 
     let id = Uuid::new_v4();
-    let storage_uri = write_sbom_to_store(
-        &state.config.sbom_store_dir,
-        resolved.tenant_id,
-        id,
-        &bytes,
-    )
-    .await?;
+    let storage_uri =
+        write_sbom_to_store(&state.config.sbom_store_dir, resolved.tenant_id, id, &bytes).await?;
 
     let component_count = resolved.components.len() as i32;
     let now: DateTime<Utc> = Utc::now();
@@ -413,9 +408,11 @@ async fn resolve_generate_components(
         });
     }
 
-    let analysis_job_id = req
-        .analysis_job_id
-        .ok_or_else(|| ApiError::InvalidRequest("analysis_job_id is required when components are omitted".to_owned()))?;
+    let analysis_job_id = req.analysis_job_id.ok_or_else(|| {
+        ApiError::InvalidRequest(
+            "analysis_job_id is required when components are omitted".to_owned(),
+        )
+    })?;
 
     load_analysis_job_components(pool, analysis_job_id, req.tenant_id).await
 }
@@ -623,9 +620,10 @@ fn stored_fragment_components(
     decision: Option<&str>,
     decided_at: Option<DateTime<Utc>>,
 ) -> Result<Vec<SbomComponentInput>, ApiError> {
-    let fragment: StoredSbomFragment = serde_json::from_value(fragment.clone()).map_err(|error| {
-        ApiError::InvalidRequest(format!("stored SBOM fragment is invalid: {error}"))
-    })?;
+    let fragment: StoredSbomFragment =
+        serde_json::from_value(fragment.clone()).map_err(|error| {
+            ApiError::InvalidRequest(format!("stored SBOM fragment is invalid: {error}"))
+        })?;
 
     Ok(fragment
         .components
@@ -776,7 +774,9 @@ fn validate_ntia_minimum_elements(format: &str, document: &Value) -> NtiaValidat
     let issues = match format {
         "cyclonedx-1.7-json" | "cyclonedx-1.6-json" => validate_cyclonedx_ntia(document),
         "spdx-2.3-json" => validate_spdx_ntia(document),
-        other => vec![format!("unsupported SBOM format for NTIA validation: {other}")],
+        other => vec![format!(
+            "unsupported SBOM format for NTIA validation: {other}"
+        )],
     };
 
     NtiaValidationResult {
@@ -884,21 +884,19 @@ pub fn generate_spdx23(source: &str, components: &[SbomComponentInput]) -> Value
     );
     let root_id = "SPDXRef-Root";
 
-    let mut packages: Vec<Value> = vec![
-        json!({
-            "SPDXID": root_id,
-            "name": source,
-            "versionInfo": "NOASSERTION",
-            "downloadLocation": "NOASSERTION",
-            "filesAnalyzed": false,
-            "supplier": "NOASSERTION",
-            "licenseConcluded": "NOASSERTION",
-            "licenseDeclared": "NOASSERTION",
-            "copyrightText": "NOASSERTION",
-            "primaryPackagePurpose": "APPLICATION",
-            "comment": format!("Generated from {source}")
-        }),
-    ];
+    let mut packages: Vec<Value> = vec![json!({
+        "SPDXID": root_id,
+        "name": source,
+        "versionInfo": "NOASSERTION",
+        "downloadLocation": "NOASSERTION",
+        "filesAnalyzed": false,
+        "supplier": "NOASSERTION",
+        "licenseConcluded": "NOASSERTION",
+        "licenseDeclared": "NOASSERTION",
+        "copyrightText": "NOASSERTION",
+        "primaryPackagePurpose": "APPLICATION",
+        "comment": format!("Generated from {source}")
+    })];
     let mut relationships: Vec<Value> = vec![json!({
         "spdxElementId": "SPDXRef-DOCUMENT",
         "relationshipType": "DESCRIBES",
@@ -1099,12 +1097,10 @@ fn file_storage_uri(path: &std::path::Path) -> Result<String, ApiError> {
 }
 
 fn uri_to_path(uri: &str) -> Result<std::path::PathBuf, ApiError> {
-    let path = uri
-        .strip_prefix("file://")
-        .ok_or_else(|| {
-            tracing::error!("SBOM storage URI has unsupported scheme");
-            ApiError::Storage("unsupported URI scheme".to_owned())
-        })?;
+    let path = uri.strip_prefix("file://").ok_or_else(|| {
+        tracing::error!("SBOM storage URI has unsupported scheme");
+        ApiError::Storage("unsupported URI scheme".to_owned())
+    })?;
     Ok(std::path::PathBuf::from(path))
 }
 
@@ -1235,8 +1231,7 @@ fn validate_spdx_ntia(document: &Value) -> Vec<String> {
     };
     if !relationships.iter().any(|relationship| {
         relationship.get("spdxElementId") == Some(&Value::String("SPDXRef-DOCUMENT".to_owned()))
-            && relationship.get("relationshipType")
-                == Some(&Value::String("DESCRIBES".to_owned()))
+            && relationship.get("relationshipType") == Some(&Value::String("DESCRIBES".to_owned()))
             && relationship.get("relatedSpdxElement")
                 == Some(&Value::String("SPDXRef-Root".to_owned()))
     }) {
@@ -1271,8 +1266,7 @@ fn has_spdx_purl_external_ref(package: &Value) -> bool {
             external_refs.iter().any(|external_ref| {
                 external_ref.get("referenceCategory")
                     == Some(&Value::String("PACKAGE-MANAGER".to_owned()))
-                    && external_ref.get("referenceType")
-                        == Some(&Value::String("purl".to_owned()))
+                    && external_ref.get("referenceType") == Some(&Value::String("purl".to_owned()))
             })
         })
 }
@@ -1325,7 +1319,10 @@ mod tests {
                 ecosystem: PackageEcosystem::Npm,
                 version: Some("4.17.21".to_owned()),
                 namespace: None,
-                integrity: Some("sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abcd".to_owned()),
+                integrity: Some(
+                    "sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abcd"
+                        .to_owned(),
+                ),
                 decision: "allow".to_owned(),
                 decision_timestamp: Some("2026-05-13T12:00:00Z".to_owned()),
             },
@@ -1348,7 +1345,12 @@ mod tests {
 
         assert_eq!(doc["bomFormat"], "CycloneDX");
         assert_eq!(doc["specVersion"], "1.7");
-        assert!(doc["serialNumber"].as_str().unwrap().starts_with("urn:uuid:"));
+        assert!(
+            doc["serialNumber"]
+                .as_str()
+                .unwrap()
+                .starts_with("urn:uuid:")
+        );
         assert_eq!(doc["version"], 1);
     }
 
@@ -1402,7 +1404,9 @@ mod tests {
         let components = doc["components"].as_array().unwrap();
         let express = &components[1];
 
-        assert!(express.get("hashes").is_none() || express["hashes"].as_array().unwrap().is_empty());
+        assert!(
+            express.get("hashes").is_none() || express["hashes"].as_array().unwrap().is_empty()
+        );
     }
 
     #[test]
@@ -1432,10 +1436,12 @@ mod tests {
 
         assert_eq!(doc["spdxVersion"], "SPDX-2.3");
         assert_eq!(doc["dataLicense"], "CC0-1.0");
-        assert!(doc["documentNamespace"]
-            .as_str()
-            .unwrap()
-            .starts_with("https://aegiscudo.io/sbom/"));
+        assert!(
+            doc["documentNamespace"]
+                .as_str()
+                .unwrap()
+                .starts_with("https://aegiscudo.io/sbom/")
+        );
     }
 
     #[test]
@@ -1462,12 +1468,16 @@ mod tests {
         assert_eq!(rels[0]["spdxElementId"], "SPDXRef-DOCUMENT");
         assert_eq!(rels[0]["relationshipType"], "DESCRIBES");
         assert_eq!(rels[0]["relatedSpdxElement"], "SPDXRef-Root");
-        assert!(rels[1..]
-            .iter()
-            .all(|r| r["spdxElementId"] == "SPDXRef-Root"));
-        assert!(rels[1..]
-            .iter()
-            .all(|r| r["relationshipType"] == "DEPENDS_ON"));
+        assert!(
+            rels[1..]
+                .iter()
+                .all(|r| r["spdxElementId"] == "SPDXRef-Root")
+        );
+        assert!(
+            rels[1..]
+                .iter()
+                .all(|r| r["relationshipType"] == "DEPENDS_ON")
+        );
     }
 
     #[test]
@@ -1536,7 +1546,10 @@ mod tests {
 
     #[test]
     fn resolve_sbom_list_limit_defaults_and_clamps() {
-        assert_eq!(resolve_sbom_list_limit(None).unwrap(), DEFAULT_SBOM_LIST_LIMIT);
+        assert_eq!(
+            resolve_sbom_list_limit(None).unwrap(),
+            DEFAULT_SBOM_LIST_LIMIT
+        );
         assert_eq!(resolve_sbom_list_limit(Some(3)).unwrap(), 3);
         assert_eq!(
             resolve_sbom_list_limit(Some(MAX_SBOM_LIST_LIMIT + 25)).unwrap(),
@@ -1553,11 +1566,8 @@ mod tests {
 
     #[test]
     fn sbom_download_filename_sanitizes_source_and_format() {
-        let filename = sbom_download_filename(
-            "Cargo lock / workspace",
-            "cyclonedx-1.7-json",
-            Uuid::nil(),
-        );
+        let filename =
+            sbom_download_filename("Cargo lock / workspace", "cyclonedx-1.7-json", Uuid::nil());
 
         assert_eq!(
             filename,
@@ -1619,14 +1629,18 @@ mod tests {
         let doc = generate_spdx23("test-project", &sample_components());
         let packages = doc["packages"].as_array().unwrap();
 
-        assert!(packages[1]["comment"]
-            .as_str()
-            .unwrap()
-            .contains("ecosystem=npm"));
-        assert!(packages[1]["comment"]
-            .as_str()
-            .unwrap()
-            .contains("Aegiscudo decision=allow"));
+        assert!(
+            packages[1]["comment"]
+                .as_str()
+                .unwrap()
+                .contains("ecosystem=npm")
+        );
+        assert!(
+            packages[1]["comment"]
+                .as_str()
+                .unwrap()
+                .contains("Aegiscudo decision=allow")
+        );
     }
 
     #[test]
@@ -1656,10 +1670,12 @@ mod tests {
         let validation = validate_ntia_minimum_elements("cyclonedx-1.7-json", &doc);
 
         assert!(!validation.valid);
-        assert!(validation
-            .issues
-            .iter()
-            .any(|issue| issue.contains("components[0].version")));
+        assert!(
+            validation
+                .issues
+                .iter()
+                .any(|issue| issue.contains("components[0].version"))
+        );
     }
 
     #[test]
@@ -1723,86 +1739,83 @@ mod tests {
     }
 }
 
-    #[test]
-    fn validate_generate_request_allows_analysis_job_without_inline_components() {
-        let request = GenerateSbomRequest {
-            source: "analysis-job".to_owned(),
-            format: SbomFormatSpec::CycloneDx17,
-            components: Vec::new(),
-            analysis_job_id: Some(Uuid::new_v4()),
-            tenant_id: None,
-        };
+#[test]
+fn validate_generate_request_allows_analysis_job_without_inline_components() {
+    let request = GenerateSbomRequest {
+        source: "analysis-job".to_owned(),
+        format: SbomFormatSpec::CycloneDx17,
+        components: Vec::new(),
+        analysis_job_id: Some(Uuid::new_v4()),
+        tenant_id: None,
+    };
 
-        assert!(validate_generate_request(&request).is_ok());
-    }
+    assert!(validate_generate_request(&request).is_ok());
+}
 
-    #[test]
-    fn validate_generate_request_rejects_empty_components_without_analysis_job() {
-        let request = GenerateSbomRequest {
-            source: "analysis-job".to_owned(),
-            format: SbomFormatSpec::CycloneDx17,
-            components: Vec::new(),
-            analysis_job_id: None,
-            tenant_id: None,
-        };
+#[test]
+fn validate_generate_request_rejects_empty_components_without_analysis_job() {
+    let request = GenerateSbomRequest {
+        source: "analysis-job".to_owned(),
+        format: SbomFormatSpec::CycloneDx17,
+        components: Vec::new(),
+        analysis_job_id: None,
+        tenant_id: None,
+    };
 
-        let error = validate_generate_request(&request).unwrap_err();
-        assert_eq!(
-            error.to_string(),
-            "invalid request: components must not be empty when analysis_job_id is absent"
-        );
-    }
+    let error = validate_generate_request(&request).unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "invalid request: components must not be empty when analysis_job_id is absent"
+    );
+}
 
-    #[test]
-    fn stored_fragment_components_applies_decision_context() {
-        let fragment = json!({
-            "components": [{
-                "purl": "pkg:cargo/serde@1.0.217",
-                "name": "serde",
-                "ecosystem": "cargo",
-                "version": "1.0.217",
-                "namespace": null,
-                "integrity": "sha256:abc123"
-            }],
-            "dependency_edges": []
-        });
+#[test]
+fn stored_fragment_components_applies_decision_context() {
+    let fragment = json!({
+        "components": [{
+            "purl": "pkg:cargo/serde@1.0.217",
+            "name": "serde",
+            "ecosystem": "cargo",
+            "version": "1.0.217",
+            "namespace": null,
+            "integrity": "sha256:abc123"
+        }],
+        "dependency_edges": []
+    });
 
-        let decided_at = DateTime::parse_from_rfc3339("2026-05-14T12:00:00Z")
-            .unwrap()
-            .with_timezone(&Utc);
-        let components = stored_fragment_components(
-            &fragment,
-            Some("ALLOW_WITH_WARNING"),
-            Some(decided_at),
-        )
-        .unwrap();
+    let decided_at = DateTime::parse_from_rfc3339("2026-05-14T12:00:00Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    let components =
+        stored_fragment_components(&fragment, Some("ALLOW_WITH_WARNING"), Some(decided_at))
+            .unwrap();
 
-        assert_eq!(components.len(), 1);
-        assert_eq!(components[0].decision, "ALLOW_WITH_WARNING");
-        assert_eq!(
-            components[0].decision_timestamp.as_deref(),
-            Some("2026-05-14T12:00:00Z")
-        );
-    }
+    assert_eq!(components.len(), 1);
+    assert_eq!(components[0].decision, "ALLOW_WITH_WARNING");
+    assert_eq!(
+        components[0].decision_timestamp.as_deref(),
+        Some("2026-05-14T12:00:00Z")
+    );
+}
 
-    #[test]
-    fn stored_fragment_components_defaults_decision_to_unknown() {
-        let fragment = json!({
-            "components": [{
-                "purl": "pkg:npm/babel/core@7.29.0",
-                "name": "core",
-                "ecosystem": "npm",
-                "version": "7.29.0",
-                "namespace": "babel",
-                "integrity": null
-            }],
-            "dependency_edges": []
-        });
+#[test]
+fn stored_fragment_components_defaults_decision_to_unknown() {
+    let fragment = json!({
+        "components": [{
+            "purl": "pkg:npm/babel/core@7.29.0",
+            "name": "core",
+            "ecosystem": "npm",
+            "version": "7.29.0",
+            "namespace": "babel",
+            "integrity": null
+        }],
+        "dependency_edges": []
+    });
 
-        let components = stored_fragment_components(&fragment, None, None).unwrap();
+    let components = stored_fragment_components(&fragment, None, None).unwrap();
 
-        assert_eq!(components.len(), 1);
-        assert_eq!(components[0].decision, "unknown");
-        assert_eq!(components[0].namespace.as_deref(), Some("babel"));
-        assert!(components[0].decision_timestamp.is_none());
-    }
+    assert_eq!(components.len(), 1);
+    assert_eq!(components[0].decision, "unknown");
+    assert_eq!(components[0].namespace.as_deref(), Some("babel"));
+    assert!(components[0].decision_timestamp.is_none());
+}

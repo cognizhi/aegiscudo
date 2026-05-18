@@ -1,4 +1,7 @@
-use std::{collections::{HashMap, HashSet}, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    time::Duration,
+};
 
 use aegiscudo_core::{
     ArtifactDigest, AuditEvent, Metadata, PackageCoordinate, PackageEcosystem, PolicyDecision,
@@ -10,8 +13,8 @@ use aegiscudo_protocol::{
 };
 use aegiscudo_telemetry::health;
 use axum::{
-    body::Body,
     Json, Router,
+    body::Body,
     extract::{Path, Query, State},
     http::{HeaderMap, HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
@@ -333,14 +336,16 @@ enum SbomServiceClientInner {
     #[cfg(test)]
     Test {
         list_handler: Arc<
-            dyn Fn(Uuid, Option<u32>) -> Result<Vec<SbomServiceDocumentSummary>, SbomServiceClientError>
+            dyn Fn(
+                    Uuid,
+                    Option<u32>,
+                )
+                    -> Result<Vec<SbomServiceDocumentSummary>, SbomServiceClientError>
                 + Send
                 + Sync,
         >,
         download_handler: Arc<
-            dyn Fn(Uuid, Uuid) -> Result<SbomServiceDownload, SbomServiceClientError>
-                + Send
-                + Sync,
+            dyn Fn(Uuid, Uuid) -> Result<SbomServiceDownload, SbomServiceClientError> + Send + Sync,
         >,
     },
 }
@@ -365,8 +370,7 @@ impl SbomServiceClient {
     }
 
     fn default_local() -> Self {
-        Self::new(DEFAULT_SBOM_SERVICE_URL)
-            .expect("default sbom-service client must initialize")
+        Self::new(DEFAULT_SBOM_SERVICE_URL).expect("default sbom-service client must initialize")
     }
 
     async fn list_tenant_sboms(
@@ -376,10 +380,8 @@ impl SbomServiceClient {
     ) -> Result<Vec<SbomServiceDocumentSummary>, SbomServiceClientError> {
         match &self.inner {
             SbomServiceClientInner::Http { client, url } => {
-                let mut endpoint = format!(
-                    "{}/v1/tenants/{tenant_id}/sboms",
-                    url.trim_end_matches('/')
-                );
+                let mut endpoint =
+                    format!("{}/v1/tenants/{tenant_id}/sboms", url.trim_end_matches('/'));
                 if let Some(limit) = limit {
                     endpoint.push_str(&format!("?limit={limit}"));
                 }
@@ -430,10 +432,7 @@ impl SbomServiceClient {
                 if response.status().is_success() {
                     let headers = forwarded_download_headers(response.headers());
                     let body = Body::from_stream(response.bytes_stream());
-                    return Ok(SbomServiceDownload {
-                        body,
-                        headers,
-                    });
+                    return Ok(SbomServiceDownload { body, headers });
                 }
 
                 let status = response.status();
@@ -593,10 +592,7 @@ fn app_with_clients_and_auth_config(
             "/v1/tenants/{tenant_id}/deps-dev/packages",
             get(list_deps_dev_packages),
         )
-        .route(
-            "/v1/tenants/{tenant_id}/ioc-records",
-            get(list_ioc_records),
-        )
+        .route("/v1/tenants/{tenant_id}/ioc-records", get(list_ioc_records))
         .route(
             "/v1/tenants/{tenant_id}/github-actions/scan-results",
             get(list_github_actions_scan_results),
@@ -712,6 +708,9 @@ impl RegistryAdapterDto {
             PackageEcosystem::GenericHttp => Ok(Self::GenericHttp),
             PackageEcosystem::GithubActions => Err(ApiError::InvalidRequest(
                 "githubactions packages do not map to a registry adapter".to_owned(),
+            )),
+            PackageEcosystem::VscodeExtension => Err(ApiError::InvalidRequest(
+                "vscode-extension packages do not map to a registry adapter".to_owned(),
             )),
         }
     }
@@ -1656,17 +1655,39 @@ fn validate_cli_github_actions_request(
                     .to_owned(),
             ));
         }
-        if package.coordinate.namespace.as_deref().map(str::trim).unwrap_or("").is_empty()
+        if package
+            .coordinate
+            .namespace
+            .as_deref()
+            .map(str::trim)
+            .unwrap_or("")
+            .is_empty()
             || package.coordinate.name.trim().is_empty()
-            || package.coordinate.version.as_deref().map(str::trim).unwrap_or("").is_empty()
+            || package
+                .coordinate
+                .version
+                .as_deref()
+                .map(str::trim)
+                .unwrap_or("")
+                .is_empty()
         {
             return Err(ApiError::InvalidRequest(
                 "githubactions coordinates must include owner, repo, and ref".to_owned(),
             ));
         }
-        let owner = package.coordinate.namespace.as_deref().map(str::trim).unwrap_or("");
+        let owner = package
+            .coordinate
+            .namespace
+            .as_deref()
+            .map(str::trim)
+            .unwrap_or("");
         let repo = package.coordinate.name.trim();
-        let reference = package.coordinate.version.as_deref().map(str::trim).unwrap_or("");
+        let reference = package
+            .coordinate
+            .version
+            .as_deref()
+            .map(str::trim)
+            .unwrap_or("");
         if owner.contains('/')
             || repo.contains('/')
             || owner.chars().any(char::is_whitespace)
@@ -1688,8 +1709,9 @@ async fn enrich_cli_github_actions(
     Json(request): Json<CliGithubActionsEnrichmentRequest>,
 ) -> Result<Json<CliGithubActionsEnrichmentResponse>, ApiError> {
     validate_cli_github_actions_request(&request)?;
-    let context = resolve_cli_policy_context(&state.pool, request.tenant_id, request.policy_profile_id)
-        .await?;
+    let context =
+        resolve_cli_policy_context(&state.pool, request.tenant_id, request.policy_profile_id)
+            .await?;
     let trace_prefix = trace_id(&headers);
     let mut findings = Vec::with_capacity(request.packages.len());
 
@@ -1992,7 +2014,10 @@ async fn download_tenant_sbom(
     let actor_id = actor_id_from_headers(&headers).ok_or(ApiError::MissingActor)?;
     ensure_tenant_user(&state.pool, tenant_id, actor_id).await?;
 
-    let document = state.sbom_client.download_tenant_sbom(tenant_id, sbom_id).await?;
+    let document = state
+        .sbom_client
+        .download_tenant_sbom(tenant_id, sbom_id)
+        .await?;
     let mut response = document.body.into_response();
     for (header_name, header_value) in &document.headers {
         response
@@ -2281,10 +2306,7 @@ async fn get_policy_scorecard_thresholds(
         .unwrap_or_default();
 
     fn check_min_score(thresholds: &Value, key: &str) -> f64 {
-        thresholds
-            .get(key)
-            .and_then(Value::as_f64)
-            .unwrap_or(10.0)
+        thresholds.get(key).and_then(Value::as_f64).unwrap_or(10.0)
     }
 
     let rules = document
@@ -2296,10 +2318,7 @@ async fn get_policy_scorecard_thresholds(
     fn rule_action(rules: &[Value], signal: &str) -> (SignalPolicyAction, bool) {
         for rule in rules {
             if rule.get("signal").and_then(Value::as_str) == Some(signal) {
-                let enabled = rule
-                    .get("enabled")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(true);
+                let enabled = rule.get("enabled").and_then(Value::as_bool).unwrap_or(true);
                 let action = match rule.get("action").and_then(Value::as_str) {
                     Some("allow") => SignalPolicyAction::Allow,
                     Some("block") => SignalPolicyAction::Block,
@@ -2434,28 +2453,29 @@ async fn list_deps_dev_packages(
                     j.0.as_array().map(|arr| {
                         arr.iter()
                             .filter_map(|v| {
-                                v.as_str()
-                                    .map(ToString::to_string)
-                                    .or_else(|| v.get("id").and_then(Value::as_str).map(ToString::to_string))
+                                v.as_str().map(ToString::to_string).or_else(|| {
+                                    v.get("id").and_then(Value::as_str).map(ToString::to_string)
+                                })
                             })
                             .collect()
                     })
                 })
                 .unwrap_or_default();
 
-            let source_repo_url: Option<String> = project_links_json
-                .and_then(|j| {
-                    j.0.as_array().and_then(|arr| {
-                        arr.iter().find_map(|link| {
-                            let label = link.get("label").and_then(Value::as_str)?;
-                            if label.eq_ignore_ascii_case("SOURCE_REPO") {
-                                link.get("url").and_then(Value::as_str).map(ToString::to_string)
-                            } else {
-                                None
-                            }
-                        })
+            let source_repo_url: Option<String> = project_links_json.and_then(|j| {
+                j.0.as_array().and_then(|arr| {
+                    arr.iter().find_map(|link| {
+                        let label = link.get("label").and_then(Value::as_str)?;
+                        if label.eq_ignore_ascii_case("SOURCE_REPO") {
+                            link.get("url")
+                                .and_then(Value::as_str)
+                                .map(ToString::to_string)
+                        } else {
+                            None
+                        }
                     })
-                });
+                })
+            });
 
             Ok::<_, sqlx::Error>(DepsDdevPackageSummaryResponse {
                 purl,
@@ -3964,8 +3984,9 @@ async fn create_openvex_document(
     ensure_override_manager(&state.pool, tenant_id, actor_id).await?;
     let validated = validate_openvex_request(&request)?;
     let source = request.source.trim().to_owned();
-    let document_bytes = serde_json::to_vec(&request.document)
-        .map_err(|error| ApiError::InvalidRequest(format!("document must be valid JSON: {error}")))?;
+    let document_bytes = serde_json::to_vec(&request.document).map_err(|error| {
+        ApiError::InvalidRequest(format!("document must be valid JSON: {error}"))
+    })?;
     let document_digest = hex_sha256(&document_bytes);
     let imported_at = Utc::now();
     let openvex_document_id = Uuid::now_v7();
@@ -3993,10 +4014,7 @@ async fn create_openvex_document(
                 "expires_at".to_owned(),
                 json!(request.expiry_policy.expires_at),
             ),
-            (
-                "document_digest".to_owned(),
-                json!(document_digest.clone()),
-            ),
+            ("document_digest".to_owned(), json!(document_digest.clone())),
         ]),
     )?;
 
@@ -4835,7 +4853,9 @@ fn validate_cli_scan_request(request: &CliScanRequest) -> Result<PackageEcosyste
     })?;
     let ecosystem = first.coordinate.ecosystem.clone();
     let adapter = RegistryAdapterDto::from_ecosystem(ecosystem.clone()).map_err(|_| {
-        ApiError::InvalidRequest("cli scan currently supports npm and pypi packages only".to_owned())
+        ApiError::InvalidRequest(
+            "cli scan currently supports npm and pypi packages only".to_owned(),
+        )
     })?;
     if !adapter.phase_1a_supported() {
         return Err(ApiError::InvalidRequest(
@@ -5652,9 +5672,12 @@ fn validate_openvex_request(
     }
     validate_openvex_expiry_policy(&request.expiry_policy)?;
 
-    let document = request.document.as_object().ok_or(ApiError::InvalidRequest(
-        "openvex document must be a JSON object".to_owned(),
-    ))?;
+    let document = request
+        .document
+        .as_object()
+        .ok_or(ApiError::InvalidRequest(
+            "openvex document must be a JSON object".to_owned(),
+        ))?;
     let context = required_non_empty_json_string(document.get("@context"), "document.@context")?;
     if context != "https://openvex.dev/ns/v0.2.0" {
         return Err(ApiError::InvalidRequest(
@@ -5671,17 +5694,16 @@ fn validate_openvex_request(
         .ok_or(ApiError::InvalidRequest(
             "document.version must be a positive integer".to_owned(),
         ))?;
-    let document_timestamp = parse_required_rfc3339_timestamp(
-        document.get("timestamp"),
-        "document.timestamp",
-    )?;
+    let document_timestamp =
+        parse_required_rfc3339_timestamp(document.get("timestamp"), "document.timestamp")?;
 
-    let statements = document
-        .get("statements")
-        .and_then(Value::as_array)
-        .ok_or(ApiError::InvalidRequest(
-            "document.statements must be an array".to_owned(),
-        ))?;
+    let statements =
+        document
+            .get("statements")
+            .and_then(Value::as_array)
+            .ok_or(ApiError::InvalidRequest(
+                "document.statements must be an array".to_owned(),
+            ))?;
     if statements.is_empty() {
         return Err(ApiError::InvalidRequest(
             "document.statements must contain at least one statement".to_owned(),
@@ -5691,9 +5713,11 @@ fn validate_openvex_request(
     let mut normalized_statements = Vec::new();
     for (index, statement) in statements.iter().enumerate() {
         let statement_path = format!("document.statements[{index}]");
-        let statement_object = statement.as_object().ok_or(ApiError::InvalidRequest(
-            format!("{statement_path} must be an object"),
-        ))?;
+        let statement_object = statement
+            .as_object()
+            .ok_or(ApiError::InvalidRequest(format!(
+                "{statement_path} must be an object"
+            )))?;
 
         let vulnerability_id = statement_object
             .get("vulnerability")
@@ -5757,9 +5781,9 @@ fn validate_openvex_request(
 
         for (product_index, product) in products.iter().enumerate() {
             let product_path = format!("{statement_path}.products[{product_index}]");
-            let product_object = product.as_object().ok_or(ApiError::InvalidRequest(
-                format!("{product_path} must be an object"),
-            ))?;
+            let product_object = product.as_object().ok_or(ApiError::InvalidRequest(format!(
+                "{product_path} must be an object"
+            )))?;
             let product_id = required_non_empty_json_string(
                 product_object.get("@id"),
                 &format!("{product_path}.@id"),
@@ -5855,7 +5879,9 @@ fn required_non_empty_json_string(value: Option<&Value>, field: &str) -> Result<
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_owned)
-        .ok_or(ApiError::InvalidRequest(format!("{field} must be a non-empty string")))
+        .ok_or(ApiError::InvalidRequest(format!(
+            "{field} must be a non-empty string"
+        )))
 }
 
 fn optional_non_empty_json_string(
@@ -7009,7 +7035,10 @@ mod tests {
             assert_eq!(body.tenant_id, fixture.tenant_id);
             assert_eq!(body.policy_profile_id, fixture.policy_profile_id);
             assert_eq!(body.findings.len(), 1);
-            assert_eq!(body.findings[0].decision, PolicyDecision::BlockKnownMalicious);
+            assert_eq!(
+                body.findings[0].decision,
+                PolicyDecision::BlockKnownMalicious
+            );
             assert!(body.findings[0].decision_timestamp.is_some());
             assert_eq!(body.findings[0].trace_id, "cli-trace-1");
 
@@ -7041,9 +7070,13 @@ mod tests {
             .connect_lazy(&test_database_url())
             .expect("create lazy test db pool");
 
-        let response = app_with_clients(pool, None, DecisionClient::new_query_test(|_| {
-            panic!("decision client query should not be called")
-        }))
+        let response = app_with_clients(
+            pool,
+            None,
+            DecisionClient::new_query_test(|_| {
+                panic!("decision client query should not be called")
+            }),
+        )
         .oneshot(
             Request::builder()
                 .method("POST")
@@ -7080,9 +7113,13 @@ mod tests {
             .connect_lazy(&test_database_url())
             .expect("create lazy test db pool");
 
-        let response = app_with_clients(pool, None, DecisionClient::new_query_test(|_| {
-            panic!("decision client query should not be called")
-        }))
+        let response = app_with_clients(
+            pool,
+            None,
+            DecisionClient::new_query_test(|_| {
+                panic!("decision client query should not be called")
+            }),
+        )
         .oneshot(
             Request::builder()
                 .method("POST")
@@ -7119,9 +7156,13 @@ mod tests {
             .connect_lazy(&test_database_url())
             .expect("create lazy test db pool");
 
-        let response = app_with_clients(pool, None, DecisionClient::new_query_test(|_| {
-            panic!("decision client query should not be called")
-        }))
+        let response = app_with_clients(
+            pool,
+            None,
+            DecisionClient::new_query_test(|_| {
+                panic!("decision client query should not be called")
+            }),
+        )
         .oneshot(
             Request::builder()
                 .method("POST")
@@ -8717,7 +8758,10 @@ mod tests {
             let documents = body.as_array().expect("list response array");
             assert_eq!(documents.len(), 1);
             let expected_id = sbom_id.to_string();
-            assert_eq!(documents[0].get("id").and_then(Value::as_str), Some(expected_id.as_str()));
+            assert_eq!(
+                documents[0].get("id").and_then(Value::as_str),
+                Some(expected_id.as_str())
+            );
             assert_eq!(
                 documents[0].get("source").and_then(Value::as_str),
                 Some("Cargo.lock")
@@ -8798,9 +8842,7 @@ mod tests {
                         );
                         headers.insert(
                             header::CONTENT_DISPOSITION,
-                            HeaderValue::from_static(
-                                "attachment; filename=\"cargo-lock.json\"",
-                            ),
+                            HeaderValue::from_static("attachment; filename=\"cargo-lock.json\""),
                         );
                         headers.insert(
                             header::CACHE_CONTROL,
@@ -9221,9 +9263,13 @@ mod tests {
         let mut request = sample_openvex_import_request();
         request.expiry_policy.expires_at = Some(ts(2024, 1, 1, 0, 0, 0));
 
-        let validated = validate_openvex_request(&request).expect("expired request should still validate");
+        let validated =
+            validate_openvex_request(&request).expect("expired request should still validate");
 
-        assert_eq!(validated.document_id, "https://fixtures.aegiscudo.invalid/openvex/acme-2026-001");
+        assert_eq!(
+            validated.document_id,
+            "https://fixtures.aegiscudo.invalid/openvex/acme-2026-001"
+        );
         assert_eq!(validated.statement_count, 2);
     }
 
@@ -9250,7 +9296,8 @@ mod tests {
             }
         ]);
 
-        let validated = validate_openvex_request(&request).expect("statement history should validate");
+        let validated =
+            validate_openvex_request(&request).expect("statement history should validate");
 
         assert_eq!(validated.statement_count, 2);
         assert_eq!(validated.statements.len(), 2);
@@ -9428,7 +9475,10 @@ mod tests {
                 .oneshot(
                     Request::builder()
                         .method("POST")
-                        .uri(format!("/v1/tenants/{}/openvex-documents", fixture.tenant_id))
+                        .uri(format!(
+                            "/v1/tenants/{}/openvex-documents",
+                            fixture.tenant_id
+                        ))
                         .header(ACTOR_HEADER, fixture.admin_user_id.to_string())
                         .header("content-type", "application/json")
                         .body(Body::from(
@@ -9493,7 +9543,10 @@ mod tests {
                 .oneshot(
                     Request::builder()
                         .method("POST")
-                        .uri(format!("/v1/tenants/{}/openvex-documents", fixture.tenant_id))
+                        .uri(format!(
+                            "/v1/tenants/{}/openvex-documents",
+                            fixture.tenant_id
+                        ))
                         .header(ACTOR_HEADER, fixture.admin_user_id.to_string())
                         .header("content-type", "application/json")
                         .body(Body::from(
@@ -9509,7 +9562,10 @@ mod tests {
             let own_response = app(pool.clone())
                 .oneshot(
                     Request::builder()
-                        .uri(format!("/v1/tenants/{}/openvex-documents", fixture.tenant_id))
+                        .uri(format!(
+                            "/v1/tenants/{}/openvex-documents",
+                            fixture.tenant_id
+                        ))
                         .header(ACTOR_HEADER, fixture.admin_user_id.to_string())
                         .body(Body::empty())
                         .expect("own openvex list request"),
@@ -9517,7 +9573,8 @@ mod tests {
                 .await
                 .expect("own openvex list response");
             assert_eq!(own_response.status(), StatusCode::OK);
-            let own_documents: Vec<OpenVexDocumentSummaryResponse> = read_json_body(own_response).await;
+            let own_documents: Vec<OpenVexDocumentSummaryResponse> =
+                read_json_body(own_response).await;
             assert_eq!(own_documents.len(), 1);
 
             let cross_tenant_response = app(pool.clone())
@@ -9556,17 +9613,22 @@ mod tests {
 
         let result = async {
             let mut request = sample_openvex_import_request();
-            request.document["@context"] = Value::String("https://example.invalid/openvex".to_owned());
+            request.document["@context"] =
+                Value::String("https://example.invalid/openvex".to_owned());
 
             let response = app(pool.clone())
                 .oneshot(
                     Request::builder()
                         .method("POST")
-                        .uri(format!("/v1/tenants/{}/openvex-documents", fixture.tenant_id))
+                        .uri(format!(
+                            "/v1/tenants/{}/openvex-documents",
+                            fixture.tenant_id
+                        ))
                         .header(ACTOR_HEADER, fixture.admin_user_id.to_string())
                         .header("content-type", "application/json")
                         .body(Body::from(
-                            serde_json::to_vec(&request).expect("serialize malformed openvex request"),
+                            serde_json::to_vec(&request)
+                                .expect("serialize malformed openvex request"),
                         ))
                         .expect("malformed openvex request"),
                 )
@@ -9575,9 +9637,10 @@ mod tests {
             assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 
             let body: ErrorBody = read_json_body(response).await;
-            assert!(body
-                .message
-                .contains("document.@context must be https://openvex.dev/ns/v0.2.0"));
+            assert!(
+                body.message
+                    .contains("document.@context must be https://openvex.dev/ns/v0.2.0")
+            );
 
             Ok::<(), anyhow::Error>(())
         }
@@ -9604,11 +9667,15 @@ mod tests {
                 .oneshot(
                     Request::builder()
                         .method("POST")
-                        .uri(format!("/v1/tenants/{}/openvex-documents", fixture.tenant_id))
+                        .uri(format!(
+                            "/v1/tenants/{}/openvex-documents",
+                            fixture.tenant_id
+                        ))
                         .header(ACTOR_HEADER, fixture.admin_user_id.to_string())
                         .header("content-type", "application/json")
                         .body(Body::from(
-                            serde_json::to_vec(&request).expect("serialize expired openvex request"),
+                            serde_json::to_vec(&request)
+                                .expect("serialize expired openvex request"),
                         ))
                         .expect("expired openvex request"),
                 )
@@ -9617,7 +9684,10 @@ mod tests {
             assert_eq!(response.status(), StatusCode::OK);
 
             let created: OpenVexDocumentResponse = read_json_body(response).await;
-            assert_eq!(created.summary.expiry_policy.mode, OpenVexExpiryMode::ExpiresAt);
+            assert_eq!(
+                created.summary.expiry_policy.mode,
+                OpenVexExpiryMode::ExpiresAt
+            );
             assert_eq!(created.summary.expiry_policy.expires_at, Some(expired_at));
 
             Ok::<(), anyhow::Error>(())

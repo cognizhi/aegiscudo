@@ -38,7 +38,9 @@ use axum::{
 };
 use base64::{
     Engine as _,
-    engine::general_purpose::{STANDARD as BASE64_STANDARD, URL_SAFE_NO_PAD as BASE64_URL_SAFE_NO_PAD},
+    engine::general_purpose::{
+        STANDARD as BASE64_STANDARD, URL_SAFE_NO_PAD as BASE64_URL_SAFE_NO_PAD,
+    },
 };
 use metrics::ProxyMetrics;
 use rate_limit::{ProxyRateLimitConfig, ProxyRateLimiters, RateLimitRejection};
@@ -155,7 +157,10 @@ impl AppState {
     }
 }
 
-fn upstream_client<'a>(state: &'a AppState, resolved: &ResolvedRegistryConfig) -> &'a reqwest::Client {
+fn upstream_client<'a>(
+    state: &'a AppState,
+    resolved: &ResolvedRegistryConfig,
+) -> &'a reqwest::Client {
     if resolved.config.verify_upstream_tls {
         &state.verified_upstream_client
     } else {
@@ -212,7 +217,10 @@ fn cache_key_for_decision(request: &DecisionRequest) -> String {
 
 fn cache_key_for_upstream(resolved: &ResolvedRegistryConfig, query: Option<&str>) -> String {
     match query.filter(|value| !value.is_empty()) {
-        Some(query) => format!("{}:{}?{}", resolved.config.id, resolved.upstream_path, query),
+        Some(query) => format!(
+            "{}:{}?{}",
+            resolved.config.id, resolved.upstream_path, query
+        ),
         None => format!("{}:{}", resolved.config.id, resolved.upstream_path),
     }
 }
@@ -571,6 +579,7 @@ async fn proxy_get(
             &resolved,
             &trace_id,
             request_started,
+            "tenant-api",
             "tenant-rate-limit-exceeded",
             "tenant API rate limit exceeded",
             rejection,
@@ -583,6 +592,7 @@ async fn proxy_get(
             &resolved,
             &trace_id,
             request_started,
+            "client-package",
             "client-rate-limit-exceeded",
             "client package request rate limit exceeded",
             rejection,
@@ -705,7 +715,8 @@ async fn proxy_get(
     };
     let prefetched_artifact =
         if matches!(decision_request.request.kind, PackageRequestKind::Artifact) {
-            match fetch_upstream_artifact(state.as_ref(), &resolved, request_query.as_deref()).await {
+            match fetch_upstream_artifact(state.as_ref(), &resolved, request_query.as_deref()).await
+            {
                 Ok(prefetched) => {
                     if resolved.config.adapter == RegistryAdapter::Cargo
                         && !prefetched.status.is_success()
@@ -903,6 +914,7 @@ async fn proxy_write(
             &resolved,
             &trace_id,
             request_started,
+            "tenant-api",
             "tenant-rate-limit-exceeded",
             "tenant API rate limit exceeded",
             rejection,
@@ -915,6 +927,7 @@ async fn proxy_write(
             &resolved,
             &trace_id,
             request_started,
+            "client-package",
             "client-rate-limit-exceeded",
             "client package request rate limit exceeded",
             rejection,
@@ -997,6 +1010,7 @@ async fn rate_limited_response(
     resolved: &ResolvedRegistryConfig,
     trace_id: &str,
     request_started: Instant,
+    limiter: &'static str,
     outcome: &'static str,
     message: &'static str,
     rejection: RateLimitRejection,
@@ -1019,6 +1033,13 @@ async fn rate_limited_response(
         Some(resolved.config.adapter),
         StatusCode::TOO_MANY_REQUESTS,
         request_started.elapsed(),
+    );
+    state.metrics.observe_rate_limit(
+        resolved.config.tenant_id,
+        resolved.config.id,
+        resolved.config.adapter,
+        limiter,
+        outcome,
     );
     let body = json!({
         "trace_id": trace_id,
@@ -1393,6 +1414,7 @@ async fn proxy_head(
             &resolved,
             &trace_id,
             request_started,
+            "tenant-api",
             "tenant-rate-limit-exceeded",
             "tenant API rate limit exceeded",
             rejection,
@@ -1405,6 +1427,7 @@ async fn proxy_head(
             &resolved,
             &trace_id,
             request_started,
+            "client-package",
             "client-rate-limit-exceeded",
             "client package request rate limit exceeded",
             rejection,
@@ -1434,43 +1457,42 @@ async fn proxy_head(
         return status_response(StatusCode::NOT_IMPLEMENTED, Some(trace_id));
     }
     let proxy_base = proxy_base_url(&headers);
-    let upstream_url =
-        match upstream_request_url_with_query(
-            &resolved.config.upstream_url,
-            &resolved.upstream_path,
-            uri.query(),
-        ) {
-            Ok(url) => url,
-            Err(error) => {
-                tracing::warn!(
-                    tenant_id = %resolved.config.tenant_id,
-                    registry_config_id = %resolved.config.id,
-                    %trace_id,
-                    error = %error,
-                    "failed to build upstream HEAD request url"
-                );
-                emit_proxy_audit_event(
-                    state.as_ref(),
-                    final_request_audit_event(
-                        &resolved,
-                        &trace_id,
-                        StatusCode::BAD_GATEWAY,
-                        "upstream-proxy-failed",
-                        None,
-                        false,
-                    ),
-                )
-                .await;
-                state.metrics.observe_request(
-                    Some(resolved.config.tenant_id),
-                    "proxy",
-                    Some(resolved.config.adapter),
+    let upstream_url = match upstream_request_url_with_query(
+        &resolved.config.upstream_url,
+        &resolved.upstream_path,
+        uri.query(),
+    ) {
+        Ok(url) => url,
+        Err(error) => {
+            tracing::warn!(
+                tenant_id = %resolved.config.tenant_id,
+                registry_config_id = %resolved.config.id,
+                %trace_id,
+                error = %error,
+                "failed to build upstream HEAD request url"
+            );
+            emit_proxy_audit_event(
+                state.as_ref(),
+                final_request_audit_event(
+                    &resolved,
+                    &trace_id,
                     StatusCode::BAD_GATEWAY,
-                    request_started.elapsed(),
-                );
-                return status_response(StatusCode::BAD_GATEWAY, Some(trace_id));
-            }
-        };
+                    "upstream-proxy-failed",
+                    None,
+                    false,
+                ),
+            )
+            .await;
+            state.metrics.observe_request(
+                Some(resolved.config.tenant_id),
+                "proxy",
+                Some(resolved.config.adapter),
+                StatusCode::BAD_GATEWAY,
+                request_started.elapsed(),
+            );
+            return status_response(StatusCode::BAD_GATEWAY, Some(trace_id));
+        }
+    };
     let mut request_builder = upstream_client(&state, &resolved).head(upstream_url);
     request_builder = match inject_upstream_credentials(request_builder, &resolved) {
         Ok(builder) => builder,
@@ -1548,7 +1570,8 @@ async fn proxy_head(
             .get(LOCATION)
             .and_then(|value| value.to_str().ok())
         {
-            let rewritten = rewrite_registry_url(&resolved.config.mount_path, &proxy_base, location);
+            let rewritten =
+                rewrite_registry_url(&resolved.config.mount_path, &proxy_base, location);
             if let Ok(header_value) = HeaderValue::from_str(&rewritten) {
                 response_headers.insert(LOCATION, header_value);
             }
@@ -1557,11 +1580,9 @@ async fn proxy_head(
             response_headers.insert(HeaderName::from_static(TRACE_HEADER), header_value);
         }
     }
-    let response = response
-        .body(Body::empty())
-        .unwrap_or_else(|_| {
-            status_response(StatusCode::INTERNAL_SERVER_ERROR, Some(trace_id.clone()))
-        });
+    let response = response.body(Body::empty()).unwrap_or_else(|_| {
+        status_response(StatusCode::INTERNAL_SERVER_ERROR, Some(trace_id.clone()))
+    });
     emit_proxy_audit_event(
         state.as_ref(),
         final_request_audit_event(
@@ -1622,15 +1643,7 @@ async fn fetch_cargo_expected_digest(
             .await
             .map_err(UpstreamProxyError::Body)?
             .to_vec();
-        cache_metadata_response(
-            state,
-            resolved,
-            &cache_key,
-            status,
-            headers,
-            body.clone(),
-        )
-        .await;
+        cache_metadata_response(state, resolved, &cache_key, status, headers, body.clone()).await;
         if !status.is_success() {
             return Err(UpstreamProxyError::InvalidCargoArtifactDigest);
         }
@@ -1849,14 +1862,11 @@ async fn verify_maven_checksum(
     resolved: &ResolvedRegistryConfig,
     artifact_body: &[u8],
 ) -> Result<(), UpstreamProxyError> {
-    let candidates: &[(&str, fn(&[u8]) -> String)] = &[
-        (".sha256", maven_sha256_hex),
-        (".sha1", maven_sha1_hex),
-    ];
+    let candidates: &[(&str, fn(&[u8]) -> String)] =
+        &[(".sha256", maven_sha256_hex), (".sha1", maven_sha1_hex)];
     for (suffix, compute) in candidates {
         let sidecar_path = format!("{}{}", resolved.upstream_path, suffix);
-        let sidecar_url =
-            upstream_request_url(&resolved.config.upstream_url, &sidecar_path)?;
+        let sidecar_url = upstream_request_url(&resolved.config.upstream_url, &sidecar_path)?;
         let mut rb = upstream_client(state, resolved).get(sidecar_url);
         rb = inject_upstream_credentials(rb, resolved)?;
         let resp = match rb.send().await {
@@ -2165,10 +2175,13 @@ fn adapter_upstream_request_url(
     upstream_path: &str,
 ) -> Result<url::Url, UpstreamProxyError> {
     if adapter == RegistryAdapter::Cargo
-        && let Some((encoded_base, signature, suffix)) = cargo_proxy_download_components(upstream_path)
+        && let Some((encoded_base, signature, suffix)) =
+            cargo_proxy_download_components(upstream_path)
     {
         let original_base = decode_cargo_proxy_base(encoded_base)?;
-        if signature != cargo_download_base_signature(cargo_download_mac_key, config_id, &original_base) {
+        if signature
+            != cargo_download_base_signature(cargo_download_mac_key, config_id, &original_base)
+        {
             return Err(UpstreamProxyError::InvalidCargoRegistryConfig);
         }
         let mut url =
@@ -2189,7 +2202,10 @@ fn cargo_proxy_api_components(upstream_path: &str) -> Option<(&str, &str, &str)>
     cargo_proxy_route_components(CARGO_API_PROXY_PREFIX, upstream_path)
 }
 
-fn cargo_proxy_route_components<'a>(prefix: &str, upstream_path: &'a str) -> Option<(&'a str, &'a str, &'a str)> {
+fn cargo_proxy_route_components<'a>(
+    prefix: &str,
+    upstream_path: &'a str,
+) -> Option<(&'a str, &'a str, &'a str)> {
     let prefix = format!("{prefix}/");
     let rest = upstream_path.strip_prefix(&prefix)?;
     let (encoded_base, rest) = rest.split_once('/')?;
@@ -2209,17 +2225,22 @@ fn cargo_registry_api_request_supported(method: &Method, upstream_path: &str) ->
 }
 
 fn cargo_registry_api_suffix_supported(method: &Method, suffix: &str) -> bool {
-    let segments: Vec<_> = suffix.split('/').filter(|segment| !segment.is_empty()).collect();
+    let segments: Vec<_> = suffix
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .collect();
     match (method.as_str(), segments.as_slice()) {
         ("GET", ["api", "v1", "crates"]) => true,
         ("POST" | "PUT", ["api", "v1", "crates", "new"]) => true,
         ("DELETE", ["api", "v1", "crates", crate_name, version, "yank"])
-            if canonicalize_cargo_name(crate_name).is_some() && looks_like_cargo_version(version) =>
+            if canonicalize_cargo_name(crate_name).is_some()
+                && looks_like_cargo_version(version) =>
         {
             true
         }
         ("PUT", ["api", "v1", "crates", crate_name, version, "unyank"])
-            if canonicalize_cargo_name(crate_name).is_some() && looks_like_cargo_version(version) =>
+            if canonicalize_cargo_name(crate_name).is_some()
+                && looks_like_cargo_version(version) =>
         {
             true
         }
@@ -2241,11 +2262,7 @@ fn cargo_rewritten_download_base(
     cargo_allowed_download_origins: &[String],
     original: &str,
 ) -> Result<String, UpstreamProxyError> {
-    resolve_cargo_download_base(
-        upstream_base_url,
-        cargo_allowed_download_origins,
-        original,
-    )?;
+    resolve_cargo_download_base(upstream_base_url, cargo_allowed_download_origins, original)?;
 
     let mount = normalized_mount_path(mount_path);
     let encoded = BASE64_URL_SAFE_NO_PAD.encode(original.as_bytes());
@@ -2273,7 +2290,11 @@ fn cargo_rewritten_api_base(
     ))
 }
 
-fn cargo_download_base_signature(cargo_download_mac_key: &[u8], config_id: Uuid, original: &str) -> String {
+fn cargo_download_base_signature(
+    cargo_download_mac_key: &[u8],
+    config_id: Uuid,
+    original: &str,
+) -> String {
     cargo_proxy_base_signature(
         cargo_download_mac_key,
         "cargo-dl-base:",
@@ -2282,7 +2303,11 @@ fn cargo_download_base_signature(cargo_download_mac_key: &[u8], config_id: Uuid,
     )
 }
 
-fn cargo_api_base_signature(cargo_download_mac_key: &[u8], config_id: Uuid, original: &str) -> String {
+fn cargo_api_base_signature(
+    cargo_download_mac_key: &[u8],
+    config_id: Uuid,
+    original: &str,
+) -> String {
     cargo_proxy_base_signature(
         cargo_download_mac_key,
         "cargo-api-base:",
@@ -2298,7 +2323,8 @@ fn cargo_proxy_base_signature(
     original: &str,
 ) -> String {
     let key = hmac::Key::new(hmac::HMAC_SHA256, cargo_download_mac_key);
-    let mut message = Vec::with_capacity(domain.len() + config_id.as_bytes().len() + 1 + original.len());
+    let mut message =
+        Vec::with_capacity(domain.len() + config_id.as_bytes().len() + 1 + original.len());
     message.extend_from_slice(domain.as_bytes());
     message.extend_from_slice(config_id.as_bytes());
     message.extend_from_slice(b":");
@@ -2346,11 +2372,8 @@ fn resolve_cargo_download_base(
             .map_err(|_| UpstreamProxyError::InvalidCargoRegistryConfig)?
     };
     validate_cargo_download_url(&resolved)?;
-    if !cargo_download_origin_allowed(
-        upstream_base_url,
-        cargo_allowed_download_origins,
-        &resolved,
-    )? {
+    if !cargo_download_origin_allowed(upstream_base_url, cargo_allowed_download_origins, &resolved)?
+    {
         return Err(UpstreamProxyError::InvalidCargoRegistryConfig);
     }
     Ok(resolved)
@@ -2386,7 +2409,9 @@ fn cargo_download_origin_allowed(
         return Ok(true);
     }
     let origin = canonical_cargo_origin(url)?;
-    Ok(cargo_allowed_download_origins.iter().any(|allowed| allowed == &origin))
+    Ok(cargo_allowed_download_origins
+        .iter()
+        .any(|allowed| allowed == &origin))
 }
 
 fn cargo_download_uses_primary_origin(
@@ -2439,8 +2464,9 @@ async fn proxy_cargo_registry_api(
         &request_headers,
         Some(request_body.len() as u64),
     )?;
-    let proxy_mount_path = cargo_api_proxy_mount_path(&resolved.config.mount_path, &resolved.upstream_path)
-        .ok_or(UpstreamProxyError::InvalidCargoRegistryConfig)?;
+    let proxy_mount_path =
+        cargo_api_proxy_mount_path(&resolved.config.mount_path, &resolved.upstream_path)
+            .ok_or(UpstreamProxyError::InvalidCargoRegistryConfig)?;
     let upstream_url = cargo_api_request_url(
         &state.cargo_download_mac_key,
         resolved.config.id,
@@ -2508,9 +2534,7 @@ fn cargo_api_request_url(
         url.query().filter(|value| !value.is_empty()),
         query.filter(|value| !value.is_empty()),
     ) {
-        (Some(base_query), Some(request_query)) => {
-            Some(format!("{base_query}&{request_query}"))
-        }
+        (Some(base_query), Some(request_query)) => Some(format!("{base_query}&{request_query}")),
         (Some(base_query), None) => Some(base_query.to_owned()),
         (None, Some(request_query)) => Some(request_query.to_owned()),
         (None, None) => None,
@@ -2745,8 +2769,8 @@ fn rewrite_cargo_registry_config(
     cargo_allowed_download_origins: &[String],
     body: Vec<u8>,
 ) -> Result<Vec<u8>, UpstreamProxyError> {
-    let mut payload = serde_json::from_slice::<serde_json::Value>(&body)
-        .map_err(UpstreamProxyError::Json)?;
+    let mut payload =
+        serde_json::from_slice::<serde_json::Value>(&body).map_err(UpstreamProxyError::Json)?;
     let Some(object) = payload.as_object_mut() else {
         return Err(UpstreamProxyError::InvalidCargoRegistryConfig);
     };
@@ -2872,8 +2896,8 @@ fn cargo_sparse_entry(
     if raw_name.trim() != raw_name {
         return Err(UpstreamProxyError::InvalidCargoSparseMetadata);
     }
-    let package_name = canonicalize_cargo_name(raw_name)
-        .ok_or(UpstreamProxyError::InvalidCargoSparseMetadata)?;
+    let package_name =
+        canonicalize_cargo_name(raw_name).ok_or(UpstreamProxyError::InvalidCargoSparseMetadata)?;
     let checksum = entry
         .get("cksum")
         .and_then(|value| value.as_str())
@@ -2888,7 +2912,8 @@ fn cargo_sparse_expected_digest_for_version(
     requested_name: &str,
     requested_version: &str,
 ) -> Result<ArtifactDigest, UpstreamProxyError> {
-    let text = std::str::from_utf8(body).map_err(|_| UpstreamProxyError::InvalidCargoSparseMetadata)?;
+    let text =
+        std::str::from_utf8(body).map_err(|_| UpstreamProxyError::InvalidCargoSparseMetadata)?;
     for line in text.lines() {
         if line.trim().is_empty() {
             continue;
@@ -3857,30 +3882,26 @@ fn maven_request_context(
 ) -> Result<(PackageRequestKind, PackageCoordinate, bool), StatusCode> {
     let decoded = decode_registry_path(upstream_path);
     let normalized = decoded.trim_matches('/');
-    let segments: Vec<&str> = normalized
-        .split('/')
-        .filter(|s| !s.is_empty())
-        .collect();
+    let segments: Vec<&str> = normalized.split('/').filter(|s| !s.is_empty()).collect();
     if segments.len() < 3 {
         return Err(StatusCode::BAD_REQUEST);
     }
     let filename = segments[segments.len() - 1];
     if is_maven_metadata_file(filename) {
-        let (artifact_id, version, group_segments) = if segments.len() >= 4
-            && segments[segments.len() - 2].ends_with("SNAPSHOT")
-        {
-            (
-                segments[segments.len() - 3],
-                Some(segments[segments.len() - 2]),
-                &segments[..segments.len() - 3],
-            )
-        } else {
-            (
-                segments[segments.len() - 2],
-                None,
-                &segments[..segments.len() - 2],
-            )
-        };
+        let (artifact_id, version, group_segments) =
+            if segments.len() >= 4 && segments[segments.len() - 2].ends_with("SNAPSHOT") {
+                (
+                    segments[segments.len() - 3],
+                    Some(segments[segments.len() - 2]),
+                    &segments[..segments.len() - 3],
+                )
+            } else {
+                (
+                    segments[segments.len() - 2],
+                    None,
+                    &segments[..segments.len() - 2],
+                )
+            };
         let coordinate = PackageCoordinate::new(
             PackageEcosystem::Maven,
             artifact_id,
@@ -3929,7 +3950,10 @@ fn cargo_registry_config_path(upstream_path: &str) -> bool {
 }
 
 fn cargo_sparse_index_package_name(path: &str) -> Option<String> {
-    let segments: Vec<_> = path.split('/').filter(|segment| !segment.is_empty()).collect();
+    let segments: Vec<_> = path
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .collect();
     let canonical = match segments.last().copied() {
         Some(crate_name) => canonicalize_cargo_name(crate_name)?,
         None => return None,
@@ -3939,9 +3963,7 @@ fn cargo_sparse_index_package_name(path: &str) -> Option<String> {
         ["1", crate_name] if canonical.len() == 1 && *crate_name == canonical => Some(canonical),
         ["2", crate_name] if canonical.len() == 2 && *crate_name == canonical => Some(canonical),
         ["3", prefix, crate_name]
-            if canonical.len() == 3
-                && *crate_name == canonical
-                && *prefix == &canonical[..1] =>
+            if canonical.len() == 3 && *crate_name == canonical && *prefix == &canonical[..1] =>
         {
             Some(canonical)
         }
@@ -3968,7 +3990,10 @@ fn cargo_sparse_index_path(crate_name: &str) -> String {
 
 fn cargo_download_coordinate(path: &str) -> Option<PackageCoordinate> {
     let (_, _, suffix) = cargo_proxy_download_components(path)?;
-    let segments: Vec<_> = suffix.split('/').filter(|segment| !segment.is_empty()).collect();
+    let segments: Vec<_> = suffix
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .collect();
     let [crate_name, version, "download"] = segments.as_slice() else {
         return None;
     };
@@ -4274,7 +4299,10 @@ mod tests {
 
     const TEST_CARGO_DOWNLOAD_MAC_KEY: [u8; 16] = *b"cargo-dl-testkey";
     use axum::http::header::AUTHORIZATION;
-    use axum::{extract::State as AxumState, routing::{any, post}};
+    use axum::{
+        extract::State as AxumState,
+        routing::{any, post},
+    };
     use registry_config::{CredentialAuthType, RegistryConfig};
     use sqlx::postgres::PgPoolOptions;
     use std::{
@@ -4452,7 +4480,9 @@ mod tests {
             return false;
         };
         let crate_file = format!("{crate_name}-{version}.crate");
-        entries.flatten().any(|entry| entry.path().join(&crate_file).is_file())
+        entries
+            .flatten()
+            .any(|entry| entry.path().join(&crate_file).is_file())
     }
 
     fn fetch_json(url: &str) -> serde_json::Value {
@@ -4711,9 +4741,8 @@ mod tests {
         );
         config.verify_upstream_tls = false;
         let store = RegistryConfigStore::new(vec![config.clone()]).expect("store");
-        let triage_client =
-            TriageClient::new("http://127.0.0.1:9", Duration::from_millis(500), 0)
-                .expect("triage client");
+        let triage_client = TriageClient::new("http://127.0.0.1:9", Duration::from_millis(500), 0)
+            .expect("triage client");
         let state = AppState::new(
             store,
             None,
@@ -4821,7 +4850,12 @@ mod tests {
         Path(path): Path<String>,
     ) -> Response {
         state.paths.lock().expect("record paths").push(path);
-        (state.status, [(CONTENT_TYPE, state.content_type)], state.body).into_response()
+        (
+            state.status,
+            [(CONTENT_TYPE, state.content_type)],
+            state.body,
+        )
+            .into_response()
     }
 
     async fn spawn_fake_body_upstream(
@@ -4945,35 +4979,36 @@ mod tests {
             return ([(CONTENT_TYPE, "application/json")], state.config_body).into_response();
         }
         if path.starts_with("api/v1/") {
-            state.requests.lock().expect("record requests").push(FakeCargoApiRequest {
-                method: method.as_str().to_owned(),
-                path,
-                query: uri.query().map(str::to_owned),
-                authorization: headers
-                    .get(AUTHORIZATION)
-                    .and_then(|value| value.to_str().ok())
-                    .map(str::to_owned),
-                body: body.to_vec(),
-            });
+            state
+                .requests
+                .lock()
+                .expect("record requests")
+                .push(FakeCargoApiRequest {
+                    method: method.as_str().to_owned(),
+                    path,
+                    query: uri.query().map(str::to_owned),
+                    authorization: headers
+                        .get(AUTHORIZATION)
+                        .and_then(|value| value.to_str().ok())
+                        .map(str::to_owned),
+                    body: body.to_vec(),
+                });
             let mut response = Json(json!({ "ok": true })).into_response();
-            response.headers_mut().insert(
-                LOCATION,
-                HeaderValue::from_static("/api/v1/crates/result"),
-            );
+            response
+                .headers_mut()
+                .insert(LOCATION, HeaderValue::from_static("/api/v1/crates/result"));
             return response;
         }
         StatusCode::NOT_FOUND.into_response()
     }
 
-    async fn spawn_fake_cargo_api_upstream(
-    ) -> (
+    async fn spawn_fake_cargo_api_upstream() -> (
         String,
         Arc<Mutex<Vec<String>>>,
         Arc<Mutex<Vec<FakeCargoApiRequest>>>,
         JoinHandle<()>,
     ) {
-        spawn_fake_cargo_api_upstream_with_config(r#"{"dl":"api/v1/crates","api":"."}"#)
-            .await
+        spawn_fake_cargo_api_upstream_with_config(r#"{"dl":"api/v1/crates","api":"."}"#).await
     }
 
     async fn spawn_fake_cargo_api_upstream_with_config(
@@ -4994,7 +5029,9 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind fake Cargo API upstream");
-        let address = listener.local_addr().expect("fake Cargo API upstream address");
+        let address = listener
+            .local_addr()
+            .expect("fake Cargo API upstream address");
         let router = Router::new()
             .route("/{*path}", any(fake_cargo_api_upstream_handler))
             .with_state(state);
@@ -5052,13 +5089,18 @@ mod tests {
             let enc = GzEncoder::new(&mut archive_buf, Compression::fast());
             let mut builder = TarBuilder::new(enc);
 
-            let cargo_toml = b"[package]\nname = \"codeshot\"\nversion = \"2.0.0\"\nedition = \"2021\"\n";
+            let cargo_toml =
+                b"[package]\nname = \"codeshot\"\nversion = \"2.0.0\"\nedition = \"2021\"\n";
             let mut header = tar::Header::new_gnu();
             header.set_size(cargo_toml.len() as u64);
             header.set_mode(0o644);
             header.set_cksum();
             builder
-                .append_data(&mut header, "codeshot-2.0.0/Cargo.toml", cargo_toml.as_ref())
+                .append_data(
+                    &mut header,
+                    "codeshot-2.0.0/Cargo.toml",
+                    cargo_toml.as_ref(),
+                )
                 .expect("append Cargo.toml");
 
             let lib_rs = b"pub fn hello() {}\n";
@@ -5070,7 +5112,11 @@ mod tests {
                 .append_data(&mut header2, "codeshot-2.0.0/src/lib.rs", lib_rs.as_ref())
                 .expect("append src/lib.rs");
 
-            builder.into_inner().expect("encoder").finish().expect("gz finish");
+            builder
+                .into_inner()
+                .expect("encoder")
+                .finish()
+                .expect("gz finish");
         }
 
         let expected_sha256_hex = {
@@ -5101,7 +5147,12 @@ mod tests {
                 .await
                 .expect("fake binary Cargo upstream serve");
         });
-        (format!("http://{address}"), paths, expected_sha256_hex, handle)
+        (
+            format!("http://{address}"),
+            paths,
+            expected_sha256_hex,
+            handle,
+        )
     }
 
     async fn spawn_fake_cargo_upstream_with_binary_crate_and_sparse_checksum(
@@ -5124,13 +5175,18 @@ mod tests {
             let enc = GzEncoder::new(&mut archive_buf, Compression::fast());
             let mut builder = TarBuilder::new(enc);
 
-            let cargo_toml = b"[package]\nname = \"codeshot\"\nversion = \"2.0.0\"\nedition = \"2021\"\n";
+            let cargo_toml =
+                b"[package]\nname = \"codeshot\"\nversion = \"2.0.0\"\nedition = \"2021\"\n";
             let mut header = tar::Header::new_gnu();
             header.set_size(cargo_toml.len() as u64);
             header.set_mode(0o644);
             header.set_cksum();
             builder
-                .append_data(&mut header, "codeshot-2.0.0/Cargo.toml", cargo_toml.as_ref())
+                .append_data(
+                    &mut header,
+                    "codeshot-2.0.0/Cargo.toml",
+                    cargo_toml.as_ref(),
+                )
                 .expect("append Cargo.toml");
 
             let lib_rs = b"pub fn hello() {}\n";
@@ -5142,7 +5198,11 @@ mod tests {
                 .append_data(&mut header2, "codeshot-2.0.0/src/lib.rs", lib_rs.as_ref())
                 .expect("append src/lib.rs");
 
-            builder.into_inner().expect("encoder").finish().expect("gz finish");
+            builder
+                .into_inner()
+                .expect("encoder")
+                .finish()
+                .expect("gz finish");
         }
 
         let expected_sha256_hex = {
@@ -5169,7 +5229,10 @@ mod tests {
         if path.ends_with("/download") {
             return (
                 StatusCode::FOUND,
-                [(LOCATION, "https://static.example.invalid/crates/serde/serde-1.0.0.crate")],
+                [(
+                    LOCATION,
+                    "https://static.example.invalid/crates/serde/serde-1.0.0.crate",
+                )],
             )
                 .into_response();
         }
@@ -5180,7 +5243,8 @@ mod tests {
             .into_response()
     }
 
-    async fn spawn_fake_cargo_redirect_upstream() -> (String, Arc<Mutex<Vec<String>>>, JoinHandle<()>) {
+    async fn spawn_fake_cargo_redirect_upstream()
+    -> (String, Arc<Mutex<Vec<String>>>, JoinHandle<()>) {
         let state = FakeUpstreamState::default();
         let paths = Arc::clone(&state.paths);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -5338,14 +5402,15 @@ mod tests {
         if let Some(status) = state.status {
             return status.into_response();
         }
-        let artifact_behavior_applies = matches!(request.request.kind, PackageRequestKind::Artifact)
-            && !state
-                .artifact_decision_version
-                .as_deref()
-                .is_some_and(|version| request.request.coordinate.version.as_deref() != Some(version));
-        if artifact_behavior_applies
-            && let Some(status) = state.artifact_status
-        {
+        let artifact_behavior_applies =
+            matches!(request.request.kind, PackageRequestKind::Artifact)
+                && !state
+                    .artifact_decision_version
+                    .as_deref()
+                    .is_some_and(|version| {
+                        request.request.coordinate.version.as_deref() != Some(version)
+                    });
+        if artifact_behavior_applies && let Some(status) = state.artifact_status {
             return status.into_response();
         }
         let decision = if artifact_behavior_applies {
@@ -6401,6 +6466,15 @@ mod tests {
         let body: serde_json::Value = second.json().await.expect("rate-limit body");
         assert_eq!(body["message"], "tenant API rate limit exceeded");
 
+        let metrics = reqwest::get(format!("{base_url}/metrics"))
+            .await
+            .expect("metrics request")
+            .text()
+            .await
+            .expect("metrics text");
+        assert!(metrics.contains("aegiscudo_rate_limit_events_total"));
+        assert!(metrics.contains("limiter=\"tenant-api\",outcome=\"tenant-rate-limit-exceeded\""));
+
         mosquito_handle.abort();
         triage_handle.abort();
         upstream_handle.abort();
@@ -6436,6 +6510,17 @@ mod tests {
         assert_eq!(
             body["message"],
             "client package request rate limit exceeded"
+        );
+
+        let metrics = reqwest::get(format!("{base_url}/metrics"))
+            .await
+            .expect("metrics request")
+            .text()
+            .await
+            .expect("metrics text");
+        assert!(metrics.contains("aegiscudo_rate_limit_events_total"));
+        assert!(
+            metrics.contains("limiter=\"client-package\",outcome=\"client-rate-limit-exceeded\"")
         );
 
         mosquito_handle.abort();
@@ -6478,11 +6563,8 @@ mod tests {
     fn cargo_download_path_extracts_coordinate() {
         let config_id = Uuid::nil();
         let encoded = BASE64_URL_SAFE_NO_PAD.encode(b"api/v1/crates");
-        let signature = cargo_download_base_signature(
-            &TEST_CARGO_DOWNLOAD_MAC_KEY,
-            config_id,
-            "api/v1/crates",
-        );
+        let signature =
+            cargo_download_base_signature(&TEST_CARGO_DOWNLOAD_MAC_KEY, config_id, "api/v1/crates");
         let (kind, coordinate, explicit) = cargo_request_context(&format!(
             "{CARGO_DL_PROXY_PREFIX}/{encoded}/{signature}/serde/1.0.0/download"
         ))
@@ -6497,11 +6579,12 @@ mod tests {
     fn cargo_download_path_extracts_coordinate_without_crates_prefix() {
         let config_id = Uuid::nil();
         let encoded = BASE64_URL_SAFE_NO_PAD.encode(b"dl");
-        let signature = cargo_download_base_signature(&TEST_CARGO_DOWNLOAD_MAC_KEY, config_id, "dl");
+        let signature =
+            cargo_download_base_signature(&TEST_CARGO_DOWNLOAD_MAC_KEY, config_id, "dl");
         let (kind, coordinate, explicit) = cargo_request_context(&format!(
             "{CARGO_DL_PROXY_PREFIX}/{encoded}/{signature}/serde/1.0.0/download"
         ))
-            .expect("Cargo download path without crates prefix should normalize");
+        .expect("Cargo download path without crates prefix should normalize");
 
         assert_eq!(kind, PackageRequestKind::Artifact);
         assert_eq!(coordinate.purl(), "pkg:cargo/serde@1.0.0");
@@ -6528,12 +6611,18 @@ mod tests {
 
     #[test]
     fn cargo_sparse_path_rejects_non_index_three_segment_route() {
-        assert_eq!(cargo_request_context("api/v1/crates"), Err(StatusCode::BAD_REQUEST));
+        assert_eq!(
+            cargo_request_context("api/v1/crates"),
+            Err(StatusCode::BAD_REQUEST)
+        );
     }
 
     #[test]
     fn cargo_sparse_path_rejects_invalid_three_segment_layout() {
-        assert_eq!(cargo_request_context("foo/bar/baz"), Err(StatusCode::BAD_REQUEST));
+        assert_eq!(
+            cargo_request_context("foo/bar/baz"),
+            Err(StatusCode::BAD_REQUEST)
+        );
     }
 
     #[test]
@@ -6548,11 +6637,8 @@ mod tests {
     fn cargo_download_path_rejects_dot_segment_suffix_after_encoded_base() {
         let config_id = Uuid::nil();
         let encoded = BASE64_URL_SAFE_NO_PAD.encode(b"api/v1/crates");
-        let signature = cargo_download_base_signature(
-            &TEST_CARGO_DOWNLOAD_MAC_KEY,
-            config_id,
-            "api/v1/crates",
-        );
+        let signature =
+            cargo_download_base_signature(&TEST_CARGO_DOWNLOAD_MAC_KEY, config_id, "api/v1/crates");
         assert_eq!(
             cargo_request_context(&format!(
                 "{CARGO_DL_PROXY_PREFIX}/{encoded}/{signature}/../serde/1.0.0/download"
@@ -6565,11 +6651,8 @@ mod tests {
     fn cargo_download_path_rejects_invalid_semver_suffix() {
         let config_id = Uuid::nil();
         let encoded = BASE64_URL_SAFE_NO_PAD.encode(b"api/v1/crates");
-        let signature = cargo_download_base_signature(
-            &TEST_CARGO_DOWNLOAD_MAC_KEY,
-            config_id,
-            "api/v1/crates",
-        );
+        let signature =
+            cargo_download_base_signature(&TEST_CARGO_DOWNLOAD_MAC_KEY, config_id, "api/v1/crates");
         assert_eq!(
             cargo_request_context(&format!(
                 "{CARGO_DL_PROXY_PREFIX}/{encoded}/{signature}/serde/01.2.3/download"
@@ -6608,10 +6691,7 @@ mod tests {
         )
         .expect("upstream url");
 
-        assert_eq!(
-            body["dl"],
-            format!("{prefix}{encoded}")
-        );
+        assert_eq!(body["dl"], format!("{prefix}{encoded}"));
         assert_eq!(
             upstream.as_str(),
             "https://registry.example.invalid/dl/serde/1.0.0/download?token=abc#frag"
@@ -6633,9 +6713,7 @@ mod tests {
             RegistryAdapter::Cargo,
             "https://registry.example.invalid/sparse/index/",
             &[],
-            &format!(
-                "{CARGO_DL_PROXY_PREFIX}/{encoded}/{signature}/serde/1.0.0/download"
-            ),
+            &format!("{CARGO_DL_PROXY_PREFIX}/{encoded}/{signature}/serde/1.0.0/download"),
         )
         .expect("upstream url");
 
@@ -6715,21 +6793,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cargo_registry_config_cross_origin_absolute_download_base_is_allowed_when_origin_is_listed() {
+    async fn cargo_registry_config_cross_origin_absolute_download_base_is_allowed_when_origin_is_listed()
+     {
         let download_body = "cross-origin crate bytes";
         let sparse_checksum = hex::encode(Sha256::digest(download_body.as_bytes()));
         let (download_origin, download_paths, download_handle) =
             spawn_fake_body_upstream("application/octet-stream", download_body).await;
         let (triage_url, calls, triage_handle) =
             spawn_fake_triage(PolicyDecision::Allow, PolicyMode::Enforce, None).await;
-        let (upstream_url, upstream_paths, upstream_handle) = spawn_fake_cargo_configurable_upstream(
-            format!(r#"{{"dl":"{download_origin}/crates","api":"/api/v1"}}"#),
-            format!(
-                r#"{{"name":"serde","vers":"1.0.0","cksum":"{sparse_checksum}"}}"#
-            ),
-            None,
-        )
-        .await;
+        let (upstream_url, upstream_paths, upstream_handle) =
+            spawn_fake_cargo_configurable_upstream(
+                format!(r#"{{"dl":"{download_origin}/crates","api":"/api/v1"}}"#),
+                format!(r#"{{"name":"serde","vers":"1.0.0","cksum":"{sparse_checksum}"}}"#),
+                None,
+            )
+            .await;
         let mut config = config_with_adapter_upstream(
             "/proxy/cargo-public",
             PolicyMode::Enforce,
@@ -6795,13 +6873,16 @@ mod tests {
 
         assert_eq!(status, StatusCode::OK);
         assert_eq!(calls.load(Ordering::SeqCst), 0);
-        assert!(
-            dl.starts_with(&format!("{base_url}/proxy/cargo-public/{CARGO_DL_PROXY_PREFIX}/"))
+        assert!(dl.starts_with(&format!(
+            "{base_url}/proxy/cargo-public/{CARGO_DL_PROXY_PREFIX}/"
+        )));
+        assert!(api.starts_with(&format!(
+            "{base_url}/proxy/cargo-public/{CARGO_API_PROXY_PREFIX}/"
+        )));
+        assert_eq!(
+            upstream_paths.lock().expect("paths").as_slice(),
+            &["config.json".to_owned()]
         );
-        assert!(
-            api.starts_with(&format!("{base_url}/proxy/cargo-public/{CARGO_API_PROXY_PREFIX}/"))
-        );
-        assert_eq!(upstream_paths.lock().expect("paths").as_slice(), &["config.json".to_owned()]);
 
         mosquito_handle.abort();
         triage_handle.abort();
@@ -6812,11 +6893,8 @@ mod tests {
     async fn cargo_registry_config_rewrites_download_base_without_json_content_type() {
         let (triage_url, calls, triage_handle) =
             spawn_fake_triage(PolicyDecision::Allow, PolicyMode::Enforce, None).await;
-        let (upstream_url, upstream_paths, upstream_handle) = spawn_fake_body_upstream(
-            "text/plain",
-            r#"{"dl":"api/v1/crates","api":"."}"#,
-        )
-        .await;
+        let (upstream_url, upstream_paths, upstream_handle) =
+            spawn_fake_body_upstream("text/plain", r#"{"dl":"api/v1/crates","api":"."}"#).await;
         let config = config_with_adapter_upstream(
             "/proxy/cargo-public",
             PolicyMode::Enforce,
@@ -6837,13 +6915,16 @@ mod tests {
 
         assert_eq!(status, StatusCode::OK);
         assert_eq!(calls.load(Ordering::SeqCst), 0);
-        assert!(
-            dl.starts_with(&format!("{base_url}/proxy/cargo-public/{CARGO_DL_PROXY_PREFIX}/"))
+        assert!(dl.starts_with(&format!(
+            "{base_url}/proxy/cargo-public/{CARGO_DL_PROXY_PREFIX}/"
+        )));
+        assert!(api.starts_with(&format!(
+            "{base_url}/proxy/cargo-public/{CARGO_API_PROXY_PREFIX}/"
+        )));
+        assert_eq!(
+            upstream_paths.lock().expect("paths").as_slice(),
+            &["config.json".to_owned()]
         );
-        assert!(
-            api.starts_with(&format!("{base_url}/proxy/cargo-public/{CARGO_API_PROXY_PREFIX}/"))
-        );
-        assert_eq!(upstream_paths.lock().expect("paths").as_slice(), &["config.json".to_owned()]);
 
         mosquito_handle.abort();
         triage_handle.abort();
@@ -6935,11 +7016,9 @@ mod tests {
         let config_body: serde_json::Value = config_response.json().await.expect("config body");
         let api_base = config_body["api"].as_str().expect("api base");
 
-        let response = reqwest::get(format!(
-            "{api_base}/api/v1/crates?q=serde&per_page=5"
-        ))
-        .await
-        .expect("proxy request");
+        let response = reqwest::get(format!("{api_base}/api/v1/crates?q=serde&per_page=5"))
+            .await
+            .expect("proxy request");
         let status = response.status();
         let location = response
             .headers()
@@ -6953,10 +7032,7 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["ok"], true);
         assert_eq!(calls.load(Ordering::SeqCst), 0);
-        assert_eq!(
-            location,
-            format!("{api_base}/api/v1/crates/result")
-        );
+        assert_eq!(location, format!("{api_base}/api/v1/crates/result"));
         assert_eq!(
             upstream_paths.lock().expect("paths").as_slice(),
             &["config.json".to_owned(), "api/v1/crates".to_owned()]
@@ -7002,11 +7078,9 @@ mod tests {
         let config_body: serde_json::Value = config_response.json().await.expect("config body");
         let api_base = config_body["api"].as_str().expect("api base");
 
-        let response = reqwest::get(format!(
-            "{api_base}/api/v1/crates?q=serde&per_page=5"
-        ))
-        .await
-        .expect("proxy request");
+        let response = reqwest::get(format!("{api_base}/api/v1/crates?q=serde&per_page=5"))
+            .await
+            .expect("proxy request");
         let status = response.status();
         let body: serde_json::Value = response.json().await.expect("json body");
 
@@ -7038,10 +7112,8 @@ mod tests {
         let (triage_url, calls, triage_handle) =
             spawn_fake_triage(PolicyDecision::Allow, PolicyMode::Enforce, None).await;
         let (upstream_url, upstream_paths, requests, upstream_handle) =
-            spawn_fake_cargo_api_upstream_with_config(
-                r#"{"dl":"api/v1/crates","api":"/api/v1"}"#,
-            )
-            .await;
+            spawn_fake_cargo_api_upstream_with_config(r#"{"dl":"api/v1/crates","api":"/api/v1"}"#)
+                .await;
         let config = config_with_adapter_upstream(
             "/proxy/cargo-public",
             PolicyMode::Enforce,
@@ -7058,11 +7130,9 @@ mod tests {
         let config_body: serde_json::Value = config_response.json().await.expect("config body");
         let api_base = config_body["api"].as_str().expect("api base");
 
-        let response = reqwest::get(format!(
-            "{api_base}/api/v1/crates?q=serde&per_page=5"
-        ))
-        .await
-        .expect("proxy request");
+        let response = reqwest::get(format!("{api_base}/api/v1/crates?q=serde&per_page=5"))
+            .await
+            .expect("proxy request");
         let status = response.status();
         let body: serde_json::Value = response.json().await.expect("json body");
 
@@ -7173,7 +7243,10 @@ mod tests {
         assert_eq!(status, StatusCode::NOT_FOUND);
         assert!(body.is_empty());
         assert_eq!(calls.load(Ordering::SeqCst), 0);
-        assert_eq!(upstream_paths.lock().expect("paths").as_slice(), &["config.json".to_owned()]);
+        assert_eq!(
+            upstream_paths.lock().expect("paths").as_slice(),
+            &["config.json".to_owned()]
+        );
         assert!(requests.lock().expect("requests").is_empty());
 
         mosquito_handle.abort();
@@ -7185,12 +7258,9 @@ mod tests {
     async fn cargo_registry_config_not_found_preserves_upstream_status() {
         let (triage_url, calls, triage_handle) =
             spawn_fake_triage(PolicyDecision::Allow, PolicyMode::Enforce, None).await;
-        let (upstream_url, upstream_paths, upstream_handle) = spawn_fake_status_body_upstream(
-            StatusCode::NOT_FOUND,
-            "text/plain",
-            "missing config",
-        )
-        .await;
+        let (upstream_url, upstream_paths, upstream_handle) =
+            spawn_fake_status_body_upstream(StatusCode::NOT_FOUND, "text/plain", "missing config")
+                .await;
         let config = config_with_adapter_upstream(
             "/proxy/cargo-public",
             PolicyMode::Enforce,
@@ -7210,7 +7280,10 @@ mod tests {
         assert_eq!(status, StatusCode::NOT_FOUND);
         assert_eq!(body, "missing config");
         assert_eq!(calls.load(Ordering::SeqCst), 0);
-        assert_eq!(upstream_paths.lock().expect("paths").as_slice(), &["config.json".to_owned()]);
+        assert_eq!(
+            upstream_paths.lock().expect("paths").as_slice(),
+            &["config.json".to_owned()]
+        );
 
         mosquito_handle.abort();
         triage_handle.abort();
@@ -7366,12 +7439,9 @@ mod tests {
     async fn cargo_sparse_not_found_preserves_upstream_status() {
         let (triage_url, calls, triage_handle) =
             spawn_fake_triage(PolicyDecision::Allow, PolicyMode::Enforce, None).await;
-        let (upstream_url, _upstream_paths, upstream_handle) = spawn_fake_status_body_upstream(
-            StatusCode::NOT_FOUND,
-            "text/plain",
-            "crate not found",
-        )
-        .await;
+        let (upstream_url, _upstream_paths, upstream_handle) =
+            spawn_fake_status_body_upstream(StatusCode::NOT_FOUND, "text/plain", "crate not found")
+                .await;
         let config = config_with_adapter_upstream(
             "/proxy/cargo-public",
             PolicyMode::Enforce,
@@ -7849,7 +7919,11 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
 
         let digests = requested_digests.lock().expect("digests");
-        assert_eq!(digests.len(), 1, "expected exactly 1 triage call: {digests:?}");
+        assert_eq!(
+            digests.len(),
+            1,
+            "expected exactly 1 triage call: {digests:?}"
+        );
         assert_eq!(
             digests[0],
             Some(expected_sha256_hex),
@@ -7990,9 +8064,13 @@ mod tests {
             reqwest::get(format!("{first_base_url}/proxy/cargo-public/config.json"))
                 .await
                 .expect("first config request");
-        let first_config_body: serde_json::Value =
-            first_config_response.json().await.expect("first config body");
-        let first_download_base = first_config_body["dl"].as_str().expect("first download base");
+        let first_config_body: serde_json::Value = first_config_response
+            .json()
+            .await
+            .expect("first config body");
+        let first_download_base = first_config_body["dl"]
+            .as_str()
+            .expect("first download base");
         let first_download_url = url::Url::parse(first_download_base).expect("first download url");
 
         first_mosquito_handle.abort();
@@ -8008,10 +8086,13 @@ mod tests {
             reqwest::get(format!("{second_base_url}/proxy/cargo-public/config.json"))
                 .await
                 .expect("second config request");
-        let second_config_body: serde_json::Value =
-            second_config_response.json().await.expect("second config body");
-        let second_download_base =
-            second_config_body["dl"].as_str().expect("second download base");
+        let second_config_body: serde_json::Value = second_config_response
+            .json()
+            .await
+            .expect("second config body");
+        let second_download_base = second_config_body["dl"]
+            .as_str()
+            .expect("second download base");
         let second_download_url =
             url::Url::parse(second_download_base).expect("second download url");
 
@@ -8070,9 +8151,13 @@ mod tests {
             reqwest::get(format!("{first_base_url}/proxy/cargo-public/config.json"))
                 .await
                 .expect("first config request");
-        let first_config_body: serde_json::Value =
-            first_config_response.json().await.expect("first config body");
-        let first_download_base = first_config_body["dl"].as_str().expect("first download base");
+        let first_config_body: serde_json::Value = first_config_response
+            .json()
+            .await
+            .expect("first config body");
+        let first_download_base = first_config_body["dl"]
+            .as_str()
+            .expect("first download base");
         let first_download_url = url::Url::parse(first_download_base).expect("first download url");
 
         first_mosquito_handle.abort();
@@ -8088,10 +8173,13 @@ mod tests {
             reqwest::get(format!("{second_base_url}/proxy/cargo-public/config.json"))
                 .await
                 .expect("second config request");
-        let second_config_body: serde_json::Value =
-            second_config_response.json().await.expect("second config body");
-        let second_download_base =
-            second_config_body["dl"].as_str().expect("second download base");
+        let second_config_body: serde_json::Value = second_config_response
+            .json()
+            .await
+            .expect("second config body");
+        let second_download_base = second_config_body["dl"]
+            .as_str()
+            .expect("second download base");
         let second_download_url =
             url::Url::parse(second_download_base).expect("second download url");
 
@@ -8173,14 +8261,13 @@ mod tests {
         let redirect_location = format!("{download_origin}/crates/serde/1.0.0/download");
         let (triage_url, calls, triage_handle) =
             spawn_fake_triage(PolicyDecision::Allow, PolicyMode::Enforce, None).await;
-        let (upstream_url, upstream_paths, upstream_handle) = spawn_fake_cargo_configurable_upstream(
-            r#"{"dl":"api/v1/crates","api":"/api/v1"}"#.to_owned(),
-            format!(
-                r#"{{"name":"serde","vers":"1.0.0","cksum":"{sparse_checksum}"}}"#
-            ),
-            Some(redirect_location),
-        )
-        .await;
+        let (upstream_url, upstream_paths, upstream_handle) =
+            spawn_fake_cargo_configurable_upstream(
+                r#"{"dl":"api/v1/crates","api":"/api/v1"}"#.to_owned(),
+                format!(r#"{{"name":"serde","vers":"1.0.0","cksum":"{sparse_checksum}"}}"#),
+                Some(redirect_location),
+            )
+            .await;
         let mut config = config_with_adapter_upstream(
             "/proxy/cargo-public",
             PolicyMode::Enforce,
@@ -8231,8 +8318,7 @@ mod tests {
         let (triage_url, calls, triage_handle) =
             spawn_fake_triage(PolicyDecision::Allow, PolicyMode::Enforce, None).await;
         let (upstream_url, upstream_paths, upstream_handle) =
-            spawn_fake_cargo_download_status_upstream(StatusCode::NOT_FOUND, "missing crate")
-                .await;
+            spawn_fake_cargo_download_status_upstream(StatusCode::NOT_FOUND, "missing crate").await;
         let config = config_with_adapter_upstream(
             "/proxy/cargo-public",
             PolicyMode::Enforce,
@@ -8276,11 +8362,12 @@ mod tests {
     async fn cargo_download_server_error_preserves_upstream_status() {
         let (triage_url, calls, triage_handle) =
             spawn_fake_triage(PolicyDecision::Allow, PolicyMode::Enforce, None).await;
-        let (upstream_url, upstream_paths, upstream_handle) = spawn_fake_cargo_download_status_upstream(
-            StatusCode::BAD_GATEWAY,
-            "upstream download failed",
-        )
-        .await;
+        let (upstream_url, upstream_paths, upstream_handle) =
+            spawn_fake_cargo_download_status_upstream(
+                StatusCode::BAD_GATEWAY,
+                "upstream download failed",
+            )
+            .await;
         let config = config_with_adapter_upstream(
             "/proxy/cargo-public",
             PolicyMode::Enforce,
@@ -8337,9 +8424,8 @@ mod tests {
 
         let encoded = BASE64_URL_SAFE_NO_PAD.encode(b"https://evil.example.invalid/dl");
         let signature = "forged";
-        let artifact_path = format!(
-            "{CARGO_DL_PROXY_PREFIX}/{encoded}/{signature}/serde/1.0.0/download"
-        );
+        let artifact_path =
+            format!("{CARGO_DL_PROXY_PREFIX}/{encoded}/{signature}/serde/1.0.0/download");
         let response = reqwest::get(format!("{base_url}/proxy/cargo-public/{artifact_path}"))
             .await
             .expect("proxy request");
@@ -8373,9 +8459,8 @@ mod tests {
 
         let forged_base = format!("{upstream_url}/private/crates");
         let encoded = BASE64_URL_SAFE_NO_PAD.encode(forged_base.as_bytes());
-        let artifact_path = format!(
-            "{CARGO_DL_PROXY_PREFIX}/{encoded}/forged/serde/1.0.0/download"
-        );
+        let artifact_path =
+            format!("{CARGO_DL_PROXY_PREFIX}/{encoded}/forged/serde/1.0.0/download");
         let response = reqwest::get(format!("{base_url}/proxy/cargo-public/{artifact_path}"))
             .await
             .expect("proxy request");
@@ -8435,14 +8520,23 @@ mod tests {
     fn cargo_api_request_headers_only_forward_allowlisted_values() {
         let mut source = HeaderMap::new();
         source.insert(ACCEPT, HeaderValue::from_static("application/json"));
-        source.insert(AUTHORIZATION, HeaderValue::from_static("Bearer cargo-client-token"));
-        source.insert(CONTENT_TYPE, HeaderValue::from_static("application/octet-stream"));
+        source.insert(
+            AUTHORIZATION,
+            HeaderValue::from_static("Bearer cargo-client-token"),
+        );
+        source.insert(
+            CONTENT_TYPE,
+            HeaderValue::from_static("application/octet-stream"),
+        );
         source.insert(USER_AGENT, HeaderValue::from_static("cargo/1.89.0"));
         source.insert(
             HeaderName::from_static("cargo-protocol"),
             HeaderValue::from_static("version=1"),
         );
-        source.insert(HeaderName::from_static("cookie"), HeaderValue::from_static("secret"));
+        source.insert(
+            HeaderName::from_static("cookie"),
+            HeaderValue::from_static("secret"),
+        );
         source.insert(
             HeaderName::from_static("x-forwarded-for"),
             HeaderValue::from_static("127.0.0.1"),
@@ -8452,7 +8546,10 @@ mod tests {
         copy_cargo_api_request_headers(&source, &mut forwarded);
 
         assert_eq!(forwarded.len(), 5);
-        assert_eq!(forwarded.get(ACCEPT), Some(&HeaderValue::from_static("application/json")));
+        assert_eq!(
+            forwarded.get(ACCEPT),
+            Some(&HeaderValue::from_static("application/json"))
+        );
         assert_eq!(
             forwarded.get(AUTHORIZATION),
             Some(&HeaderValue::from_static("Bearer cargo-client-token"))
@@ -8532,9 +8629,11 @@ mod tests {
         let (base_url, mosquito_handle) =
             spawn_mosquito(store, &triage_url, ProxyRateLimitConfig::default()).await;
 
-        let response = reqwest::get(format!("{base_url}/proxy/generic-artifacts/some/artifact.tar.gz"))
-            .await
-            .expect("proxy request");
+        let response = reqwest::get(format!(
+            "{base_url}/proxy/generic-artifacts/some/artifact.tar.gz"
+        ))
+        .await
+        .expect("proxy request");
         let status = response.status();
         let body = response.text().await.expect("artifact body");
 
@@ -8606,9 +8705,11 @@ mod tests {
         let (base_url, mosquito_handle) =
             spawn_mosquito(store, &triage_url, ProxyRateLimitConfig::default()).await;
 
-        let response = reqwest::get(format!("{base_url}/proxy/generic-artifacts/cacheable.tar.gz"))
-            .await
-            .expect("proxy request");
+        let response = reqwest::get(format!(
+            "{base_url}/proxy/generic-artifacts/cacheable.tar.gz"
+        ))
+        .await
+        .expect("proxy request");
         let status = response.status();
         let headers = response.headers().clone();
         let body = response.text().await.expect("artifact body");
@@ -8672,7 +8773,11 @@ mod tests {
                         Some("sig=two") => "artifact-two",
                         _ => "artifact-default",
                     };
-                    (StatusCode::OK, [(CONTENT_TYPE, "application/octet-stream")], body)
+                    (
+                        StatusCode::OK,
+                        [(CONTENT_TYPE, "application/octet-stream")],
+                        body,
+                    )
                 }
             }),
         );
@@ -8751,9 +8856,11 @@ mod tests {
         let (base_url, mosquito_handle) =
             spawn_mosquito(store, &triage_url, ProxyRateLimitConfig::default()).await;
 
-        let response = reqwest::get(format!("{base_url}/proxy/generic-artifacts/malicious.tar.gz"))
-            .await
-            .expect("proxy request");
+        let response = reqwest::get(format!(
+            "{base_url}/proxy/generic-artifacts/malicious.tar.gz"
+        ))
+        .await
+        .expect("proxy request");
         let status = response.status();
         let body: serde_json::Value = response.json().await.expect("json body");
 
@@ -8792,7 +8899,9 @@ mod tests {
             .build()
             .expect("client");
         let response = client
-            .head(format!("{base_url}/proxy/generic-artifacts/probe/artifact.tar.gz"))
+            .head(format!(
+                "{base_url}/proxy/generic-artifacts/probe/artifact.tar.gz"
+            ))
             .send()
             .await
             .expect("head request");
@@ -8911,15 +9020,16 @@ mod tests {
             .build()
             .expect("client");
         let response = client
-            .head(format!("{base_url}/proxy/generic-artifacts/probe/artifact.tar.gz"))
+            .head(format!(
+                "{base_url}/proxy/generic-artifacts/probe/artifact.tar.gz"
+            ))
             .send()
             .await
             .expect("head request");
 
         assert_eq!(response.status(), StatusCode::FOUND);
         assert_eq!(calls.load(Ordering::SeqCst), 0);
-        let expected_location =
-            format!("{base_url}/proxy/generic-artifacts/next/location.crate");
+        let expected_location = format!("{base_url}/proxy/generic-artifacts/next/location.crate");
         assert_eq!(
             response
                 .headers()
@@ -8960,14 +9070,18 @@ mod tests {
 
         let client = reqwest::Client::new();
         let first = client
-            .head(format!("{base_url}/proxy/generic-artifacts/probe/artifact.tar.gz"))
+            .head(format!(
+                "{base_url}/proxy/generic-artifacts/probe/artifact.tar.gz"
+            ))
             .send()
             .await
             .expect("first head request");
         assert_eq!(first.status(), StatusCode::OK);
 
         let second = client
-            .head(format!("{base_url}/proxy/generic-artifacts/probe/artifact.tar.gz"))
+            .head(format!(
+                "{base_url}/proxy/generic-artifacts/probe/artifact.tar.gz"
+            ))
             .send()
             .await
             .expect("second head request");
@@ -9011,32 +9125,36 @@ mod tests {
         let upstream_addr = listener.local_addr().expect("upstream addr");
         let upstream_router = Router::new().route(
             "/{*path}",
-            get(
-                move |method: Method, uri: Uri, Path(path): Path<String>| {
-                    let recorded_requests = Arc::clone(&get_requests);
-                    async move {
-                        recorded_requests.lock().expect("requests").push((
-                            method.as_str().to_owned(),
-                            path,
-                            uri.query().map(str::to_owned),
-                        ));
-                        (StatusCode::OK, [(CONTENT_TYPE, "application/octet-stream")], "head")
-                    }
-                },
-            )
-            .head(
-                move |method: Method, uri: Uri, Path(path): Path<String>| {
-                    let recorded_requests = Arc::clone(&head_requests);
-                    async move {
-                        recorded_requests.lock().expect("requests").push((
-                            method.as_str().to_owned(),
-                            path,
-                            uri.query().map(str::to_owned),
-                        ));
-                        (StatusCode::OK, [(CONTENT_TYPE, "application/octet-stream")], "head")
-                    }
-                },
-            ),
+            get(move |method: Method, uri: Uri, Path(path): Path<String>| {
+                let recorded_requests = Arc::clone(&get_requests);
+                async move {
+                    recorded_requests.lock().expect("requests").push((
+                        method.as_str().to_owned(),
+                        path,
+                        uri.query().map(str::to_owned),
+                    ));
+                    (
+                        StatusCode::OK,
+                        [(CONTENT_TYPE, "application/octet-stream")],
+                        "head",
+                    )
+                }
+            })
+            .head(move |method: Method, uri: Uri, Path(path): Path<String>| {
+                let recorded_requests = Arc::clone(&head_requests);
+                async move {
+                    recorded_requests.lock().expect("requests").push((
+                        method.as_str().to_owned(),
+                        path,
+                        uri.query().map(str::to_owned),
+                    ));
+                    (
+                        StatusCode::OK,
+                        [(CONTENT_TYPE, "application/octet-stream")],
+                        "head",
+                    )
+                }
+            }),
         );
         let upstream_handle = tokio::spawn(async move {
             axum::serve(listener, upstream_router)
@@ -9136,8 +9254,7 @@ mod tests {
                 "/{*path}",
                 get(
                     |AxumState(state): AxumState<FakeBodyUpstreamState>,
-                     Path(path): Path<String>|
-                     async move {
+                     Path(path): Path<String>| async move {
                         state.paths.lock().expect("paths").push(path);
                         (
                             StatusCode::OK,
@@ -9582,11 +9699,13 @@ aegiscudo-benign-cargo-fixture = { version = "1.0.0", registry = "aegiscudo-fixt
 "#,
         )
         .expect("write Cargo.toml");
-        fs::write(project_dir.join("src/main.rs"), "fn main() {}\n")
-            .expect("write src/main.rs");
+        fs::write(project_dir.join("src/main.rs"), "fn main() {}\n").expect("write src/main.rs");
 
         let manifest_path = project_dir.join("Cargo.toml");
-        let manifest_path = manifest_path.to_str().expect("manifest path utf8").to_owned();
+        let manifest_path = manifest_path
+            .to_str()
+            .expect("manifest path utf8")
+            .to_owned();
         let cargo_fetch_args = vec![
             "fetch".to_owned(),
             "--manifest-path".to_owned(),
@@ -9659,13 +9778,19 @@ aegiscudo-benign-cargo-fixture = { version = "1.0.0", registry = "aegiscudo-fixt
         assert_eq!(metadata_checksum_status, StatusCode::OK);
         let metadata_checksum_body =
             String::from_utf8(metadata_checksum_body).expect("maven metadata checksum utf8");
-        assert_eq!(metadata_checksum_body.trim(), "cad000fc0169276e723a8eb6cbcbe977834a34bc");
+        assert_eq!(
+            metadata_checksum_body.trim(),
+            "cad000fc0169276e723a8eb6cbcbe977834a34bc"
+        );
 
         let checksum_url = "http://127.0.0.1:18000/proxy/maven-fixtures/com/aegiscudo/fixtures/aegiscudo-benign-maven-fixture/1.0.0/aegiscudo-benign-maven-fixture-1.0.0.jar.sha1";
         let (checksum_status, checksum_body) = fetch_bytes(checksum_url);
         assert_eq!(checksum_status, StatusCode::OK);
         let checksum_body = String::from_utf8(checksum_body).expect("maven checksum utf8");
-        assert_eq!(checksum_body.trim(), "06cf236ade9a0d5c99758694040ec6b2d1264ba8");
+        assert_eq!(
+            checksum_body.trim(),
+            "06cf236ade9a0d5c99758694040ec6b2d1264ba8"
+        );
     }
 
     #[test]
@@ -9677,7 +9802,8 @@ aegiscudo-benign-cargo-fixture = { version = "1.0.0", registry = "aegiscudo-fixt
 
         let repo_arg = format!("-Dmaven.repo.local={}", maven_repo.display());
         let artifact_arg = "-Dartifact=com.aegiscudo.fixtures:aegiscudo-benign-maven-fixture:1.0.0";
-        let remote_repos_arg = "-DremoteRepositories=fixture::default::http://127.0.0.1:18000/proxy/maven-fixtures";
+        let remote_repos_arg =
+            "-DremoteRepositories=fixture::default::http://127.0.0.1:18000/proxy/maven-fixtures";
         let maven_args = vec![
             "-q",
             repo_arg.as_str(),
@@ -9696,7 +9822,11 @@ aegiscudo-benign-cargo-fixture = { version = "1.0.0", registry = "aegiscudo-fixt
         let jar_path = maven_repo.join(
             "com/aegiscudo/fixtures/aegiscudo-benign-maven-fixture/1.0.0/aegiscudo-benign-maven-fixture-1.0.0.jar",
         );
-        assert!(jar_path.is_file(), "downloaded jar missing at {}", jar_path.display());
+        assert!(
+            jar_path.is_file(),
+            "downloaded jar missing at {}",
+            jar_path.display()
+        );
         assert_eq!(
             fs::read(&jar_path).expect("read downloaded Maven fixture jar"),
             b"aegiscudo benign maven fixture jar bytes"
@@ -9848,10 +9978,11 @@ aegiscudo-benign-cargo-fixture = { version = "1.0.0", registry = "aegiscudo-fixt
         let (base_url, mosquito_handle) =
             spawn_mosquito(store, &triage_url, ProxyRateLimitConfig::default()).await;
 
-        let response =
-            reqwest::get(format!("{base_url}/proxy/maven-central/com/example/foo/foo/1.0/foo-1.0.jar"))
-                .await
-                .expect("proxy request");
+        let response = reqwest::get(format!(
+            "{base_url}/proxy/maven-central/com/example/foo/foo/1.0/foo-1.0.jar"
+        ))
+        .await
+        .expect("proxy request");
         let status = response.status();
         let advisory_header = response.headers().contains_key(ADVISORY_HEADER);
         let body = response.bytes().await.expect("artifact body");
@@ -9893,10 +10024,11 @@ aegiscudo-benign-cargo-fixture = { version = "1.0.0", registry = "aegiscudo-fixt
         let (base_url, mosquito_handle) =
             spawn_mosquito(store, &triage_url, ProxyRateLimitConfig::default()).await;
 
-        let response =
-            reqwest::get(format!("{base_url}/proxy/maven-central/com/example/foo/foo/1.0/foo-1.0.jar"))
-                .await
-                .expect("proxy request");
+        let response = reqwest::get(format!(
+            "{base_url}/proxy/maven-central/com/example/foo/foo/1.0/foo-1.0.jar"
+        ))
+        .await
+        .expect("proxy request");
         let status = response.status();
         let advisory_present = response.headers().contains_key(ADVISORY_HEADER);
         let body: serde_json::Value = response.json().await.expect("json body");
@@ -9932,10 +10064,11 @@ aegiscudo-benign-cargo-fixture = { version = "1.0.0", registry = "aegiscudo-fixt
         let (base_url, mosquito_handle) =
             spawn_mosquito(store, &triage_url, ProxyRateLimitConfig::default()).await;
 
-        let response =
-            reqwest::get(format!("{base_url}/proxy/maven-central/com/example/foo/foo/1.0/foo-1.0.pom"))
-                .await
-                .expect("proxy request");
+        let response = reqwest::get(format!(
+            "{base_url}/proxy/maven-central/com/example/foo/foo/1.0/foo-1.0.pom"
+        ))
+        .await
+        .expect("proxy request");
         let status = response.status();
         let body = response.text().await.expect("pom body");
 
@@ -9974,10 +10107,11 @@ aegiscudo-benign-cargo-fixture = { version = "1.0.0", registry = "aegiscudo-fixt
         let (base_url, mosquito_handle) =
             spawn_mosquito(store, &triage_url, ProxyRateLimitConfig::default()).await;
 
-        let response =
-            reqwest::get(format!("{base_url}/proxy/maven-central/com/example/foo/foo/maven-metadata.xml"))
-                .await
-                .expect("proxy request");
+        let response = reqwest::get(format!(
+            "{base_url}/proxy/maven-central/com/example/foo/foo/maven-metadata.xml"
+        ))
+        .await
+        .expect("proxy request");
         let status = response.status();
         let body = response.text().await.expect("metadata body");
 
@@ -10015,7 +10149,8 @@ aegiscudo-benign-cargo-fixture = { version = "1.0.0", registry = "aegiscudo-fixt
     }
 
     #[test]
-    fn maven_request_context_extracts_artifact_metadata_checksum_coordinate_for_multi_segment_group() {
+    fn maven_request_context_extracts_artifact_metadata_checksum_coordinate_for_multi_segment_group()
+     {
         let (kind, coordinate, explicit_version_or_integrity) = maven_request_context(
             "com/aegiscudo/fixtures/aegiscudo-benign-maven-fixture/maven-metadata.xml.sha1",
         )
@@ -10075,17 +10210,21 @@ aegiscudo-benign-cargo-fixture = { version = "1.0.0", registry = "aegiscudo-fixt
         let (base_url, mosquito_handle) =
             spawn_mosquito(store, &triage_url, ProxyRateLimitConfig::default()).await;
 
-        let response =
-            reqwest::get(format!("{base_url}/proxy/maven-central/com/example/foo/foo/1.0/foo-1.0.jar.sha1"))
-                .await
-                .expect("proxy request");
+        let response = reqwest::get(format!(
+            "{base_url}/proxy/maven-central/com/example/foo/foo/1.0/foo-1.0.jar.sha1"
+        ))
+        .await
+        .expect("proxy request");
         let status = response.status();
         let body = response.text().await.expect("checksum body");
 
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body, "abc123");
         assert_eq!(calls.load(Ordering::SeqCst), 1);
-        assert_eq!(requested_digests.lock().expect("digests").as_slice(), &[None]);
+        assert_eq!(
+            requested_digests.lock().expect("digests").as_slice(),
+            &[None]
+        );
         assert_eq!(
             upstream_paths.lock().expect("paths").as_slice(),
             &["com/example/foo/foo/1.0/foo-1.0.jar.sha1".to_owned()]
@@ -10133,8 +10272,14 @@ aegiscudo-benign-cargo-fixture = { version = "1.0.0", registry = "aegiscudo-fixt
     async fn maven_proxy_aar_and_war_artifacts_route_through_triage() {
         for ext in &["aar", "war", "ear"] {
             let (triage_url, calls, _requested_digests, triage_handle) =
-                spawn_fake_triage_response(PolicyDecision::Allow, PolicyMode::Enforce, None, None, false)
-                    .await;
+                spawn_fake_triage_response(
+                    PolicyDecision::Allow,
+                    PolicyMode::Enforce,
+                    None,
+                    None,
+                    false,
+                )
+                .await;
             let (upstream_url, upstream_paths, upstream_handle) =
                 spawn_fake_body_upstream("application/octet-stream", "artifact-bytes").await;
             let config = config_with_adapter_upstream(
@@ -10156,7 +10301,11 @@ aegiscudo-benign-cargo-fixture = { version = "1.0.0", registry = "aegiscudo-fixt
             let _ = response.bytes().await;
 
             assert_eq!(status, StatusCode::OK, "ext={ext}");
-            assert_eq!(calls.load(Ordering::SeqCst), 1, "ext={ext} must call triage");
+            assert_eq!(
+                calls.load(Ordering::SeqCst),
+                1,
+                "ext={ext} must call triage"
+            );
             assert_eq!(
                 upstream_paths.lock().expect("paths")[0],
                 format!("com/example/foo/foo/1.0/foo-1.0.{ext}"),
@@ -10172,9 +10321,14 @@ aegiscudo-benign-cargo-fixture = { version = "1.0.0", registry = "aegiscudo-fixt
     #[tokio::test]
     async fn maven_proxy_checksum_variants_are_metadata() {
         for suffix in &["sha256", "sha512", "asc"] {
-            let (triage_url, calls, requested_digests, triage_handle) =
-                spawn_fake_triage_response(PolicyDecision::Allow, PolicyMode::Enforce, None, None, false)
-                    .await;
+            let (triage_url, calls, requested_digests, triage_handle) = spawn_fake_triage_response(
+                PolicyDecision::Allow,
+                PolicyMode::Enforce,
+                None,
+                None,
+                false,
+            )
+            .await;
             let (upstream_url, upstream_paths, upstream_handle) =
                 spawn_fake_body_upstream("text/plain", "checksum-value").await;
             let config = config_with_adapter_upstream(
@@ -10197,8 +10351,16 @@ aegiscudo-benign-cargo-fixture = { version = "1.0.0", registry = "aegiscudo-fixt
 
             assert_eq!(status, StatusCode::OK, "suffix={suffix}");
             assert_eq!(body, "checksum-value", "suffix={suffix}");
-            assert_eq!(calls.load(Ordering::SeqCst), 1, "checksum suffix={suffix} must still call triage for metadata");
-            assert_eq!(requested_digests.lock().expect("digests").as_slice(), &[None], "suffix={suffix}");
+            assert_eq!(
+                calls.load(Ordering::SeqCst),
+                1,
+                "checksum suffix={suffix} must still call triage for metadata"
+            );
+            assert_eq!(
+                requested_digests.lock().expect("digests").as_slice(),
+                &[None],
+                "suffix={suffix}"
+            );
             assert_eq!(
                 upstream_paths.lock().expect("paths").as_slice(),
                 &[format!("com/example/foo/foo/1.0/foo-1.0.jar.{suffix}")],
@@ -10242,7 +10404,11 @@ aegiscudo-benign-cargo-fixture = { version = "1.0.0", registry = "aegiscudo-fixt
         let _ = response.bytes().await;
 
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(calls.load(Ordering::SeqCst), 1, "SNAPSHOT jar must call triage");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "SNAPSHOT jar must call triage"
+        );
         assert_eq!(
             upstream_paths.lock().expect("paths")[0],
             "com/example/foo/foo/1.0-SNAPSHOT/foo-1.0-SNAPSHOT.jar"
@@ -10347,7 +10513,11 @@ aegiscudo-benign-cargo-fixture = { version = "1.0.0", registry = "aegiscudo-fixt
 
         assert_eq!(status, StatusCode::OK, "matching sha1 must be allowed");
         assert_eq!(body.as_ref(), jar_bytes.as_slice());
-        assert_eq!(calls.load(Ordering::SeqCst), 1, "triage called once for jar");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "triage called once for jar"
+        );
         let paths = upstream_paths.lock().expect("paths").clone();
         assert!(
             paths.contains(&"com/example/foo/foo/1.0/foo-1.0.jar".to_owned()),

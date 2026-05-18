@@ -1,0 +1,22 @@
+{
+  "id": "00000000-0000-0000-0000-000000000906",
+  "schema_version": "webhook-event/v1",
+  "event_type": "critical_detection.created",
+  "tenant_ref": "tenant-acme-prod-01",
+  "occurred_at": "2026-05-18T18:30:00Z",
+  "trace_id": "trace-webhook-sensitive-value",
+  "severity": "critical",
+  "summary": "Sensitive-looking values cannot be exported under harmless keys.",
+  "subject": {
+    "kind": "artifact",
+    "id": "artifact/sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "display": "artifact sha256:dddddddddddd"
+  },
+  "metadata": {
+    "note": "Bearer abcdefghijklmnopqrstuvwxyz0123456789"
+  },
+  "redaction": {
+    "profile": "external-webhook-v1",
+    "omitted_fields": ["raw_package"]
+  }
+}

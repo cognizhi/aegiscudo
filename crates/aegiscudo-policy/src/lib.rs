@@ -113,7 +113,10 @@ pub enum SignalPolicyAction {
     Hitl,
 }
 
-fn scorecard_policy_outcome(input: &PolicyInput, rationale: &mut Vec<String>) -> Option<PolicyDecision> {
+fn scorecard_policy_outcome(
+    input: &PolicyInput,
+    rationale: &mut Vec<String>,
+) -> Option<PolicyDecision> {
     let mut warn = false;
     let mut hitl = false;
     let mut block = false;

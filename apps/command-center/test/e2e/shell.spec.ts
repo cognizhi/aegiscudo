@@ -23,6 +23,9 @@ test("dashboard shell renders seeded investigation workflow", async ({ page }) =
   await expect(
     page.getByRole("row", { name: /Temporary analyst review bypass/ }),
   ).toContainText("Local Admin");
+  await expect(
+    page.getByRole("row", { name: /Request lacked incident justification/ }),
+  ).toContainText("DENIED");
   await expect(page.getByText("Quarantine 1")).toBeVisible();
   await expect(page.getByText("Block 1")).toBeVisible();
   await expect(page.getByLabel("Quarantine queue").getByRole("table")).toContainText("trace-block-003");
@@ -142,15 +145,19 @@ test("platform admin can review live seeded AI provider and audit views", async 
 
   await page.getByRole("button", { name: "Audit Log" }).click();
   await expect(page.getByRole("heading", { name: "Audit Log" })).toBeVisible();
+
+  await page.getByLabel("Action").fill("analysis.summary.completed");
   const summaryRow = page.getByRole("row", {
     name: /analysis\.summary\.completed.*analysis-job\/018f4a6f-55d0-7000-8000-000000000802/,
   });
+  await expect(summaryRow).toBeVisible();
+  await expect(summaryRow.getByText("system/fixture-seed")).toBeVisible();
+
+  await page.getByLabel("Action").fill("package-request.recorded");
   const requestRow = page.getByRole("row", {
     name: /package-request\.recorded.*package-request\/018f4a6f-55d0-7000-8000-000000000502/,
   });
-  await expect(summaryRow).toBeVisible();
   await expect(requestRow).toBeVisible();
-  await expect(summaryRow.getByText("system/fixture-seed")).toBeVisible();
 });
 
 test("breadcrumb has WCAG-compliant semantic structure and updates on navigation", async ({ page }) => {

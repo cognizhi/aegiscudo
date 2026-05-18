@@ -610,7 +610,7 @@ export interface components {
         };
         PackageCoordinateSummary: {
             /** @enum {string} */
-            ecosystem: "npm" | "pypi" | "cargo" | "maven" | "docker-oci" | "generic-http" | "githubactions";
+            ecosystem: "npm" | "pypi" | "cargo" | "maven" | "docker-oci" | "generic-http" | "githubactions" | "vscode-extension";
             name: string;
             version?: string;
             namespace?: string;
@@ -1006,7 +1006,7 @@ export interface components {
             /** @default 30 */
             lookback_days: number;
             /** @enum {string} */
-            ecosystem?: "npm" | "pypi" | "cargo" | "maven" | "docker-oci" | "generic-http" | "githubactions";
+            ecosystem?: "npm" | "pypi" | "cargo" | "maven" | "docker-oci" | "generic-http" | "githubactions" | "vscode-extension";
             /** @default 50 */
             limit: number;
         };
@@ -1047,7 +1047,7 @@ export interface components {
             target_latest_version: string;
             lookback_days: number;
             /** @enum {string} */
-            ecosystem?: "npm" | "pypi" | "cargo" | "maven" | "docker-oci" | "generic-http" | "githubactions";
+            ecosystem?: "npm" | "pypi" | "cargo" | "maven" | "docker-oci" | "generic-http" | "githubactions" | "vscode-extension";
             replayed_request_count: number;
             changed_request_count: number;
             baseline_counts: components["schemas"]["PolicyDecisionCounts"];

@@ -45,3 +45,10 @@ output.txt
 *.log
 run_test_script.py
 *.tgz
+
+# Root-level local scratch artifacts
+/diff.patch
+/diff_report.txt
+/diff_output.txt
+/maven_tree.txt
+/sbom.json

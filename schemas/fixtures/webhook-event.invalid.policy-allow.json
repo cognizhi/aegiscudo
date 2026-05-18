@@ -1,0 +1,22 @@
+{
+  "id": "00000000-0000-0000-0000-000000000903",
+  "schema_version": "webhook-event/v1",
+  "event_type": "policy_violation.detected",
+  "tenant_ref": "tenant-acme-prod-01",
+  "occurred_at": "2026-05-18T18:15:00Z",
+  "trace_id": "trace-webhook-policy-allow",
+  "severity": "warning",
+  "summary": "Policy violation event cannot carry an allow decision.",
+  "subject": {
+    "kind": "package",
+    "id": "pkg:npm/example@1.0.0",
+    "display": "npm:example@1.0.0"
+  },
+  "policy": {
+    "decision": "allow"
+  },
+  "redaction": {
+    "profile": "external-webhook-v1",
+    "omitted_fields": ["raw_package"]
+  }
+}

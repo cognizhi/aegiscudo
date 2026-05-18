@@ -46,6 +46,8 @@ class PackageEcosystem(StrEnum):
     MAVEN = "maven"
     DOCKER_OCI = "docker-oci"
     GENERIC_HTTP = "generic-http"
+    GITHUB_ACTIONS = "githubactions"
+    VSCODE_EXTENSION = "vscode-extension"
 
 
 class PolicyDecision(StrEnum):
@@ -257,6 +259,47 @@ class AttestationEvidence(StrictModel):
     verified_at: datetime
     verifier_version: Annotated[str, Field(min_length=1)]
     raw_document_digest: ArtifactDigest
+    slsa_verified_levels: list[
+        Annotated[str, Field(pattern=r"^(SLSA_[A-Z_]+_LEVEL_(UNEVALUATED|[0-9]+)|FAILED)$")]
+    ] = Field(default_factory=list)
+    slsa_build_level: Annotated[int, Field(strict=True, ge=0, le=3)] | None = None
+    slsa_version: Annotated[str, Field(pattern=r"^[0-9]+\.[0-9]+$")] | None = None
+    vsa_verifier_id: Annotated[str, Field(min_length=1)] | None = None
+    vsa_resource_uri: Annotated[str, Field(min_length=1)] | None = None
+    vsa_policy_uri: Annotated[str, Field(min_length=1)] | None = None
+    vsa_dependency_levels: dict[
+        Annotated[str, Field(pattern=r"^(SLSA_[A-Z_]+_LEVEL_(UNEVALUATED|[0-9]+)|FAILED)$")],
+        Annotated[int, Field(strict=True, ge=0)],
+    ] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_slsa_fields(self) -> AttestationEvidence:
+        has_slsa_or_vsa_fields = bool(
+            self.slsa_verified_levels
+            or self.slsa_build_level is not None
+            or self.slsa_version is not None
+            or self._has_vsa_fields()
+        )
+        if has_slsa_or_vsa_fields and self.result != AttestationResult.PASS:
+            raise ValueError("SLSA and VSA fields require a passing attestation result")
+
+        if self.slsa_build_level is not None:
+            highest_level = _highest_supported_slsa_build_level(self.slsa_verified_levels)
+            if highest_level != self.slsa_build_level:
+                raise ValueError("slsa_build_level must match the highest supported SLSA Build Track level")
+
+        if self._has_vsa_fields() and self.predicate_type != "https://slsa.dev/verification_summary/v1":
+            raise ValueError("VSA fields require predicate_type https://slsa.dev/verification_summary/v1")
+
+        return self
+
+    def _has_vsa_fields(self) -> bool:
+        return bool(
+            self.vsa_verifier_id is not None
+            or self.vsa_resource_uri is not None
+            or self.vsa_policy_uri is not None
+            or self.vsa_dependency_levels
+        )
 
 
 class FeedSnapshot(StrictModel):
@@ -266,6 +309,25 @@ class FeedSnapshot(StrictModel):
     normalized_record_count: Annotated[int, Field(ge=0, strict=True)]
     snapshot_digest: ArtifactDigest
     last_success_at: datetime | None = None
+
+
+def _highest_supported_slsa_build_level(verified_levels: list[str]) -> int | None:
+    levels: list[int] = []
+    for level in verified_levels:
+        prefix = "SLSA_BUILD_LEVEL_"
+        if not level.startswith(prefix):
+            continue
+        value = level.removeprefix(prefix)
+        if value == "UNEVALUATED":
+            continue
+        try:
+            parsed = int(value)
+        except ValueError:
+            continue
+        if 0 <= parsed <= 3:
+            levels.append(parsed)
+
+    return max(levels) if levels else None
 
 
 class AuditEvent(StrictModel):

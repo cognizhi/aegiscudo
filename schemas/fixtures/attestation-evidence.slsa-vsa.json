@@ -1,0 +1,23 @@
+{
+  "coordinate": { "ecosystem": "docker-oci", "name": "ghcr.io/acme/widget", "version": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" },
+  "artifact_digest": { "algorithm": "sha256", "hex": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" },
+  "attestation_type": "slsa-verification-summary",
+  "predicate_type": "https://slsa.dev/verification_summary/v1",
+  "issuer": "https://verifier.aegiscudo.local",
+  "subject_digest": { "algorithm": "sha256", "hex": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" },
+  "result": "pass",
+  "verified_at": "2026-05-18T00:00:00Z",
+  "verifier_version": "0.1.0",
+  "raw_document_digest": { "algorithm": "sha256", "hex": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" },
+  "slsa_verified_levels": ["SLSA_BUILD_LEVEL_3"],
+  "slsa_build_level": 3,
+  "slsa_version": "1.2",
+  "vsa_verifier_id": "https://verifier.aegiscudo.local/build-verifier",
+  "vsa_resource_uri": "oci://ghcr.io/acme/widget@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "vsa_policy_uri": "https://policies.aegiscudo.local/slsa/build-level-3",
+  "vsa_dependency_levels": {
+    "SLSA_BUILD_LEVEL_3": 4,
+    "SLSA_BUILD_LEVEL_2": 7,
+    "SLSA_BUILD_LEVEL_1": 2
+  }
+}

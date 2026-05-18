@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
+use std::str::FromStr;
 
 use aegiscudo_core::{PackageCoordinate, PackageEcosystem, PolicyDecision};
 use anyhow::Context;
@@ -64,6 +65,13 @@ struct SbomRoot {
     purl: Option<String>,
     ecosystem: Option<PackageEcosystem>,
     bom_ref: String,
+    properties: Vec<SbomProperty>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SbomProperty {
+    name: String,
+    value: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -190,6 +198,7 @@ impl SbomDocument {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn load_sbom_document(
     lockfile: Option<&Path>,
     requirements: Option<&Path>,
@@ -228,6 +237,337 @@ pub(crate) fn load_sbom_document_from_inputs(
     }
 }
 
+pub(crate) fn load_docker_syft_sbom(
+    image: &str,
+    syft_json: &Value,
+) -> anyhow::Result<SbomDocument> {
+    let image_ref = parse_docker_image_reference(image)?;
+    let coordinate = PackageCoordinate::new(
+        PackageEcosystem::DockerOci,
+        image_ref.name,
+        image_ref.tag.or(image_ref.digest),
+        image_ref.namespace,
+    );
+    let purl = coordinate.purl();
+    let mut root = build_root(
+        coordinate.name,
+        coordinate.namespace,
+        coordinate.version,
+        Some(purl),
+        Some(PackageEcosystem::DockerOci),
+        Path::new(image),
+    );
+    root.properties = docker_root_properties(image, syft_json);
+
+    let artifacts = syft_json
+        .get("artifacts")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow::anyhow!("Syft JSON output did not include an artifacts array"))?;
+    let mut components_by_purl = BTreeMap::new();
+    for artifact in artifacts {
+        if let Some(component) = sbom_component_from_syft_artifact(artifact) {
+            components_by_purl
+                .entry(component.coordinate.purl())
+                .or_insert(component);
+        }
+    }
+    let components = components_by_purl.into_values().collect::<Vec<_>>();
+    let mut dependency_map = default_dependency_map(&root, &components);
+    if let Some(root_dependencies) = dependency_map.get_mut(&root.bom_ref) {
+        root_dependencies.extend(
+            components
+                .iter()
+                .map(|component| component.bom_ref().to_owned()),
+        );
+    }
+
+    Ok(finalize_document_from_source(
+        image.to_owned(),
+        root,
+        components,
+        dependency_map,
+    ))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DockerImageReference {
+    namespace: Option<String>,
+    name: String,
+    tag: Option<String>,
+    digest: Option<String>,
+}
+
+fn parse_docker_image_reference(value: &str) -> anyhow::Result<DockerImageReference> {
+    let value = value.trim();
+    if value.is_empty() {
+        anyhow::bail!("Docker image reference must not be empty");
+    }
+
+    let (reference, digest) = if let Some((reference, digest)) = value.split_once('@') {
+        let digest = digest.trim();
+        if !valid_sha256_digest(digest) {
+            anyhow::bail!(
+                "Docker image digest must be formatted as sha256:<64 lowercase hex characters>"
+            );
+        }
+        (reference.trim(), Some(digest.to_owned()))
+    } else {
+        (value, None)
+    };
+
+    let (repository, tag) = split_docker_repository_and_tag(reference, digest.is_none())?;
+
+    if repository.is_empty() || repository.contains('@') {
+        anyhow::bail!("Docker image repository must not be empty");
+    }
+    let mut segments = repository
+        .split('/')
+        .filter(|segment| !segment.trim().is_empty())
+        .collect::<Vec<_>>();
+    let name = segments
+        .pop()
+        .ok_or_else(|| anyhow::anyhow!("Docker image repository must include a name"))?
+        .to_owned();
+    let namespace = (!segments.is_empty()).then(|| segments.join("/"));
+
+    Ok(DockerImageReference {
+        namespace,
+        name,
+        tag,
+        digest,
+    })
+}
+
+fn split_docker_repository_and_tag(
+    reference: &str,
+    tag_required: bool,
+) -> anyhow::Result<(&str, Option<String>)> {
+    let last_slash = reference.rfind('/');
+    let last_colon = reference.rfind(':');
+    let Some(colon) = last_colon.filter(|colon| last_slash.map_or(true, |slash| *colon > slash))
+    else {
+        if tag_required {
+            anyhow::bail!("Docker image reference must include a tag or digest");
+        }
+        return Ok((reference.trim(), None));
+    };
+    let repository = reference[..colon].trim();
+    let tag = reference[colon + 1..].trim();
+    if tag.is_empty() {
+        anyhow::bail!("Docker image tag must not be empty");
+    }
+
+    Ok((repository, Some(tag.to_owned())))
+}
+
+fn valid_sha256_digest(value: &str) -> bool {
+    let Some(hex) = value.strip_prefix("sha256:") else {
+        return false;
+    };
+    hex.len() == 64
+        && hex
+            .chars()
+            .all(|character| matches!(character, '0'..='9' | 'a'..='f'))
+}
+
+fn docker_root_properties(image: &str, syft_json: &Value) -> Vec<SbomProperty> {
+    let mut properties = vec![sbom_property("aegiscudo:image_reference", image)];
+    for (name, pointer) in [
+        ("aegiscudo:image_id", "/source/metadata/imageID"),
+        (
+            "aegiscudo:manifest_digest",
+            "/source/metadata/manifestDigest",
+        ),
+        ("aegiscudo:config_digest", "/source/metadata/config/digest"),
+    ] {
+        if let Some(value) = syft_json.pointer(pointer).and_then(Value::as_str) {
+            properties.push(sbom_property(name, value));
+        }
+    }
+    if let Some(repo_digests) = syft_json
+        .pointer("/source/metadata/repoDigests")
+        .and_then(Value::as_array)
+    {
+        for repo_digest in repo_digests.iter().filter_map(Value::as_str) {
+            properties.push(sbom_property("aegiscudo:repo_digest", repo_digest));
+        }
+    }
+    if let Some(layers) = syft_json
+        .pointer("/source/metadata/layers")
+        .and_then(Value::as_array)
+    {
+        for layer_digest in layers
+            .iter()
+            .filter_map(|layer| layer.get("digest"))
+            .filter_map(Value::as_str)
+        {
+            properties.push(sbom_property("aegiscudo:layer_digest", layer_digest));
+        }
+    }
+
+    properties
+}
+
+fn sbom_component_from_syft_artifact(artifact: &Value) -> Option<SbomComponent> {
+    if let Some(purl) = artifact.get("purl").and_then(Value::as_str) {
+        if let Some(coordinate) = package_coordinate_from_purl(purl) {
+            return Some(build_syft_component(artifact, coordinate));
+        }
+    }
+
+    let name = artifact.get("name")?.as_str()?.trim();
+    if name.is_empty() {
+        return None;
+    }
+    let package_type = artifact.get("type")?.as_str()?;
+    let ecosystem = package_ecosystem_from_syft_type(package_type)?;
+    let namespace = if ecosystem == PackageEcosystem::Maven {
+        syft_maven_group_id(artifact)
+    } else {
+        None
+    };
+    let coordinate = PackageCoordinate::new(
+        ecosystem,
+        name.to_owned(),
+        artifact
+            .get("version")
+            .and_then(Value::as_str)
+            .filter(|version| !version.trim().is_empty())
+            .map(str::to_owned),
+        namespace,
+    );
+    Some(build_syft_component(artifact, coordinate))
+}
+
+fn build_syft_component(artifact: &Value, coordinate: PackageCoordinate) -> SbomComponent {
+    let integrity = syft_artifact_integrity(artifact);
+    let hash = parse_standard_hash(integrity.as_deref());
+    SbomComponent {
+        reference: coordinate.purl(),
+        coordinate,
+        source: artifact
+            .get("type")
+            .and_then(Value::as_str)
+            .map(|package_type| format!("syft:{package_type}")),
+        integrity,
+        hash,
+        decision: None,
+        decision_timestamp: None,
+    }
+}
+
+fn package_coordinate_from_purl(purl: &str) -> Option<PackageCoordinate> {
+    let raw = purl.trim().strip_prefix("pkg:")?;
+    let (package_type, remainder) = raw.split_once('/')?;
+    let ecosystem = PackageEcosystem::from_str(package_type).ok()?;
+    if !matches!(
+        ecosystem,
+        PackageEcosystem::Npm
+            | PackageEcosystem::Pypi
+            | PackageEcosystem::Cargo
+            | PackageEcosystem::Maven
+    ) {
+        return None;
+    }
+    let remainder = remainder
+        .split_once('#')
+        .map_or(remainder, |(main, _)| main)
+        .split_once('?')
+        .map_or_else(
+            || {
+                remainder
+                    .split_once('#')
+                    .map_or(remainder, |(main, _)| main)
+            },
+            |(main, _)| main,
+        );
+    let (path_part, version) = match remainder.rsplit_once('@') {
+        Some((path, version)) if !version.trim().is_empty() => {
+            (path, Some(percent_decode(version)?))
+        }
+        _ => (remainder, None),
+    };
+    let mut path_segments = path_part
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .map(percent_decode)
+        .collect::<Option<Vec<_>>>()?;
+    let name = path_segments.pop()?.trim().to_owned();
+    if name.is_empty() {
+        return None;
+    }
+    let namespace = if path_segments.is_empty() {
+        None
+    } else {
+        let namespace = path_segments.join("/");
+        Some(if ecosystem == PackageEcosystem::Npm {
+            namespace.trim_start_matches('@').to_owned()
+        } else {
+            namespace
+        })
+    };
+
+    Some(PackageCoordinate::new(ecosystem, name, version, namespace))
+}
+
+fn package_ecosystem_from_syft_type(package_type: &str) -> Option<PackageEcosystem> {
+    match package_type {
+        "npm" | "javascript" | "node-module" => Some(PackageEcosystem::Npm),
+        "python" | "python-package" | "pypi" => Some(PackageEcosystem::Pypi),
+        "rust" | "cargo" => Some(PackageEcosystem::Cargo),
+        "java-archive" | "maven" => Some(PackageEcosystem::Maven),
+        _ => None,
+    }
+}
+
+fn syft_maven_group_id(artifact: &Value) -> Option<String> {
+    artifact
+        .pointer("/metadata/pomProperties/groupId")
+        .or_else(|| artifact.pointer("/metadata/groupId"))
+        .and_then(Value::as_str)
+        .filter(|group_id| !group_id.trim().is_empty())
+        .map(str::to_owned)
+}
+
+fn syft_artifact_integrity(artifact: &Value) -> Option<String> {
+    artifact
+        .pointer("/metadata/checksum")
+        .and_then(Value::as_str)
+        .filter(|checksum| valid_sha256_digest(checksum))
+        .map(str::to_owned)
+}
+
+fn percent_decode(value: &str) -> Option<String> {
+    let bytes = value.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0usize;
+
+    while index < bytes.len() {
+        if bytes[index] == b'%' {
+            if index + 2 >= bytes.len() {
+                return None;
+            }
+            let hex = std::str::from_utf8(&bytes[index + 1..index + 3]).ok()?;
+            let value = u8::from_str_radix(hex, 16).ok()?;
+            decoded.push(value);
+            index += 3;
+            continue;
+        }
+
+        decoded.push(bytes[index]);
+        index += 1;
+    }
+
+    String::from_utf8(decoded).ok()
+}
+
+fn sbom_property(name: &str, value: &str) -> SbomProperty {
+    SbomProperty {
+        name: name.to_owned(),
+        value: value.to_owned(),
+    }
+}
+
 pub(crate) fn parse_maven_coordinate(coord: &str) -> Option<(String, String, String)> {
     let parts: Vec<&str> = coord.splitn(7, ':').collect();
     // Expected formats:
@@ -247,7 +587,11 @@ pub(crate) fn parse_maven_coordinate(coord: &str) -> Option<(String, String, Str
     if group_id.is_empty() || artifact_id.is_empty() || version.is_empty() {
         return None;
     }
-    Some((group_id.to_owned(), artifact_id.to_owned(), version.to_owned()))
+    Some((
+        group_id.to_owned(),
+        artifact_id.to_owned(),
+        version.to_owned(),
+    ))
 }
 
 fn maven_coordinate_has_classifier(coord: &str) -> bool {
@@ -898,7 +1242,9 @@ fn load_maven_dependency_tree_sbom(path: &Path) -> anyhow::Result<SbomDocument> 
         components
             .entry(reference.clone())
             .or_insert_with(|| build_maven_component(reference.clone(), coordinate.clone()));
-        dependency_map.entry(reference.clone()).or_insert_with(BTreeSet::new);
+        dependency_map
+            .entry(reference.clone())
+            .or_insert_with(BTreeSet::new);
 
         if depth > parent_stack.len() {
             anyhow::bail!(
@@ -1016,6 +1362,20 @@ fn merge_optional_requirement_value<T: Eq>(current: Option<T>, next: Option<T>) 
 fn finalize_document(
     source: &Path,
     root: SbomRoot,
+    components: Vec<SbomComponent>,
+    dependency_map: BTreeMap<String, BTreeSet<String>>,
+) -> SbomDocument {
+    finalize_document_from_source(
+        source.display().to_string(),
+        root,
+        components,
+        dependency_map,
+    )
+}
+
+fn finalize_document_from_source(
+    source: String,
+    root: SbomRoot,
     mut components: Vec<SbomComponent>,
     dependency_map: BTreeMap<String, BTreeSet<String>>,
 ) -> SbomDocument {
@@ -1031,7 +1391,7 @@ fn finalize_document(
     let document_uuid = Uuid::new_v4();
 
     SbomDocument {
-        source: source.display().to_string(),
+        source,
         root,
         generated_at,
         serial_number: format!("urn:uuid:{}", document_uuid),
@@ -2063,10 +2423,7 @@ fn editable_project_name_from_setup_cfg(project_root: &Path) -> Option<String> {
         if !in_metadata {
             continue;
         }
-        let Some((key, value)) = trimmed
-            .split_once('=')
-            .or_else(|| trimmed.split_once(':'))
-        else {
+        let Some((key, value)) = trimmed.split_once('=').or_else(|| trimmed.split_once(':')) else {
             continue;
         };
         if key.trim().eq_ignore_ascii_case("name") {
@@ -2423,6 +2780,7 @@ fn build_root(
         purl: purl.clone(),
         ecosystem,
         bom_ref: purl.unwrap_or(fallback_ref),
+        properties: Vec::new(),
     }
 }
 
@@ -2676,6 +3034,12 @@ fn root_properties(root: &SbomRoot, source: &str, generated_at: &str) -> Vec<Val
             "value": ecosystem.to_string(),
         }));
     }
+    properties.extend(root.properties.iter().map(|property| {
+        json!({
+            "name": property.name,
+            "value": property.value,
+        })
+    }));
 
     properties
 }
@@ -2926,8 +3290,36 @@ checksum = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
         )
         .unwrap();
 
-        let document =
-            load_sbom_document_from_inputs(None, None, Some(path.as_path())).unwrap();
+        let document = load_sbom_document_from_inputs(None, None, Some(path.as_path())).unwrap();
+        serde_json::from_str(&render_sbom(&document, format).unwrap()).unwrap()
+    }
+
+    fn sample_docker_syft_json() -> Value {
+        json!({
+            "source": {
+                "metadata": {
+                    "imageID": format!("sha256:{}", "a".repeat(64)),
+                    "manifestDigest": format!("sha256:{}", "b".repeat(64)),
+                    "repoDigests": [format!("ghcr.io/acme/demo@sha256:{}", "b".repeat(64))],
+                    "layers": [
+                        { "digest": format!("sha256:{}", "c".repeat(64)) },
+                        { "digest": format!("sha256:{}", "d".repeat(64)) }
+                    ]
+                }
+            },
+            "artifacts": [
+                { "name": "@babel/core", "version": "7.29.0", "type": "npm", "purl": "pkg:npm/%40babel/core@7.29.0" },
+                { "name": "requests", "version": "2.32.0", "type": "python", "purl": "pkg:pypi/requests@2.32.0" },
+                { "name": "serde", "version": "1.0.228", "type": "rust", "purl": "pkg:cargo/serde@1.0.228" },
+                { "name": "spring-core", "version": "6.1.0", "type": "java-archive", "purl": "pkg:maven/org.springframework/spring-core@6.1.0" },
+                { "name": "busybox", "version": "1.36.1", "type": "apk", "purl": "pkg:apk/alpine/busybox@1.36.1" }
+            ]
+        })
+    }
+
+    fn render_sample_docker_syft(format: SbomFormat) -> Value {
+        let syft_json = sample_docker_syft_json();
+        let document = load_docker_syft_sbom("ghcr.io/acme/demo:1.0.0", &syft_json).unwrap();
         serde_json::from_str(&render_sbom(&document, format).unwrap()).unwrap()
     }
 
@@ -3835,10 +4227,14 @@ checksum = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
         let root = &rendered["metadata"]["component"];
         let root_ref = root["bom-ref"].as_str().unwrap();
         let dependencies = rendered["dependencies"].as_array().unwrap();
-        let spring_core_ref =
-            find_component_ref_by_purl(components, "pkg:maven/org.springframework/spring-core@6.1.0");
-        let spring_jcl_ref =
-            find_component_ref_by_purl(components, "pkg:maven/org.springframework/spring-jcl@6.1.0");
+        let spring_core_ref = find_component_ref_by_purl(
+            components,
+            "pkg:maven/org.springframework/spring-core@6.1.0",
+        );
+        let spring_jcl_ref = find_component_ref_by_purl(
+            components,
+            "pkg:maven/org.springframework/spring-jcl@6.1.0",
+        );
         let databind_ref = find_component_ref_by_purl(
             components,
             "pkg:maven/com.fasterxml.jackson.core/jackson-databind@2.17.2",
@@ -3870,6 +4266,76 @@ checksum = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
     }
 
     #[test]
+    fn docker_syft_sbom_preserves_image_metadata_and_supported_components() {
+        let rendered = render_sample_docker_syft(SbomFormat::CyclonedxJson);
+        let root = &rendered["metadata"]["component"];
+        let properties = root["properties"].as_array().unwrap();
+        let components = rendered["components"].as_array().unwrap();
+        let dependencies = rendered["dependencies"].as_array().unwrap();
+        let root_ref = root["bom-ref"].as_str().unwrap();
+        let npm_ref = find_component_ref_by_purl(components, "pkg:npm/babel/core@7.29.0");
+        let pypi_ref = find_component_ref_by_purl(components, "pkg:pypi/requests@2.32.0");
+        let cargo_ref = find_component_ref_by_purl(components, "pkg:cargo/serde@1.0.228");
+        let maven_ref = find_component_ref_by_purl(
+            components,
+            "pkg:maven/org.springframework/spring-core@6.1.0",
+        );
+
+        assert_eq!(root["purl"], "pkg:docker-oci/ghcr.io/acme/demo@1.0.0");
+        assert!(properties.iter().any(|property| {
+            property["name"] == "aegiscudo:manifest_digest"
+                && property["value"] == format!("sha256:{}", "b".repeat(64))
+        }));
+        assert_eq!(
+            properties
+                .iter()
+                .filter(|property| property["name"] == "aegiscudo:layer_digest")
+                .count(),
+            2
+        );
+        assert!(
+            !components
+                .iter()
+                .any(|component| component["purl"].as_str().unwrap_or("").contains("busybox"))
+        );
+        assert_dependency(
+            dependencies,
+            root_ref,
+            &[cargo_ref, maven_ref, npm_ref, pypi_ref],
+        );
+    }
+
+    #[test]
+    fn docker_syft_sbom_parses_mixed_tag_digest_image_reference() {
+        let digest = format!("sha256:{}", "e".repeat(64));
+        let syft_json = sample_docker_syft_json();
+        let document = load_docker_syft_sbom(
+            &format!("registry.local:5000/team/app:1.2.3@{digest}"),
+            &syft_json,
+        )
+        .unwrap();
+        let rendered: Value =
+            serde_json::from_str(&render_sbom(&document, SbomFormat::CyclonedxJson).unwrap())
+                .unwrap();
+
+        assert_eq!(
+            rendered["metadata"]["component"]["purl"],
+            "pkg:docker-oci/registry.local:5000/team/app@1.2.3"
+        );
+    }
+
+    #[test]
+    fn docker_syft_sbom_output_validates_against_official_schemas() {
+        let cyclonedx_17 = render_sample_docker_syft(SbomFormat::CyclonedxJson);
+        let cyclonedx_16 = render_sample_docker_syft(SbomFormat::Cyclonedx16Json);
+        let spdx_23 = render_sample_docker_syft(SbomFormat::Spdx23Json);
+
+        validate_instance_against_schema(cyclonedx_17_schema(), &cyclonedx_17, "CycloneDX 1.7");
+        validate_instance_against_schema(cyclonedx_16_schema(), &cyclonedx_16, "CycloneDX 1.6");
+        validate_instance_against_schema(spdx_23_schema(), &spdx_23, "SPDX 2.3");
+    }
+
+    #[test]
     fn maven_sbom_rejects_missing_root_coordinate() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("dependency-tree.txt");
@@ -3881,7 +4347,11 @@ checksum = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
 
         let error = load_sbom_document_from_inputs(None, None, Some(path.as_path())).unwrap_err();
 
-        assert!(error.to_string().contains("no Maven project coordinate found"));
+        assert!(
+            error
+                .to_string()
+                .contains("no Maven project coordinate found")
+        );
     }
 
     #[test]
@@ -3896,9 +4366,11 @@ checksum = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
 
         let error = load_sbom_document_from_inputs(None, None, Some(path.as_path())).unwrap_err();
 
-        assert!(error
-            .to_string()
-            .contains("unsupported multi-module Maven dependency tree"));
+        assert!(
+            error
+                .to_string()
+                .contains("unsupported multi-module Maven dependency tree")
+        );
     }
 
     #[test]
@@ -3921,9 +4393,9 @@ checksum = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
             rendered["metadata"]["component"]["purl"],
             "pkg:maven/com.example/demo-app@1.0.0"
         );
-        assert!(components
-            .iter()
-            .any(|component| component["purl"] == "pkg:maven/org.springframework/spring-core@6.1.0"));
+        assert!(components.iter().any(
+            |component| component["purl"] == "pkg:maven/org.springframework/spring-core@6.1.0"
+        ));
     }
 
     #[test]
@@ -3983,13 +4455,15 @@ checksum = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
             serde_json::from_str(&render_sbom(&document, SbomFormat::CyclonedxJson).unwrap())
                 .unwrap();
         let components = rendered["components"].as_array().unwrap();
-        let spring_core_ref =
-            find_component_ref_by_purl(components, "pkg:maven/org.springframework/spring-core@6.1.0");
+        let spring_core_ref = find_component_ref_by_purl(
+            components,
+            "pkg:maven/org.springframework/spring-core@6.1.0",
+        );
         let dependencies = rendered["dependencies"].as_array().unwrap();
 
-        assert!(components
-            .iter()
-            .all(|component| component["purl"] != "pkg:maven/commons-logging/commons-logging@1.1.1"));
+        assert!(components.iter().all(
+            |component| component["purl"] != "pkg:maven/commons-logging/commons-logging@1.1.1"
+        ));
         assert_dependency(dependencies, spring_core_ref, &[]);
     }
 
@@ -4008,18 +4482,22 @@ checksum = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
             serde_json::from_str(&render_sbom(&document, SbomFormat::CyclonedxJson).unwrap())
                 .unwrap();
         let components = rendered["components"].as_array().unwrap();
-        let commons_logging_ref = find_component_ref_by_purl(
+        let commons_logging_ref =
+            find_component_ref_by_purl(components, "pkg:maven/commons-logging/commons-logging@1.2");
+        let spring_core_ref = find_component_ref_by_purl(
             components,
-            "pkg:maven/commons-logging/commons-logging@1.2",
+            "pkg:maven/org.springframework/spring-core@6.1.0",
         );
-        let spring_core_ref =
-            find_component_ref_by_purl(components, "pkg:maven/org.springframework/spring-core@6.1.0");
         let root_ref = rendered["metadata"]["component"]["bom-ref"]
             .as_str()
             .unwrap();
         let dependencies = rendered["dependencies"].as_array().unwrap();
 
-        assert_dependency(dependencies, root_ref, &[commons_logging_ref, spring_core_ref]);
+        assert_dependency(
+            dependencies,
+            root_ref,
+            &[commons_logging_ref, spring_core_ref],
+        );
         assert_dependency(dependencies, spring_core_ref, &[commons_logging_ref]);
     }
 
@@ -4035,9 +4513,11 @@ checksum = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
 
         let error = load_sbom_document_from_inputs(None, None, Some(path.as_path())).unwrap_err();
 
-        assert!(error
-            .to_string()
-            .contains("unsupported Maven classifier-bearing dependency"));
+        assert!(
+            error
+                .to_string()
+                .contains("unsupported Maven classifier-bearing dependency")
+        );
     }
 
     #[test]
@@ -4052,9 +4532,11 @@ checksum = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
 
         let error = load_sbom_document_from_inputs(None, None, Some(path.as_path())).unwrap_err();
 
-        assert!(error
-            .to_string()
-            .contains("unsupported Maven non-jar dependency type"));
+        assert!(
+            error
+                .to_string()
+                .contains("unsupported Maven non-jar dependency type")
+        );
     }
 
     #[test]
@@ -4069,9 +4551,11 @@ checksum = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
 
         let error = load_sbom_document_from_inputs(None, None, Some(path.as_path())).unwrap_err();
 
-        assert!(error
-            .to_string()
-            .contains("unsupported Maven non-jar root type"));
+        assert!(
+            error
+                .to_string()
+                .contains("unsupported Maven non-jar root type")
+        );
     }
 
     #[test]
@@ -4089,9 +4573,11 @@ checksum = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
         )
         .unwrap_err();
 
-        assert!(error
-            .to_string()
-            .contains("choose exactly one of --lockfile, --requirements, or --dependency-tree"));
+        assert!(
+            error
+                .to_string()
+                .contains("choose exactly one of --lockfile, --requirements, or --dependency-tree")
+        );
     }
 
     #[test]
@@ -4704,7 +5190,11 @@ source = "git+https://example.invalid/serde?rev=deadbeef#deadbeef"
         let package_dir = dir.path().join("pkg");
         let root = dir.path().join("requirements.txt");
         fs::create_dir_all(&package_dir).unwrap();
-        fs::write(package_dir.join("setup.cfg"), "[metadata]\nname = Demo_Sbom_Extras\n").unwrap();
+        fs::write(
+            package_dir.join("setup.cfg"),
+            "[metadata]\nname = Demo_Sbom_Extras\n",
+        )
+        .unwrap();
         fs::write(&root, "--editable ./pkg[test]\n").unwrap();
 
         let document = load_sbom_document(None, Some(root.as_path())).unwrap();
@@ -4727,7 +5217,11 @@ source = "git+https://example.invalid/serde?rev=deadbeef#deadbeef"
         let package_dir = dir.path().join("pkg");
         let root = dir.path().join("requirements.txt");
         fs::create_dir_all(&package_dir).unwrap();
-        fs::write(package_dir.join("setup.cfg"), "[metadata]\nname = Demo_Sbom_Plain\n").unwrap();
+        fs::write(
+            package_dir.join("setup.cfg"),
+            "[metadata]\nname = Demo_Sbom_Plain\n",
+        )
+        .unwrap();
         fs::write(&root, "--editable ./pkg\n").unwrap();
 
         let document = load_sbom_document(None, Some(root.as_path())).unwrap();
@@ -4750,7 +5244,11 @@ source = "git+https://example.invalid/serde?rev=deadbeef#deadbeef"
         let package_dir = dir.path().join("pkg");
         let root = dir.path().join("requirements.txt");
         fs::create_dir_all(&package_dir).unwrap();
-        fs::write(package_dir.join("setup.cfg"), "[metadata]\nname: Demo_Sbom_Colon\n").unwrap();
+        fs::write(
+            package_dir.join("setup.cfg"),
+            "[metadata]\nname: Demo_Sbom_Colon\n",
+        )
+        .unwrap();
         fs::write(&root, "--editable ./pkg\n").unwrap();
 
         let document = load_sbom_document(None, Some(root.as_path())).unwrap();
@@ -4800,7 +5298,11 @@ source = "git+https://example.invalid/serde?rev=deadbeef#deadbeef"
         let package_dir = dir.path().join("pkg");
         let root = dir.path().join("requirements.txt");
         fs::create_dir_all(&package_dir).unwrap();
-        fs::write(package_dir.join("setup.cfg"), "[metadata]\nname = Demo_Sbom_File_Relative\n").unwrap();
+        fs::write(
+            package_dir.join("setup.cfg"),
+            "[metadata]\nname = Demo_Sbom_File_Relative\n",
+        )
+        .unwrap();
         fs::write(&root, "-e file:./pkg\n").unwrap();
 
         let document = load_sbom_document(None, Some(root.as_path())).unwrap();

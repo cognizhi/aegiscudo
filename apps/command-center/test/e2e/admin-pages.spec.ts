@@ -65,6 +65,18 @@ const mockAiProviders = [
     created_at: "2025-01-01T00:00:00Z",
     updated_at: "2025-06-01T00:00:00Z",
   },
+  {
+    id: "ai-0002",
+    tenant_id: tenantId,
+    display_name: "Public Local Provider",
+    provider_type: "ollama",
+    base_url: "https://example.com",
+    model_id: "llama3.1:8b",
+    is_local: true,
+    active: false,
+    created_at: "2025-01-01T00:00:00Z",
+    updated_at: "2025-06-01T00:00:00Z",
+  },
 ];
 
 const mockLlmUsage = {
@@ -234,6 +246,8 @@ test.describe("Admin: AI Providers", () => {
     await expect(providerRow.getByText("Local", { exact: true })).toBeVisible();
     await expect(providerRow.getByText("Active", { exact: true })).toBeVisible();
     await expect(page.getByText("http://localhost:11434")).toBeVisible();
+    const warningRow = page.getByRole("row", { name: /Public Local Provider/ });
+    await expect(warningRow.getByText("Boundary warning", { exact: true })).toBeVisible();
     // API key must never be shown
     await expect(page.getByText(/api.?key/i)).not.toBeVisible();
     await expect(page.getByText(/sk-/)).not.toBeVisible();

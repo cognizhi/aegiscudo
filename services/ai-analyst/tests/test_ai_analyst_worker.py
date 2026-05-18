@@ -30,6 +30,11 @@ class FakeTraceClient:
         return "langfuse-trace-123"
 
 
+class FailingTraceClient:
+    def record_generation(self, **kwargs: Any) -> str | None:
+        raise RuntimeError("langfuse unavailable")
+
+
 @dataclass
 class FakeRepository:
     job: AiAnalysisJob | None
@@ -104,6 +109,8 @@ def build_job() -> AiAnalysisJob:
 def build_provider(
     *,
     is_local: bool = True,
+    provider_type: str | None = None,
+    base_url: str | None = None,
     credential_env_var: str | None = None,
     credential_source: str | None = None,
     configured: bool = False,
@@ -112,8 +119,8 @@ def build_provider(
         id=uuid4(),
         tenant_id=uuid4(),
         display_name="local-preview" if is_local else "openrouter",
-        provider_type="ollama" if is_local else "openrouter",
-        base_url="http://localhost:11434" if is_local else "https://openrouter.ai/api/v1",
+        provider_type=provider_type or ("local-preview" if is_local else "openrouter"),
+        base_url=base_url or ("http://localhost:11434" if is_local else "https://openrouter.ai/api/v1"),
         model_id="test-model",
         credential_env_var=credential_env_var,
         credential_source=credential_source,
@@ -160,6 +167,25 @@ async def test_process_next_ai_job_persists_explanation_and_finalizes() -> None:
     assert repository.persisted_usage.redaction_complete is True
     assert repository.persisted_usage.langfuse_trace_id == "langfuse-trace-123"
     assert trace_client.calls[0]["session_id"] == str(job.id)
+    assert repository.failed is None
+
+
+@pytest.mark.asyncio
+async def test_process_next_ai_job_continues_when_langfuse_trace_fails() -> None:
+    job = build_job()
+    provider = build_provider()
+    repository = FakeRepository(
+        job=job,
+        provider=provider,
+        evidence={"static_indicators": [{"summary": "credential access detected"}]},
+    )
+
+    response = await process_next_ai_job(repository, trace_client=FailingTraceClient())
+
+    assert response.processed is True
+    assert response.state == "finalizing"
+    assert repository.persisted is not None
+    assert repository.persisted[5] is None
     assert repository.failed is None
 
 
@@ -239,6 +265,69 @@ async def test_process_next_ai_job_uses_openrouter_provider_output(
 
 
 @pytest.mark.asyncio
+async def test_process_next_ai_job_uses_local_openai_compatible_provider_output() -> None:
+    job = build_job()
+    provider = build_provider(
+        provider_type="ollama",
+        base_url="http://127.0.0.1:11434",
+    )
+    repository = FakeRepository(
+        job=job,
+        provider=provider,
+        evidence={"static_indicators": [{"summary": "install script opens a socket"}]},
+    )
+    observed_requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        observed_requests.append(request)
+        return httpx.Response(
+            200,
+            json={
+                "model": "llama3.1:8b",
+                "choices": [
+                    {
+                        "message": {
+                            "content": {
+                                "observed_behavior": ["Local provider saw a redacted install-script socket indicator."],
+                                "inference": ["Network activity during install is suspicious."],
+                                "limitations": ["Only redacted static evidence was supplied."],
+                            }
+                        }
+                    }
+                ],
+                "usage": {"prompt_tokens": 91, "completion_tokens": 34, "total_tokens": 125},
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
+        response = await process_next_ai_job(repository, http_client=http_client)
+
+    assert response.processed is True
+    assert response.state == "finalizing"
+    assert repository.persisted is not None
+    assert repository.persisted[2]["model"] == "llama3.1:8b"
+    assert repository.persisted_usage is not None
+    assert repository.persisted_usage.prompt_tokens == 91
+    assert observed_requests[0].url == httpx.URL("http://127.0.0.1:11434/v1/chat/completions")
+    assert "Authorization" not in observed_requests[0].headers
+
+
+@pytest.mark.asyncio
+async def test_process_next_ai_job_degrades_when_local_provider_url_is_public() -> None:
+    job = build_job()
+    provider = build_provider(provider_type="ollama", base_url="https://example.com")
+    repository = FakeRepository(job=job, provider=provider, evidence={"static_indicators": []})
+
+    response = await process_next_ai_job(repository)
+
+    assert response.processed is True
+    assert response.state == "finalizing"
+    assert response.explanation_id is None
+    assert repository.degraded is not None
+    assert repository.failed is None
+
+
+@pytest.mark.asyncio
 async def test_process_next_ai_job_degrades_on_openrouter_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -254,6 +343,44 @@ async def test_process_next_ai_job_degrades_on_openrouter_failure(
 
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(503, json={"error": {"message": "provider outage"}})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
+        response = await process_next_ai_job(repository, http_client=http_client)
+
+    assert response.processed is True
+    assert response.state == "finalizing"
+    assert response.explanation_id is None
+    assert repository.degraded is not None
+    assert repository.failed is None
+
+
+@pytest.mark.asyncio
+async def test_process_next_ai_job_degrades_on_invalid_provider_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    job = build_job()
+    provider = build_provider(
+        is_local=False,
+        credential_env_var="OPENROUTER_API_KEY",
+        credential_source="environment",
+        configured=True,
+    )
+    repository = FakeRepository(job=job, provider=provider, evidence={"static_indicators": []})
+    monkeypatch.setenv("OPENROUTER_API_KEY", "openrouter-secret")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "content": '{"observed_behavior":["Only one field is present."]}'
+                        }
+                    }
+                ]
+            },
+        )
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
         response = await process_next_ai_job(repository, http_client=http_client)
@@ -359,6 +486,13 @@ def test_validate_ai_explanation_schema_accepts_contract_payload() -> None:
 
 def test_validate_provider_credentials_accepts_local_provider() -> None:
     validate_provider_credentials(build_provider())
+
+
+def test_validate_provider_credentials_rejects_local_provider_userinfo() -> None:
+    provider = build_provider(base_url="http://token@127.0.0.1:11434")
+
+    with pytest.raises(RuntimeError, match="userinfo"):
+        validate_provider_credentials(provider)
 
 
 def test_validate_provider_credentials_requires_environment_secret(

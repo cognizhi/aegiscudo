@@ -39,6 +39,7 @@ pub enum PackageEcosystem {
     GenericHttp,
     #[serde(rename = "githubactions")]
     GithubActions,
+    VscodeExtension,
 }
 
 impl fmt::Display for PackageEcosystem {
@@ -51,6 +52,7 @@ impl fmt::Display for PackageEcosystem {
             Self::DockerOci => "docker-oci",
             Self::GenericHttp => "generic-http",
             Self::GithubActions => "githubactions",
+            Self::VscodeExtension => "vscode-extension",
         };
         formatter.write_str(value)
     }
@@ -72,6 +74,7 @@ impl FromStr for PackageEcosystem {
             "docker-oci" => Ok(Self::DockerOci),
             "generic-http" => Ok(Self::GenericHttp),
             "githubactions" => Ok(Self::GithubActions),
+            "vscode-extension" => Ok(Self::VscodeExtension),
             other => Err(ParsePackageEcosystemError(other.to_owned())),
         }
     }
@@ -457,6 +460,18 @@ pub enum AttestationResult {
     Unverifiable,
 }
 
+pub const SLSA_VSA_PREDICATE_TYPE: &str = "https://slsa.dev/verification_summary/v1";
+
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum AttestationEvidenceValidationError {
+    #[error("SLSA and VSA fields require a passing attestation result")]
+    SlsaFieldsRequirePassingResult,
+    #[error("SLSA build level must match the highest supported SLSA Build Track level")]
+    SlsaBuildLevelMismatch,
+    #[error("VSA fields require predicate_type https://slsa.dev/verification_summary/v1")]
+    VsaFieldsRequireVsaPredicate,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct AttestationEvidence {
     pub coordinate: PackageCoordinate,
@@ -469,6 +484,91 @@ pub struct AttestationEvidence {
     pub verified_at: DateTime<Utc>,
     pub verifier_version: String,
     pub raw_document_digest: ArtifactDigest,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub slsa_verified_levels: Vec<String>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_slsa_build_level_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub slsa_build_level: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub slsa_version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vsa_verifier_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vsa_resource_uri: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vsa_policy_uri: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub vsa_dependency_levels: BTreeMap<String, u64>,
+}
+
+impl AttestationEvidence {
+    pub fn validate_slsa_fields(&self) -> Result<(), AttestationEvidenceValidationError> {
+        if self.has_slsa_or_vsa_fields() && self.result != AttestationResult::Pass {
+            return Err(AttestationEvidenceValidationError::SlsaFieldsRequirePassingResult);
+        }
+
+        if let Some(level) = self.slsa_build_level {
+            if slsa_build_level_from_verified_levels(&self.slsa_verified_levels) != Some(level) {
+                return Err(AttestationEvidenceValidationError::SlsaBuildLevelMismatch);
+            }
+        }
+
+        if self.has_vsa_fields() && self.predicate_type != SLSA_VSA_PREDICATE_TYPE {
+            return Err(AttestationEvidenceValidationError::VsaFieldsRequireVsaPredicate);
+        }
+
+        Ok(())
+    }
+
+    fn has_slsa_or_vsa_fields(&self) -> bool {
+        !self.slsa_verified_levels.is_empty()
+            || self.slsa_build_level.is_some()
+            || self.slsa_version.is_some()
+            || self.has_vsa_fields()
+    }
+
+    fn has_vsa_fields(&self) -> bool {
+        self.vsa_verifier_id.is_some()
+            || self.vsa_resource_uri.is_some()
+            || self.vsa_policy_uri.is_some()
+            || !self.vsa_dependency_levels.is_empty()
+    }
+}
+
+fn deserialize_slsa_build_level_option<'de, D>(deserializer: D) -> Result<Option<u8>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Option::<u8>::deserialize(deserializer)?;
+    match value {
+        Some(level) if level > 3 => Err(D::Error::custom(
+            "slsa_build_level must be an integer from 0 through 3",
+        )),
+        _ => Ok(value),
+    }
+}
+
+pub fn slsa_build_level_from_verified_levels<I, S>(verified_levels: I) -> Option<u8>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    verified_levels
+        .into_iter()
+        .filter_map(|level| slsa_build_level_from_verified_level(level.as_ref()))
+        .max()
+}
+
+fn slsa_build_level_from_verified_level(level: &str) -> Option<u8> {
+    let value = level.strip_prefix("SLSA_BUILD_LEVEL_")?;
+    if value == "UNEVALUATED" {
+        return None;
+    }
+    let parsed = value.parse::<u8>().ok()?;
+    (parsed <= 3).then_some(parsed)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -523,8 +623,87 @@ mod tests {
 
     #[test]
     fn serde_rejects_invalid_ecosystem_and_decision() {
+        assert_eq!(
+            PackageEcosystem::from_str("vscode-extension").unwrap(),
+            PackageEcosystem::VscodeExtension
+        );
         assert!(serde_json::from_str::<PackageEcosystem>("\"rubygems\"").is_err());
         assert!(serde_json::from_str::<PolicyDecision>("\"BLOCK_UNKNOWN\"").is_err());
+    }
+
+    #[test]
+    fn slsa_build_level_parser_uses_highest_supported_build_level() {
+        assert_eq!(
+            slsa_build_level_from_verified_levels([
+                "SLSA_BUILD_LEVEL_1",
+                "SLSA_BUILD_LEVEL_3",
+                "SLSA_SOURCE_LEVEL_4",
+            ]),
+            Some(3)
+        );
+        assert_eq!(
+            slsa_build_level_from_verified_levels(["SLSA_BUILD_LEVEL_0"]),
+            Some(0)
+        );
+        assert_eq!(
+            slsa_build_level_from_verified_levels([
+                "SLSA_BUILD_LEVEL_UNEVALUATED",
+                "FAILED",
+                "CUSTOM_BUILD_LEVEL_4",
+                "SLSA_BUILD_LEVEL_4",
+            ]),
+            None
+        );
+    }
+
+    #[test]
+    fn attestation_evidence_rejects_out_of_range_slsa_build_level() {
+        let payload = r#"{
+            "coordinate": { "ecosystem": "npm", "name": "left-pad", "version": "1.3.0" },
+            "artifact_digest": { "algorithm": "sha256", "hex": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" },
+            "attestation_type": "slsa-verification-summary",
+            "predicate_type": "https://slsa.dev/verification_summary/v1",
+            "issuer": "https://verifier.aegiscudo.local",
+            "subject_digest": { "algorithm": "sha256", "hex": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" },
+            "result": "pass",
+            "verified_at": "2026-05-18T00:00:00Z",
+            "verifier_version": "0.1.0",
+            "raw_document_digest": { "algorithm": "sha256", "hex": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" },
+            "slsa_verified_levels": ["SLSA_BUILD_LEVEL_4"],
+            "slsa_build_level": 4
+        }"#;
+
+        assert!(serde_json::from_str::<AttestationEvidence>(payload).is_err());
+    }
+
+    #[test]
+    fn attestation_evidence_validates_slsa_field_consistency() {
+        let mut evidence: AttestationEvidence = serde_json::from_str(include_str!(
+            "../../../schemas/fixtures/attestation-evidence.slsa-vsa.json"
+        ))
+        .expect("fixture should deserialize");
+
+        assert!(evidence.validate_slsa_fields().is_ok());
+
+        evidence.result = AttestationResult::Fail;
+        assert_eq!(
+            evidence.validate_slsa_fields(),
+            Err(AttestationEvidenceValidationError::SlsaFieldsRequirePassingResult)
+        );
+
+        evidence.result = AttestationResult::Pass;
+        evidence.slsa_build_level = Some(2);
+        assert_eq!(
+            evidence.validate_slsa_fields(),
+            Err(AttestationEvidenceValidationError::SlsaBuildLevelMismatch)
+        );
+
+        evidence.slsa_build_level = Some(3);
+        evidence.predicate_type = "https://slsa.dev/provenance/v1".to_owned();
+        assert_eq!(
+            evidence.validate_slsa_fields(),
+            Err(AttestationEvidenceValidationError::VsaFieldsRequireVsaPredicate)
+        );
     }
 
     #[test]

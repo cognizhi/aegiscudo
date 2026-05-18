@@ -1459,6 +1459,7 @@ components:
             - docker-oci
             - generic-http
             - githubactions
+            - vscode-extension
         name:
           type: string
         version:
@@ -2398,6 +2399,7 @@ components:
             - docker-oci
             - generic-http
             - githubactions
+            - vscode-extension
         limit:
           type: integer
           default: 50
@@ -2519,6 +2521,7 @@ components:
             - docker-oci
             - generic-http
             - githubactions
+            - vscode-extension
         replayed_request_count:
           type: integer
         changed_request_count:

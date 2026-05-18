@@ -21,7 +21,10 @@ pub enum RegistryAdapter {
 
 impl RegistryAdapter {
     pub fn is_proxy_supported(self) -> bool {
-        matches!(self, Self::Npm | Self::Pypi | Self::Cargo | Self::Maven | Self::GenericHttp)
+        matches!(
+            self,
+            Self::Npm | Self::Pypi | Self::Cargo | Self::Maven | Self::GenericHttp
+        )
     }
 }
 
@@ -312,7 +315,8 @@ fn normalize_registry_config(config: &mut RegistryConfig) -> Result<(), Registry
 }
 
 fn normalize_allowed_origin(origin: &str) -> Result<String, RegistryConfigError> {
-    let parsed = Url::parse(origin).map_err(|_| RegistryConfigError::InvalidCargoAllowedDownloadOrigin)?;
+    let parsed =
+        Url::parse(origin).map_err(|_| RegistryConfigError::InvalidCargoAllowedDownloadOrigin)?;
     if !matches!(parsed.scheme(), "http" | "https")
         || parsed.host_str().is_none()
         || !parsed.username().is_empty()

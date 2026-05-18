@@ -24,6 +24,7 @@ export const packageEcosystems = [
   "docker-oci",
   "generic-http",
   "githubactions",
+  "vscode-extension",
 ] as const;
 
 export type PackageEcosystem = (typeof packageEcosystems)[number];

@@ -22,6 +22,8 @@ const CRED_TYPE_LABELS: Record<string, string> = {
   azure_managed_identity: "Azure Managed Identity",
 };
 
+const WEBHOOK_CHANNELS = ["Slack", "PagerDuty", "Jira"] as const;
+
 function CredentialTypeIcon({ kind }: { kind: string }) {
   return (
     <span className="inline-flex items-center gap-1.5 text-xs">
@@ -167,13 +169,36 @@ export function IntegrationsPanel() {
   }
 
   return (
-    <section className="glow-panel">
-      <header className="flex items-center gap-2 border-b border-(--color-border) px-4 py-3 text-sm font-semibold">
-        <KeyRound size={16} className="text-(--color-accent)" />
-        Integrations &amp; Credentials
-      </header>
+    <section className="space-y-4">
+      <div className="glow-panel">
+        <header className="flex items-center gap-2 border-b border-(--color-border) px-4 py-3 text-sm font-semibold">
+          <Clock size={16} className="text-(--color-accent)" />
+          Notification Webhooks
+        </header>
+        <div className="grid gap-3 p-4 md:grid-cols-3">
+          {WEBHOOK_CHANNELS.map((channel) => (
+            <div key={channel} className="rounded-md border border-(--color-border) bg-white/3 px-4 py-3">
+              <div className="flex items-center justify-between gap-3">
+                <span className="text-sm font-semibold">{channel}</span>
+                <span className="rounded bg-white/10 px-2 py-0.5 text-[11px] uppercase tracking-[0.14em] text-(--color-muted)">
+                  coming soon
+                </span>
+              </div>
+              <div className="mt-3 text-xs leading-5 text-(--color-muted)">
+                Signed outbound events for overrides, critical detections, and policy violations.
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
 
-      <div className="p-4">
+      <div className="glow-panel">
+        <header className="flex items-center gap-2 border-b border-(--color-border) px-4 py-3 text-sm font-semibold">
+          <KeyRound size={16} className="text-(--color-accent)" />
+          Integrations &amp; Credentials
+        </header>
+
+        <div className="p-4">
         {isLoading && (
           <div className="py-8 text-center text-sm text-(--color-muted)">Loading credentials…</div>
         )}
@@ -215,6 +240,7 @@ export function IntegrationsPanel() {
             </table>
           </div>
         )}
+        </div>
       </div>
     </section>
   );

@@ -3,26 +3,27 @@ import { expect, test, type Page } from "@playwright/test";
 const tenantId = "018f4a6f-55d0-7000-8000-000000000001";
 const platformAdminActorId = "018f4a6f-55d0-7000-8000-000000000011";
 
-const mockRecords = [
-  {
-    id: "aaaaaaaa-0001-0001-0001-000000000001",
-    ecosystem: "npm",
-    namespace: null,
-    package_name: "evil-package",
-    package_version: "1.0.0",
-    indicator_type: "package-name",
-    indicator_value: "evil-package",
-  },
-  {
-    id: "aaaaaaaa-0001-0001-0001-000000000002",
-    ecosystem: "pypi",
-    namespace: null,
-    package_name: "malicious-lib",
-    package_version: null,
-    indicator_type: "maintainer-identity",
-    indicator_value: "bad-actor@example.com",
-  },
-];
+const packageNameRecord = {
+  id: "aaaaaaaa-0001-0001-0001-000000000001",
+  ecosystem: "npm",
+  namespace: null,
+  package_name: "evil-package",
+  package_version: "1.0.0",
+  indicator_type: "package-name",
+  indicator_value: "evil-package",
+};
+
+const maintainerRecord = {
+  id: "aaaaaaaa-0001-0001-0001-000000000002",
+  ecosystem: "pypi",
+  namespace: null,
+  package_name: "malicious-lib",
+  package_version: null,
+  indicator_type: "maintainer-identity",
+  indicator_value: "bad-actor@example.com",
+};
+
+const mockRecords = [packageNameRecord, maintainerRecord];
 
 const mockResponse = {
   records: mockRecords,
@@ -55,20 +56,20 @@ test.describe("Analysis: Cross-Ecosystem IOC Correlation", () => {
 
     await openEvidence(page);
 
-    await expect(page.getByTestId(`ioc-row-${mockRecords[0].id}`)).toBeVisible();
-    await expect(page.getByTestId(`ioc-row-${mockRecords[1].id}`)).toBeVisible();
+    await expect(page.getByTestId(`ioc-row-${packageNameRecord.id}`)).toBeVisible();
+    await expect(page.getByTestId(`ioc-row-${maintainerRecord.id}`)).toBeVisible();
 
     // actor header forwarded
     expect(capturedActorHeader).toBe(platformAdminActorId);
 
     // first row content
-    const row1 = page.getByTestId(`ioc-row-${mockRecords[0].id}`);
+    const row1 = page.getByTestId(`ioc-row-${packageNameRecord.id}`);
     await expect(row1.getByText("evil-package").first()).toBeVisible();
     await expect(row1.getByText("npm")).toBeVisible();
     await expect(row1.getByText("package-name", { exact: true })).toBeVisible();
 
     // second row content
-    const row2 = page.getByTestId(`ioc-row-${mockRecords[1].id}`);
+    const row2 = page.getByTestId(`ioc-row-${maintainerRecord.id}`);
     await expect(row2.getByText("bad-actor@example.com")).toBeVisible();
     await expect(row2.getByText("maintainer-identity", { exact: true })).toBeVisible();
     // no version => shows "any"
