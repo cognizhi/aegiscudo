@@ -12,7 +12,7 @@ jobs:
       matrix:
         service: [mosquito-net, triage-counter, surgeon, aegiscudo-api, ai-analyst, emergency-room, feed-harvester, command-center]
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Compute short SHA
         run: echo "SHORT_SHA=${GITHUB_SHA::7}" >> "$GITHUB_ENV"
       - uses: docker/setup-qemu-action@v4
